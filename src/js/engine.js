@@ -92,7 +92,8 @@
       llmKeySource: 'none',
       scopeReadme: true,
       scopeSettings: true,
-      scopeList: true,
+      scopeModName: true,
+      scopeModSummary: true,
       scopeChangelog: true,
       hoverDelayMs: 120,
       shortcutToggle: 'Alt+Q',
@@ -418,18 +419,43 @@
     'PRE', 'SECTION', 'SUMMARY', 'TABLE', 'TBODY', 'TD', 'TFOOT', 'TH',
     'THEAD', 'TR', 'UL'
   ]);
+  // Closed select hosts. antd 6 (the Windhawk 2.0 UI) no longer renders a
+  // `.ant-select-selector`; a single select's value is a text node inside
+  // `.ant-select-content`, which also carries the `title` attribute and holds
+  // the search `<input role="combobox">` as its last child. Its placeholder is
+  // a `.ant-select-placeholder` div in the same slot, and an option with its
+  // own className/style wraps the label in `.ant-select-content-value`.
+  // `.ant-select-selection-item` / `-placeholder` remain for antd 5 and for
+  // antd 6's multiple/tags mode. The search input is atomic in every case.
+  const SELECT_HOST_SELECTORS = [
+    '.ant-select-single .ant-select-content',
+    '.ant-select-content-value',
+    '.ant-select-placeholder',
+    '.ant-select-selection-item',
+    '.ant-select-selection-placeholder'
+  ];
+  const SELECT_HOST_SET = new Set(SELECT_HOST_SELECTORS);
   const SETTINGS_SELECTORS = [
     '[data-testid="mod-setting-description-text"]',
     '.ant-select-item-option-content',
-    '.ant-select-selection-item',
-    '.ant-select-selection-placeholder',
-    // Title first: the title claims the row, and a reset button nested in it is
-    // picked up by the dedicated nested pass below.
+    // The closed control's current value and placeholder live inside a form
+    // control that is otherwise atomic; only their text nodes are swapped, and
+    // the search input beside them is never touched.
+    ...SELECT_HOST_SELECTORS,
+    // The title claims the row before the description inside it; a reset button
+    // nested in the title is picked up by the dedicated nested pass below.
     '.windhawk-row-meta-title',
     '.windhawk-row-meta-description',
     '[data-testid="mod-setting-reset"]'
   ];
-  const LIST_SELECTORS = ['.windhawk-row-meta-title', '.windhawk-row-meta-description', '.ant-typography'];
+  // Mod names: the tile grid's title, the table view's name link, and the bare
+  // name div in the details header's Card.Meta title.
+  const NAME_LIST_SELECTORS = ['.windhawk-row-meta-title'];
+  // Mod summaries: the tile grid's description, the table's description cell
+  // (an antd Typography.Text) and the details header's Typography summary.
+  const SUMMARY_LIST_SELECTORS = ['.windhawk-row-meta-description', '.ant-typography'];
+  const MODS_TABLE_SEL = '[data-testid="installed-mods-table"]';
+  const ROW_SELECT_SEL = '[data-testid="mod-row-select"]';
 
   // Elements whose whole subtree is left alone. Everything else is either a
   // structural inline wrapper or an atomic placeholder (see serializeHost).
@@ -478,7 +504,9 @@
     if (surface === 'readme') return !!s.scopeReadme;
     if (surface === 'changelog') return !!s.scopeChangelog;
     if (surface === 'settings') return !!s.scopeSettings;
-    return !!s.scopeList;
+    if (surface === 'name') return !!s.scopeModName;
+    if (surface === 'summary') return !!s.scopeModSummary;
+    return !!s.scopeModSummary;
   }
 
   function classifyProse(body) {
@@ -535,6 +563,41 @@
     }
   }
 
+  // Debug-only trail for select hosts that the settings pass skipped. Off by
+  // default and capped per scan so a page full of selects cannot flood the log.
+  let debugSelectBudget = 0;
+
+  function debugSelectReject(el, sel, reason) {
+    if (!state.settings.debug || debugSelectBudget <= 0) return;
+    debugSelectBudget--;
+    let name = '?';
+    let text = '';
+    try {
+      name = String(el.tagName || '?').toLowerCase();
+      const cls = String(el.className || '').trim().split(/\s+/).slice(0, 2).join('.');
+      if (cls) name += '.' + cls;
+      text = String(el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40);
+    } catch (_) {
+      /* ignore */
+    }
+    log('select host rejected (' + reason + '): ' + sel + ' <' + name + '> "' + text + '"');
+  }
+
+  function settingsRejectReason(el) {
+    try {
+      if (el.closest('[' + ATTR_CLONE + '="1"]')) return 'inside our clone';
+      if (el.closest(DENY_ANCESTOR_SEL)) return 'denied ancestor';
+    } catch (_) {
+      return 'unreadable';
+    }
+    if (!eligibleHost(el)) return 'card head';
+    if (compactSurface(el) !== 'settings') return 'not a settings surface';
+    // A select host whose text sits one level deeper is fine (the serializer
+    // flattens inline wrappers); only a host with no text at all is skipped.
+    if (!hasText(el)) return hasDirectText(el) ? 'no text' : 'no direct text';
+    return '';
+  }
+
   // The mod details header (Card.Meta title) packs the mod name, the id chip,
   // the metadata line (version / author / process scope) and the action
   // buttons into one subtree. Only the summary Typography element there is
@@ -569,13 +632,95 @@
     }
   }
 
-  function eligibleHost(el) {
-    if (!el || el.nodeType !== 1) return false;
-    if (isCardHeadHost(el)) {
-      if (!isTypography(el)) return false;
-      if (hasSvgIcon(el)) return false;
+  // The details header's name is a bare div in the Card.Meta title, outside the
+  // Typography summary. It is the first div in the meta title that owns text
+  // directly: the metadata items hold their text in an icon-bearing Typography
+  // span and the id chip follows the name.
+  function detailsNameHosts() {
+    const out = [];
+    let metas = [];
+    try {
+      metas = Array.from(document.querySelectorAll('.ant-card-meta-title'));
+    } catch (_) {
+      return out;
     }
-    return true;
+    for (const meta of metas) {
+      if (!meta.closest('.ant-card-head') && !meta.closest('[data-testid="mod-details"]')) continue;
+      let divs = [];
+      try {
+        divs = Array.from(meta.querySelectorAll('div'));
+      } catch (_) {
+        divs = [];
+      }
+      for (const el of divs) {
+        if (el.closest('.ant-typography')) continue;
+        if (hasSvgIcon(el)) continue;
+        if (!hasDirectText(el)) continue;
+        if (!hasText(el)) continue;
+        out.push(el);
+        break;
+      }
+    }
+    return out;
+  }
+
+  // Every surface a mod name appears on: the tile grid's row title, the table
+  // view's name link and the details header's name div. Settings titles share
+  // the .windhawk-row-meta-title class; the settings pass claims them first and
+  // compactSurface keeps them out of the name pass.
+  function nameHosts() {
+    const out = [];
+    const add = (el) => {
+      if (el && out.indexOf(el) === -1) out.push(el);
+    };
+    try {
+      for (const a of document.querySelectorAll(MODS_TABLE_SEL + ' tbody a')) add(a);
+    } catch (_) {
+      /* ignore */
+    }
+    try {
+      for (const box of document.querySelectorAll(ROW_SELECT_SEL)) {
+        const cell = box.closest('td');
+        if (cell) add(cell.querySelector('a'));
+      }
+    } catch (_) {
+      /* ignore */
+    }
+    for (const sel of NAME_LIST_SELECTORS) {
+      try {
+        for (const el of document.querySelectorAll(sel)) {
+          // A row title inside a card head is part of the header's metadata,
+          // not a mod name; the name div is added by detailsNameHosts above.
+          if (el.closest('.ant-card-head')) continue;
+          add(el);
+        }
+      } catch (_) {
+        /* ignore */
+      }
+    }
+    for (const el of detailsNameHosts()) add(el);
+    return out;
+  }
+
+  function summaryHosts() {
+    const out = [];
+    for (const sel of SUMMARY_LIST_SELECTORS) {
+      try {
+        for (const el of document.querySelectorAll(sel)) {
+          if (out.indexOf(el) === -1) out.push(el);
+        }
+      } catch (_) {
+        /* ignore */
+      }
+    }
+    return out;
+  }
+
+  function eligibleHost(el, kind) {
+    if (!el || el.nodeType !== 1) return false;
+    if (!isCardHeadHost(el)) return true;
+    if (kind === 'name') return !isTypography(el) && !hasSvgIcon(el);
+    return isTypography(el) && !hasSvgIcon(el);
   }
 
   function hasDirectText(el) {
@@ -707,6 +852,7 @@
 
     // Settings surfaces: text-node swap, never a clone.
     if (state.settings.scopeSettings) {
+      debugSelectBudget = state.settings.debug ? 5 : 0;
       for (const sel of SETTINGS_SELECTORS) {
         let list = [];
         try {
@@ -714,13 +860,17 @@
         } catch (_) {
           list = [];
         }
+        const selectHost = SELECT_HOST_SET.has(sel);
         for (const el of list) {
-          if (el.closest('[' + ATTR_CLONE + '="1"]')) continue;
-          if (el.closest(DENY_ANCESTOR_SEL)) continue;
-          if (!eligibleHost(el)) continue;
-          if (compactSurface(el) !== 'settings') continue;
-          if (!hasText(el)) continue;
-          if (!claim(el)) continue;
+          const reason = settingsRejectReason(el);
+          if (reason) {
+            if (selectHost) debugSelectReject(el, sel, reason);
+            continue;
+          }
+          if (!claim(el)) {
+            if (selectHost) debugSelectReject(el, sel, 'already claimed');
+            continue;
+          }
           candidates.push({ el: el, mode: 'swap', surface: 'settings' });
         }
       }
@@ -745,24 +895,31 @@
       }
     }
 
-    // List surfaces: also swap.
-    if (state.settings.scopeList) {
-      for (const sel of LIST_SELECTORS) {
-        let list = [];
-        try {
-          list = Array.from(document.querySelectorAll(sel));
-        } catch (_) {
-          list = [];
-        }
-        for (const el of list) {
-          if (el.closest('[' + ATTR_CLONE + '="1"]')) continue;
-          if (el.closest(DENY_ANCESTOR_SEL)) continue;
-          if (!eligibleHost(el)) continue;
-          if (compactSurface(el) !== 'list') continue;
-          if (!hasText(el)) continue;
-          if (!claim(el)) continue;
-          candidates.push({ el: el, mode: 'swap', surface: 'list' });
-        }
+    // Mod names: tile grid title, table name link, details header name. Swap
+    // mode keeps the link/div in place and only replaces its text node.
+    if (scopeEnabled('name')) {
+      for (const el of nameHosts()) {
+        if (el.closest('[' + ATTR_CLONE + '="1"]')) continue;
+        if (el.closest(DENY_ANCESTOR_SEL)) continue;
+        if (!eligibleHost(el, 'name')) continue;
+        if (compactSurface(el) !== 'list') continue;
+        if (!hasText(el)) continue;
+        if (!claim(el)) continue;
+        candidates.push({ el: el, mode: 'swap', surface: 'name' });
+      }
+    }
+
+    // Mod summaries: tile grid description, table description cell, details
+    // header Typography summary. Also swap.
+    if (scopeEnabled('summary')) {
+      for (const el of summaryHosts()) {
+        if (el.closest('[' + ATTR_CLONE + '="1"]')) continue;
+        if (el.closest(DENY_ANCESTOR_SEL)) continue;
+        if (!eligibleHost(el, 'summary')) continue;
+        if (compactSurface(el) !== 'list') continue;
+        if (!hasText(el)) continue;
+        if (!claim(el)) continue;
+        candidates.push({ el: el, mode: 'swap', surface: 'summary' });
       }
     }
 
@@ -840,6 +997,20 @@
     return false;
   }
 
+  // In swap mode a label's text may sit in nested inline markup: the compact
+  // settings density puts the title in a span inside the title row, and antd
+  // wraps a select's value in a span of its own. Those wrappers are part of the
+  // text flow, not containers, so their text nodes are swapped rather than the
+  // wrapper being kept as one atomic token. Clone mode keeps structural markup.
+  function isInlineWrapper(el, mode) {
+    if (STRUCT_TAGS.has(el.tagName)) return true;
+    if (mode !== 'swap') return false;
+    if (!BLOCK_TAGS.has(el.tagName)) return true;
+    // A bare div used as a label line (not a container of other blocks) is
+    // still part of the text flow.
+    return el.tagName === 'DIV' && !hasBlockChild(el);
+  }
+
   function serializeHost(host, mode) {
     const refs = [];
     const segs = [];
@@ -862,7 +1033,7 @@
               refs.push(el);
               out += '{{' + index + '}}';
               if (mode === 'swap') segs.push({ kind: 'token', index: index, el: el });
-            } else if (STRUCT_TAGS.has(el.tagName)) {
+            } else if (isInlineWrapper(el, mode)) {
               if (mode === 'clone') {
                 const index = refs.length;
                 refs.push(el);
@@ -2298,15 +2469,31 @@
       prev.provider !== next.provider ||
       prev.scopeReadme !== next.scopeReadme ||
       prev.scopeSettings !== next.scopeSettings ||
-      prev.scopeList !== next.scopeList ||
+      prev.scopeModName !== next.scopeModName ||
+      prev.scopeModSummary !== next.scopeModSummary ||
       prev.scopeChangelog !== next.scopeChangelog
     );
+  }
+
+  // The first protocol revision carried a single `scopeList` for names and
+  // summaries. A payload that predates the split keeps its choice; a payload
+  // without the old key (or any of the new ones) means both are on.
+  function applyScopeSettings(raw, next) {
+    const has = (key) => Object.prototype.hasOwnProperty.call(raw, key);
+    const legacy = has('scopeList') ? !!raw.scopeList : undefined;
+    const fallback = legacy === undefined ? true : legacy;
+    if (!has('scopeModName')) next.scopeModName = fallback;
+    if (!has('scopeModSummary')) next.scopeModSummary = fallback;
+    next.scopeModName = next.scopeModName !== false;
+    next.scopeModSummary = next.scopeModSummary !== false;
+    delete next.scopeList;
   }
 
   function applySettings(raw) {
     if (!raw || typeof raw !== 'object') return;
     const prev = state.settings;
     const next = Object.assign(defaultSettings(), prev, raw);
+    applyScopeSettings(raw, next);
     next.hoverDelayMs = clamp(next.hoverDelayMs, 0, 2000);
     next.batchSize = clamp(next.batchSize, 1, 100);
     next.batchChars = clamp(next.batchChars, 200, 200000);
@@ -2340,7 +2527,7 @@
 
     log(
       'settings: lang=' + state.targetLang + ' provider=' + state.provider +
-      ' scopes=' + [next.scopeReadme, next.scopeSettings, next.scopeList, next.scopeChangelog].join('') +
+      ' scopes=' + [next.scopeReadme, next.scopeSettings, next.scopeModName, next.scopeModSummary, next.scopeChangelog].join('') +
       ' debug=' + next.debug
     );
 

@@ -112,8 +112,15 @@
         <button type="button" data-testid="mod-setting-description" aria-label="Description"><svg viewBox="0 0 16 16"><path d="M0 0h16v16z"/></svg></button>
       </h4>
       <div data-testid="mod-setting-description-text">Only the windows on the switcher's monitor</div>
-      <div class="ant-select">
-        <div class="ant-select-selector"><span class="ant-select-selection-item">Microsoft Edge (free)</span></div>
+      <div class="ant-select ant-select-single">
+        <div class="ant-select-content" title="Microsoft Edge (free)">Microsoft Edge (free)<input class="ant-select-input" role="combobox" value=""></div>
+      </div>
+    </div>
+    <div class="windhawk-row" data-testid="mod-setting">
+      <div class="windhawk-row-meta-title">Window</div>
+      <div data-testid="mod-setting-description-text">Which window the switcher shows first.</div>
+      <div class="ant-select ant-select-single">
+        <div class="ant-select-content"><div class="ant-select-placeholder">Choose a window</div><input class="ant-select-input" role="combobox" value=""></div>
       </div>
     </div>
   </section>
@@ -162,7 +169,8 @@
     llmKeySource: 'none',
     scopeReadme: true,
     scopeSettings: true,
-    scopeList: true,
+    scopeModName: true,
+    scopeModSummary: true,
     scopeChangelog: true,
     hoverDelayMs: 120,
     shortcutToggle: 'Alt+Q',
