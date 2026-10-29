@@ -172,9 +172,10 @@ export const fixture = {
   },
 
   /**
-   * Compact settings density: the title lives in nested spans, the description
-   * is inline after the info button, and the closed select mirrors antd 6
-   * (value/placeholder in `.ant-select-content` beside the search input).
+   * Compact settings density: the title lives in a styled-components title
+   * wrapper with a SettingTitleText span, the description is a sibling of the
+   * title row, and the closed select mirrors antd 6 (value/placeholder in
+   * `.ant-select-content` beside the search input).
    */
   compactSettings() {
     return page(`
@@ -185,12 +186,12 @@ export const fixture = {
               <div class="windhawk-row-meta">
                 <h4 class="windhawk-row-meta-title" id="compact-title">
                   <span class="sc-title-wrapper">
-                    <span class="sc-title-text" id="compact-title-text">Monitor</span>
+                    <span class="SettingTitleText-sc-1" id="compact-title-text">Monitor</span>
                     <button type="button" data-testid="mod-setting-description" id="compact-info"
                             aria-label="Description of Monitor"><svg viewBox="0 0 16 16"><path d="M0 0h16v16z"/></svg></button>
-                    <span class="sc-hidden" id="compact-desc">Only the windows on the switcher's monitor</span>
                   </span>
                 </h4>
+                <div class="windhawk-row-meta-description" id="compact-desc">Only the windows on the switcher's monitor</div>
               </div>
               <div class="sc-control">
                 <div class="ant-select ant-select-single" id="monitor-select">
@@ -204,7 +205,7 @@ export const fixture = {
               <div class="windhawk-row-meta">
                 <h4 class="windhawk-row-meta-title" id="compact-title2">
                   <span class="sc-title-wrapper">
-                    <span class="sc-title-text" id="compact-title-text2">Shortcut</span>
+                    <span class="SettingTitleText-sc-2" id="compact-title-text2">Shortcut</span>
                   </span>
                 </h4>
               </div>
@@ -223,7 +224,7 @@ export const fixture = {
               <div class="windhawk-row-meta">
                 <h4 class="windhawk-row-meta-title" id="compact-title3">
                   <span class="sc-title-wrapper">
-                    <span class="sc-title-text" id="compact-title-text3">Custom text</span>
+                    <span class="SettingTitleText-sc-3" id="compact-title-text3">Custom text</span>
                   </span>
                 </h4>
               </div>
@@ -324,7 +325,7 @@ export const fixture = {
           <div class="ant-form">
             <div class="windhawk-row" data-testid="mod-setting">
               <div class="windhawk-row-meta">
-                <h4 class="windhawk-row-meta-title" id="debug-title"><span class="sc-title-text">Monitor</span></h4>
+                <h4 class="windhawk-row-meta-title" id="debug-title"><span class="SettingTitleText-sc-4">Monitor</span></h4>
                 <div data-testid="mod-setting-description-text" id="debug-desc">Only the windows on the switcher's monitor
                   <span class="ant-select ant-select-single"><span class="ant-select-content" id="debug-claimed">Where the mouse cursor is</span></span>
                 </div>
@@ -337,6 +338,352 @@ export const fixture = {
           </div>
         </div></div>
       </section>`);
+  },
+
+  /**
+   * The same strings on every surface at once: one compact and one comfortable
+   * settings row, two closed select values and a reset label whose tail is the
+   * option label shown by one of them. The comfortable description carries
+   * extra whitespace on purpose: it must normalise to the compact string.
+   */
+  sameStrings() {
+    return page(`
+      <section data-testid="mod-details">
+        <div class="ant-card"><div class="ant-card-body">
+          <div class="ant-form settings-panel">
+
+            <div class="windhawk-row" data-testid="mod-setting" data-setting-key="keep-compact">
+              <div class="windhawk-row-meta">
+                <h4 class="windhawk-row-meta-title" id="same-compact-title">
+                  <span class="sc-title-wrapper"><span class="SettingTitleText-sc-5" id="same-compact-title-text">Keep switcher open</span></span>
+                </h4>
+                <div data-testid="mod-setting-description-text" id="same-compact-desc">Ctrl+Alt+Tab keeps the switcher open</div>
+              </div>
+              <div class="sc-control">
+                <div class="ant-select ant-select-single">
+                  <div class="ant-select-content" id="same-compact-select"
+                       title="Where the mouse cursor is">Where the mouse cursor is<input class="ant-select-input" role="combobox" value=""></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="windhawk-row" data-testid="mod-setting" data-setting-key="keep-comfortable">
+              <div class="windhawk-row-meta">
+                <h4 class="windhawk-row-meta-title" id="same-comfortable-title">Keep switcher open</h4>
+                <div class="windhawk-row-meta-description" id="same-comfortable-desc">Ctrl+Alt+Tab  keeps
+                  the switcher open</div>
+              </div>
+              <div class="sc-control">
+                <div class="ant-select ant-select-single">
+                  <div class="ant-select-content" id="same-comfortable-select"
+                       title="Where the mouse cursor is">Where the mouse cursor is<input class="ant-select-input" role="combobox" value=""></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="windhawk-row" data-testid="mod-setting" data-setting-key="position">
+              <div class="windhawk-row-meta">
+                <h4 class="windhawk-row-meta-title" id="same-position-title">Monitor position</h4>
+              </div>
+              <div class="sc-control">
+                <div class="ant-select ant-select-single">
+                  <div class="ant-select-content" id="same-position-select"
+                       title="Flip 3D (Vista stack)">Flip 3D (Vista stack)<input class="ant-select-input" role="combobox" value=""></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="windhawk-row" data-testid="mod-setting" data-setting-key="fallback-reset">
+              <div class="windhawk-row-meta">
+                <h4 class="windhawk-row-meta-title" id="same-fallback-title">Fallback reset</h4>
+              </div>
+              <div class="sc-control">
+                <button type="button" data-testid="mod-setting-reset" id="same-fallback-reset">Reset to default: Never seen option</button>
+              </div>
+            </div>
+
+            <div id="late-reset-slot"></div>
+
+          </div>
+        </div></div>
+      </section>`);
+  },
+
+  /**
+   * Insert a settings row whose reset button sits inside the title host, the
+   * way the compact density nests it. Call after the tail's translation is
+   * known so the reset label composes instead of translating the sentence.
+   */
+  addResetRow(doc, tail, id, sep, titleText) {
+    const slot = doc.getElementById('late-reset-slot');
+    if (!slot) return null;
+    const row = doc.createElement('div');
+    row.className = 'windhawk-row';
+    row.setAttribute('data-testid', 'mod-setting');
+    row.setAttribute('data-setting-key', 'late-reset');
+    const meta = doc.createElement('div');
+    meta.className = 'windhawk-row-meta';
+    const title = doc.createElement('h4');
+    title.className = 'windhawk-row-meta-title';
+    title.appendChild(doc.createTextNode(titleText || 'Extra shortcut '));
+    const button = doc.createElement('button');
+    button.type = 'button';
+    button.setAttribute('data-testid', 'mod-setting-reset');
+    button.id = id || 'late-reset';
+    button.textContent = 'Reset to default' + (sep == null ? ': ' : sep) + tail;
+    title.appendChild(button);
+    meta.appendChild(title);
+    row.appendChild(meta);
+    slot.appendChild(row);
+    return button;
+  },
+
+  /**
+   * Compact density where the description host sits inside the title host. The
+   * title still claims and translates its own text; the hidden copy is
+   * excluded from the title source and never a unit. The debug dump must show
+   * the title as claimed.
+   */
+  compactTitleConflict() {
+    const rows = [];
+    for (let i = 0; i < 8; i++) {
+      const key = i === 0 ? 'monitor' : 'setting-' + i;
+      const title = i === 0 ? 'Monitor' : 'Setting ' + i;
+      const desc = i === 0 ? "Only the windows on the switcher's monitor" : 'Description ' + i;
+      rows.push(`
+        <div class="windhawk-row" data-testid="mod-setting" data-setting-key="${key}">
+          <div class="windhawk-row-meta">
+            <h4 class="windhawk-row-meta-title" id="conflict-title-${i}">
+              <div class="sc-title-wrapper">
+                <span class="SettingTitleText-sc-6" id="conflict-title-text-${i}">${title}</span>
+                <div data-testid="mod-setting-description-text" id="conflict-desc-${i}">${desc}</div>
+              </div>
+            </h4>
+          </div>
+        </div>`);
+    }
+    return page(`
+      <section data-testid="mod-details">
+        <div class="ant-card"><div class="ant-card-body">
+          <div class="ant-form settings-panel">${rows.join('')}</div>
+        </div></div>
+      </section>`);
+  },
+
+  /**
+   * One compact row whose screen-reader description is nested inside the title
+   * host, the shape that used to claim the row first and leave the title
+   * untranslated. The visible tooltip copy is a separate portal node added by
+   * addTooltip() after the first scan.
+   */
+  compactAriaTitle() {
+    return page(`
+      <section data-testid="mod-details">
+        <div class="ant-card"><div class="ant-card-body">
+          <div class="ant-form settings-panel">
+            <div class="windhawk-row" data-testid="mod-setting" data-setting-key="monitor">
+              <div class="windhawk-row-meta">
+                <h4 class="windhawk-row-meta-title" id="aria-title">
+                  <span class="sc-title-wrapper">
+                    <span class="SettingTitleText-sc-7" id="aria-title-text">Monitor</span>
+                    <button type="button" data-testid="mod-setting-description" id="aria-info"
+                            aria-label="Description of Monitor"><svg viewBox="0 0 16 16"><path d="M0 0h16v16z"/></svg></button>
+                    <div class="sc-hidden" data-testid="mod-setting-description-text" id="aria-desc">Only the windows on the switcher's monitor</div>
+                  </span>
+                </h4>
+              </div>
+            </div>
+          </div>
+        </div></div>
+      </section>`);
+  },
+
+  /**
+   * The compact row from the running app next to its comfortable twin: the
+   * title is "Monitor" and the description is "Which monitor the switcher
+   * opens on" in the hidden screen-reader copy (compact), in the visible
+   * tooltip portal (added after the first scan) and in the comfortable
+   * description. Both densities must request the same two strings once and
+   * resolve to the same translations. A third row keeps only the hidden copy
+   * and must get no title unit at all.
+   */
+  ariaTitleTwins() {
+    return page(`
+      <section data-testid="mod-details">
+        <div class="ant-card"><div class="ant-card-body">
+          <div class="ant-form settings-panel">
+            <div class="windhawk-row" data-testid="mod-setting" data-setting-key="monitor-compact">
+              <div class="windhawk-row-meta">
+                <h4 class="windhawk-row-meta-title" id="twin-compact-title">
+                  <span class="sc-title-wrapper">
+                    <span class="SettingTitleText-sc-8" id="twin-compact-title-text">Monitor</span>
+                    <button type="button" data-testid="mod-setting-description" id="twin-info"
+                            aria-label="Description of Monitor"><svg viewBox="0 0 16 16"><path d="M0 0h16v16z"/></svg></button>
+                    <div class="sc-hidden" data-testid="mod-setting-description-text" id="twin-compact-aria">Which monitor the switcher opens on</div>
+                  </span>
+                </h4>
+              </div>
+            </div>
+
+            <div class="windhawk-row" data-testid="mod-setting" data-setting-key="monitor-comfortable">
+              <div class="windhawk-row-meta">
+                <h4 class="windhawk-row-meta-title" id="twin-comfortable-title">Monitor</h4>
+                <div class="windhawk-row-meta-description" id="twin-comfortable-desc">Which monitor the switcher opens on</div>
+              </div>
+            </div>
+
+            <div class="windhawk-row" data-testid="mod-setting" data-setting-key="aria-only">
+              <div class="windhawk-row-meta">
+                <h4 class="windhawk-row-meta-title" id="twin-empty-title">
+                  <span class="sc-title-wrapper">
+                    <button type="button" data-testid="mod-setting-description" id="twin-empty-info"
+                            aria-label="Description of the hidden setting"><svg viewBox="0 0 16 16"><path d="M0 0h16v16z"/></svg></button>
+                    <div class="sc-hidden" data-testid="mod-setting-description-text" id="twin-empty-aria">Only the windows on the switcher's monitor</div>
+                  </span>
+                </h4>
+              </div>
+            </div>
+          </div>
+        </div></div>
+      </section>`);
+  },
+
+  /**
+   * The real compact title row beside its comfortable twin, in the shape the
+   * running app renders: the title text, the collapsed value summary, the ⓘ
+   * button and the screen-reader description copy all sit in one title row.
+   * Only the title text is the title unit; the summary is its own string, the
+   * description copy is excluded from the title and its visible copy is the
+   * comfortable description (and a tooltip portal added by addTooltip()).
+   * The last row nests a reset button in the title row: the title unit still
+   * carries no placeholder, and the button keeps its own nested unit.
+   */
+  compactDensityTwins() {
+    return page(`
+      <section data-testid="mod-details">
+        <div class="ant-card"><div class="ant-card-body">
+          <div class="ant-form settings-panel">
+
+            <div class="windhawk-row" data-testid="mod-setting" data-setting-key="monitor-compact">
+              <div class="windhawk-row-meta">
+                <h4 class="windhawk-row-meta-title" id="dense-compact-title">
+                  <span class="SettingTitleWrapper-sc-9">
+                    <span class="SettingTitleText-sc-10" id="dense-compact-title-text">Monitor</span>
+                    <span data-testid="mod-setting-summary" id="dense-compact-summary">Non-default</span>
+                    <button type="button" data-testid="mod-setting-description" id="dense-compact-info"
+                            aria-label="Description of Monitor"><svg viewBox="0 0 16 16"><path d="M0 0h16v16z"/></svg></button>
+                    <div class="sc-hidden" data-testid="mod-setting-description-text" id="dense-compact-desc">Only the windows on the switcher's monitor</div>
+                  </span>
+                </h4>
+              </div>
+            </div>
+
+            <div class="windhawk-row" data-testid="mod-setting" data-setting-key="monitor-comfortable">
+              <div class="windhawk-row-meta">
+                <h4 class="windhawk-row-meta-title" id="dense-comfortable-title">Monitor</h4>
+                <div class="windhawk-row-meta-description" id="dense-comfortable-desc">Only the windows on the switcher's monitor</div>
+              </div>
+            </div>
+
+            <div class="windhawk-row" data-testid="mod-setting" data-setting-key="animation-compact">
+              <div class="windhawk-row-meta">
+                <h4 class="windhawk-row-meta-title" id="dense-animation-title">
+                  <span class="SettingTitleWrapper-sc-11">
+                    <span class="SettingTitleText-sc-12" id="dense-animation-title-text">Animation style</span>
+                    <span data-testid="mod-setting-summary" id="dense-animation-summary">Non-default</span>
+                    <button type="button" data-testid="mod-setting-description" id="dense-animation-info"
+                            aria-label="Description of Animation style"><svg viewBox="0 0 16 16"><path d="M0 0h16v16z"/></svg></button>
+                    <div class="sc-hidden" data-testid="mod-setting-description-text" id="dense-animation-desc">How the windows are presented</div>
+                  </span>
+                </h4>
+              </div>
+            </div>
+
+            <div class="windhawk-row" data-testid="mod-setting" data-setting-key="animation-comfortable">
+              <div class="windhawk-row-meta">
+                <h4 class="windhawk-row-meta-title" id="dense-animation-comfortable-title">Animation style</h4>
+                <div class="windhawk-row-meta-description" id="dense-animation-comfortable-desc">How the windows are presented</div>
+              </div>
+            </div>
+
+            <div class="windhawk-row" data-testid="mod-setting" data-setting-key="shortcuts-compact">
+              <div class="windhawk-row-meta">
+                <h4 class="windhawk-row-meta-title" id="dense-shortcuts-title">
+                  <span class="SettingTitleWrapper-sc-13">
+                    <span class="SettingTitleText-sc-14" id="dense-shortcuts-title-text">Extra shortcuts</span>
+                    <button type="button" data-testid="mod-setting-reset" id="dense-shortcuts-reset">Reset to default: Flip 3D (Vista stack)</button>
+                    <div class="sc-hidden" data-testid="mod-setting-description-text" id="dense-shortcuts-desc">Shortcuts with an animation style of their own, instead of the global one</div>
+                  </span>
+                </h4>
+              </div>
+            </div>
+
+            <div class="windhawk-row" data-testid="mod-setting" data-setting-key="visible-desc">
+              <div class="windhawk-row-meta">
+                <h4 class="windhawk-row-meta-title" id="dense-visible-title">Visible description</h4>
+                <div data-testid="mod-setting-description-text" id="dense-visible-desc">A visible setting description</div>
+              </div>
+            </div>
+
+          </div>
+        </div></div>
+      </section>`);
+  },
+
+  /**
+   * A title host that contains a closed select value claimed before it. The
+   * title must still swap its own text and keep the claimed child atomic.
+   */
+  titleWithClaimedChild() {
+    return page(`
+      <section data-testid="mod-details">
+        <div class="ant-card"><div class="ant-card-body">
+          <div class="ant-form">
+            <div class="windhawk-row" data-testid="mod-setting" data-setting-key="outer">
+              <div class="windhawk-row-meta">
+                <h4 class="windhawk-row-meta-title" id="outer-title">Outer title
+                  <span class="ant-select ant-select-single"><span class="ant-select-content" id="outer-child" title="Child value text">Child value text</span></span>
+                </h4>
+              </div>
+            </div>
+          </div>
+        </div></div>
+      </section>`);
+  },
+
+  /**
+   * Cloned README prose next to a mixed prose host (own sentence plus a nested
+   * list) whose nested item is claimed first: the outer host swaps its own text
+   * and keeps the nested unit atomic.
+   */
+  proseAndMixed() {
+    return page(`
+      <section data-testid="mod-details">
+        <div class="ant-card"><div class="ant-card-body">
+          <p id="clone-p">Readme prose stays a clone.</p>
+          <ul>
+            <li id="mixed-li">Mixed prose sentence.
+              <ul><li id="nested-li">Nested item.</li></ul>
+            </li>
+          </ul>
+        </div></div>
+      </section>`);
+  },
+
+  /** Append the visible tooltip portal for a setting description. */
+  addTooltip(doc, text, id) {
+    const tip = doc.createElement('div');
+    tip.className = 'ant-tooltip';
+    tip.id = id || 'setting-tooltip';
+    const inner = doc.createElement('div');
+    inner.className = 'ant-tooltip-inner';
+    const copy = doc.createElement('div');
+    copy.setAttribute('data-testid', 'mod-setting-description-text');
+    copy.textContent = text;
+    inner.appendChild(copy);
+    tip.appendChild(inner);
+    doc.body.appendChild(tip);
+    return copy;
   },
 
   /** A select dropdown opened next to the compact fixture. */

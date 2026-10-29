@@ -566,6 +566,12 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
 
   const clean = (s) => String(s == null ? '' : s).replace(/\x1f/g, ' ');
 
+  // One source string, one translation. Every unit's serialized text is
+  // collapsed to single spaces and trimmed before it becomes a cache key, a
+  // provider request or an in-flight key; the DOM keeps its own whitespace for
+  // restoring the original.
+  const normalizeSource = (s) => String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
+
   const hash32 = (s) => {
     // FNV-1a, 32 bit; collisions are made less likely by appending the length
     // in the cache key.
@@ -642,6 +648,10 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
     nextUnitId: 1,
     nextRequestId: 1,
     pending: new Map(),
+    // Normalised source text -> shared translation entry. Every unit that asks
+    // for a string already queued, in flight or translated attaches here, so a
+    // distinct string is requested exactly once per epoch.
+    textEntries: new Map(),
     queue: [],
     inflight: 0,
     flushTimer: 0,
@@ -949,17 +959,36 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
     '.ant-select-selection-placeholder'
   ];
   const SELECT_HOST_SET = new Set(SELECT_HOST_SELECTORS);
+  // The description text rendered for a setting. In the compact density it sits
+  // inside the title row; the title unit never carries it (see
+  // serializeTitleHost) and, nested in a title, it is not a unit of its own
+  // either. Outside a title (the visible tooltip portal) it is translated like
+  // any other string.
+  const DESC_TEXT_SEL = '[data-testid="mod-setting-description-text"]';
+  // The collapsed current-value summary in a setting's title row
+  // ("Non-default"). It shares the row with the title but is a string of its
+  // own and must never leak into the title unit.
+  const SUMMARY_TEXT_SEL = '[data-testid="mod-setting-summary"]';
+  const TITLE_SEL = '.windhawk-row-meta-title';
+  // styled-components keeps the component name as the class prefix
+  // (SettingTitleText-sc-xxxx), so a substring match finds the title text in
+  // both densities without depending on the generated suffix.
+  const TITLE_TEXT_SEL = '[class*="SettingTitleText"]';
   const SETTINGS_SELECTORS = [
-    '[data-testid="mod-setting-description-text"]',
+    DESC_TEXT_SEL,
+    // Claimed before the title host: a summary nested in the title row must be
+    // its own unit, not a placeholder in the title.
+    SUMMARY_TEXT_SEL,
     '.ant-select-item-option-content',
     // The closed control's current value and placeholder live inside a form
     // control that is otherwise atomic; only their text nodes are swapped, and
     // the search input beside them is never touched.
     ...SELECT_HOST_SELECTORS,
-    // The title claims the row before the description inside it; a reset button
-    // nested in the title is picked up by the dedicated nested pass below.
-    '.windhawk-row-meta-title',
+    // The description is claimed before the title host too, so a copy nested in
+    // the title row still becomes its own unit; the title unit itself reads only
+    // the title text.
     '.windhawk-row-meta-description',
+    '.windhawk-row-meta-title',
     '[data-testid="mod-setting-reset"]'
   ];
   // Mod names: the tile grid's title, the table view's name link, and the bare
@@ -1095,6 +1124,93 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
       /* ignore */
     }
     log('select host rejected (' + reason + '): ' + sel + ' <' + name + '> "' + text + '"');
+  }
+
+  // Debug-only diagnosis for a settings row whose title stays untranslated. One
+  // line per row for the first few rows, at most 6 per scan: the row's testid
+  // and setting key, whether the title host was claimed (and by which nested
+  // host), and a shallow skeleton of the title host built from tag names and
+  // class lists only, never text.
+  const DEBUG_ROW_BUDGET = 6;
+
+  function elementSignature(el) {
+    if (!el || el.nodeType !== 1) return '?';
+    let out = String(el.tagName || '?').toLowerCase();
+    try {
+      const cls = String(el.className || '').trim();
+      if (cls) out += '.' + cls.split(/\s+/).filter(Boolean).slice(0, 4).join('.');
+      const testid = el.getAttribute('data-testid');
+      if (testid) out += '[data-testid=' + testid + ']';
+    } catch (_) {
+      /* ignore */
+    }
+    return out;
+  }
+
+  function shallowSkeleton(el, depth) {
+    if (!el || el.nodeType !== 1 || depth < 0) return '';
+    let out = elementSignature(el);
+    const kids = [];
+    try {
+      for (let c = el.firstElementChild; c; c = c.nextElementSibling) {
+        const s = shallowSkeleton(c, depth - 1);
+        if (s) kids.push(s);
+      }
+    } catch (_) {
+      /* ignore */
+    }
+    if (kids.length) out += '>' + kids.join(',');
+    return out;
+  }
+
+  function debugSettingsRows(claimed) {
+    if (!state.settings.debug) return;
+    let rows = [];
+    try {
+      rows = Array.from(document.querySelectorAll('[data-testid="mod-setting"]'));
+      if (!rows.length) rows = Array.from(document.querySelectorAll('.windhawk-row'));
+    } catch (_) {
+      rows = [];
+    }
+    let lines = 0;
+    for (const row of rows) {
+      if (lines >= DEBUG_ROW_BUDGET) break;
+      let testid = '';
+      let key = '';
+      try {
+        testid = row.getAttribute('data-testid') || '';
+        key = row.getAttribute('data-setting-key') || '';
+      } catch (_) {
+        testid = '';
+        key = '';
+      }
+      let title = null;
+      try {
+        title = row.querySelector('.windhawk-row-meta-title') || row.querySelector('h4');
+      } catch (_) {
+        title = null;
+      }
+      const index = title ? claimed.indexOf(title) : -1;
+      let claimedBy = '';
+      if (title && index === -1) {
+        for (const host of claimed) {
+          if (host !== title && title.contains(host)) {
+            claimedBy = elementSignature(host);
+            break;
+          }
+        }
+      }
+      log(
+        'row ' + lines +
+        ' testid=' + (testid || '-') +
+        ' key=' + (key || '-') +
+        ' title=' + (title ? elementSignature(title) : '-') +
+        ' claimed=' + (index !== -1 ? 'true' : 'false') +
+        (claimedBy ? ' claimedBy=' + claimedBy : '') +
+        ' skeleton=' + (title ? shallowSkeleton(title, 2).slice(0, 220) : '-')
+      );
+      lines++;
+    }
   }
 
   function settingsRejectReason(el) {
@@ -1248,9 +1364,16 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
     return false;
   }
 
-  function hasBlockChild(el) {
+  function hasBlockChild(el, atomic, skipAria) {
     try {
       for (let n = el.firstElementChild; n; n = n.nextElementSibling) {
+        // A claimed descendant is an atomic placeholder, not a block that makes
+        // the wrapper a container: it must not turn an inline wrapper into an
+        // opaque token that loses the wrapper's own text. The excluded
+        // screen-reader copy is dropped from the source altogether, so it must
+        // not turn a label wrapper into a container either.
+        if (atomic && atomic.has(n)) continue;
+        if (isAriaCopy(n, skipAria)) continue;
         if (BLOCK_TAGS.has(n.tagName)) return true;
       }
     } catch (_) {
@@ -1284,15 +1407,20 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
       claimed.push(el);
       return true;
     };
-    // A mixed prose host may contain units claimed before it; its own text is
-    // swapped and each nested block stays an atomic placeholder in its source.
-    const claimOuter = (el) => {
+    // A swap host may contain units claimed before it (deepest first): its own
+    // text is swapped and each claimed descendant stays an atomic placeholder
+    // in its source, so that text is never translated twice. It may not sit
+    // inside an already claimed host.
+    const claimSwap = (el) => {
       for (const host of claimed) {
-        if (host === el) return false;
-        if (host.contains(el)) return false;
+        if (host === el || host.contains(el)) return null;
+      }
+      const atomic = [];
+      for (const host of claimed) {
+        if (el.contains(host)) atomic.push(host);
       }
       claimed.push(el);
-      return true;
+      return atomic;
     };
     // A control nested in an already claimed host (the reset button in a
     // setting title) is an atomic token in that host's source, so its own text
@@ -1358,8 +1486,9 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
         for (let i = mixed.length - 1; i >= 0; i--) {
           const block = mixed[i];
           if (!hasText(block)) continue;
-          if (!claimOuter(block)) continue;
-          candidates.push({ el: block, mode: 'swap', surface: surface });
+          const atomic = claimSwap(block);
+          if (!atomic) continue;
+          candidates.push({ el: block, mode: 'swap', surface: surface, atomic: atomic });
         }
       }
     }
@@ -1376,16 +1505,25 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
         }
         const selectHost = SELECT_HOST_SET.has(sel);
         for (const el of list) {
+          // A screen-reader copy nested inside a title is never a unit of its
+          // own: the title unit carries only the title text (see
+          // serializeTitleHost). The visible tooltip copy is a portal outside
+          // the title and is claimed here like any other description.
+          if (sel === DESC_TEXT_SEL && el.closest(TITLE_SEL)) continue;
           const reason = settingsRejectReason(el);
           if (reason) {
             if (selectHost) debugSelectReject(el, sel, reason);
             continue;
           }
-          if (!claim(el)) {
+          // A title that carried nothing but the excluded screen-reader copy
+          // has no title text and gets no unit at all.
+          if (isTitleHost(el) && !isTranslatable(normalizeSource(titleHostText(el, claimed)))) continue;
+          const atomic = claimSwap(el);
+          if (!atomic) {
             if (selectHost) debugSelectReject(el, sel, 'already claimed');
             continue;
           }
-          candidates.push({ el: el, mode: 'swap', surface: 'settings' });
+          candidates.push({ el: el, mode: 'swap', surface: 'settings', atomic: atomic });
         }
       }
       // The reset button lives inside the setting title, which claims the row
@@ -1418,8 +1556,9 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
         if (!eligibleHost(el, 'name')) continue;
         if (compactSurface(el) !== 'list') continue;
         if (!hasText(el)) continue;
-        if (!claim(el)) continue;
-        candidates.push({ el: el, mode: 'swap', surface: 'name' });
+        const atomic = claimSwap(el);
+        if (!atomic) continue;
+        candidates.push({ el: el, mode: 'swap', surface: 'name', atomic: atomic });
       }
     }
 
@@ -1432,10 +1571,13 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
         if (!eligibleHost(el, 'summary')) continue;
         if (compactSurface(el) !== 'list') continue;
         if (!hasText(el)) continue;
-        if (!claim(el)) continue;
-        candidates.push({ el: el, mode: 'swap', surface: 'summary' });
+        const atomic = claimSwap(el);
+        if (!atomic) continue;
+        candidates.push({ el: el, mode: 'swap', surface: 'summary', atomic: atomic });
       }
     }
+
+    if (state.settings.debug) safe(() => debugSettingsRows(claimed), 'debug-rows');
 
     state.stats.scannedHosts += candidates.length;
     state.scanQueue = { items: candidates, at: 0, epoch: state.epoch };
@@ -1466,7 +1608,7 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
     while (queue.at < queue.items.length) {
       const item = queue.items[queue.at++];
       if (item && item.el && item.el.isConnected) {
-        safe(() => processHost(item.el, item.mode, item.surface), 'scan-host');
+        safe(() => processHost(item.el, item.mode, item.surface, item.atomic), 'scan-host');
       }
       n++;
       const left = deadline && typeof deadline.timeRemaining === 'function' ? deadline.timeRemaining() : 8;
@@ -1516,16 +1658,118 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
   // wraps a select's value in a span of its own. Those wrappers are part of the
   // text flow, not containers, so their text nodes are swapped rather than the
   // wrapper being kept as one atomic token. Clone mode keeps structural markup.
-  function isInlineWrapper(el, mode) {
+  function isInlineWrapper(el, mode, atomic, skipAria) {
     if (STRUCT_TAGS.has(el.tagName)) return true;
     if (mode !== 'swap') return false;
     if (!BLOCK_TAGS.has(el.tagName)) return true;
     // A bare div used as a label line (not a container of other blocks) is
     // still part of the text flow.
-    return el.tagName === 'DIV' && !hasBlockChild(el);
+    return el.tagName === 'DIV' && !hasBlockChild(el, atomic, skipAria);
   }
 
-  function serializeHost(host, mode) {
+  // A setting title host: its title text is a unit of its own and the rest of
+  // the row is never part of it.
+  function isTitleHost(el) {
+    try {
+      return !!el.matches(TITLE_SEL);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // The hidden copy of a setting description duplicates the visible tooltip.
+  // Inside a title host it must never reach a request, not even as an atomic
+  // placeholder, so serialization drops it and its subtree entirely. The
+  // visible tooltip copy is a portal outside the title and stays in scope.
+  function isAriaCopy(el, hostIsTitle) {
+    try {
+      if (!el.matches(DESC_TEXT_SEL)) return false;
+      return hostIsTitle || !!el.closest(TITLE_SEL);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // The title text span styled-components renders inside the title row. The
+  // generated suffix changes per build, but the component name is kept as the
+  // class prefix, so a substring match is stable. The closest title check keeps
+  // a nested row's title from being taken for this row's.
+  function titleTextHost(host) {
+    try {
+      const el = host.querySelector(TITLE_TEXT_SEL);
+      if (el && el !== host && el.closest(TITLE_SEL) === host && !isTitleExtra(el)) return el;
+    } catch (_) {
+      /* ignore */
+    }
+    return null;
+  }
+
+  // Row content that shares the title row but is never part of the title text.
+  // The screen-reader description copy is dropped by isAriaCopy; atomic
+  // elements (the ⓘ/reset buttons, icons) are filtered separately.
+  function isTitleExtra(el) {
+    try {
+      return !!el.closest(SUMMARY_TEXT_SEL) || !!el.closest('[data-testid="mod-setting-reset"]');
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // Walk only the text of the title text span, or only the host's direct text
+  // when the row has no title text span. `onText` receives every text node that
+  // belongs to the unit. Descendants claimed as their own units are skipped:
+  // they are not part of the title and never become a placeholder in it.
+  function walkTitleText(root, directOnly, onText, atomic) {
+    const atomics = atomic && atomic.length ? new Set(atomic) : null;
+    const visit = (node) => {
+      for (let child = node.firstChild; child; child = child.nextSibling) {
+        if (child.nodeType === 3) {
+          onText(child, child.nodeValue || '');
+          continue;
+        }
+        if (child.nodeType !== 1) continue;
+        if (directOnly) continue;
+        if (atomics && atomics.has(child)) continue;
+        if (isSkippedElement(child)) continue;
+        if (isAtomicElement(child)) continue;
+        if (isAriaCopy(child, true)) continue;
+        if (isTitleExtra(child)) continue;
+        visit(child);
+      }
+    };
+    visit(root);
+  }
+
+  function titleHostText(host, atomic) {
+    const target = titleTextHost(host);
+    let text = '';
+    walkTitleText(target || host, !target, (node, value) => {
+      text += value;
+    }, atomic);
+    return text;
+  }
+
+  // Swap serialization for a title unit: text only, no refs and no
+  // placeholders. Inline markup inside the title text span is flattened.
+  function serializeTitleHost(host, atomic) {
+    const target = titleTextHost(host);
+    const segs = [];
+    let text = '';
+    walkTitleText(target || host, !target, (node, value) => {
+      segs.push({ kind: 'text', node: node, orig: value, out: value });
+      state.origText.set(node, value);
+      text += value;
+    }, atomic);
+    return { text: text, refs: [], segs: segs };
+  }
+
+  // `atomic` lists descendants claimed as their own units: they are emitted as
+  // placeholders and never walked, so their text is not translated a second
+  // time as part of this host. `skipAria` drops the screen-reader copy of a
+  // setting description without a placeholder; title hosts use
+  // serializeTitleHost instead.
+  function serializeHost(host, mode, atomic, skipAria) {
+    const atomics = atomic && atomic.length ? new Set(atomic) : null;
     const refs = [];
     const segs = [];
     let out = '';
@@ -1541,13 +1785,13 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
           out += value;
         } else if (child.nodeType === 1) {
           const el = child;
-          if (!isSkippedElement(el)) {
-            if (isAtomicElement(el)) {
+          if (!isSkippedElement(el) && !isAriaCopy(el, skipAria)) {
+            if ((atomics && atomics.has(el)) || isAtomicElement(el)) {
               const index = refs.length;
               refs.push(el);
               out += '{{' + index + '}}';
               if (mode === 'swap') segs.push({ kind: 'token', index: index, el: el });
-            } else if (isInlineWrapper(el, mode)) {
+            } else if (isInlineWrapper(el, mode, atomics, skipAria)) {
               if (mode === 'clone') {
                 const index = refs.length;
                 refs.push(el);
@@ -1638,6 +1882,8 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
       surface: surface,
       source: '',
       sourceHash: '',
+      leadTokens: '',
+      trailTokens: '',
       refs: [],
       segs: [],
       parts: [],
@@ -1683,11 +1929,83 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
     return false;
   }
 
+  // Edge atomic placeholders are structure, not text: a closed select renders
+  // its value as "Where the mouse cursor is{{0}}" (the search input) while the
+  // same option in the dropdown renders as plain "Where the mouse cursor is".
+  // Both must share one source string and one translation, so the edge tokens
+  // are removed from the request text and re-attached around the rendered
+  // output; their DOM nodes never move.
+  function splitEdgeTokens(text) {
+    let lead = '';
+    let trail = '';
+    let rest = text;
+    const head = /^(?:\{\{\d+\}\})+/.exec(rest);
+    if (head) {
+      lead = head[0];
+      rest = rest.slice(lead.length);
+    }
+    const tail = /(?:\{\{\d+\}\})+$/.exec(rest);
+    if (tail) {
+      trail = tail[0];
+      rest = rest.slice(0, rest.length - trail.length);
+    }
+    return { text: normalizeSource(rest), lead: lead, trail: trail };
+  }
+
+  // "<prefix>: <tail>" where the tail is an option label that already has a
+  // translation. "Reset to default: Flip 3D (Vista stack)" must reuse the
+  // option's own translation for the tail instead of translating the whole
+  // sentence, which can word the same option differently.
+  const RESET_LABEL_RE = /^([^:：]{1,80}?)([:：][ ]?)(\S(?:[\s\S]*\S)?)$/;
+
+  function resetLabelParts(u, source) {
+    if (u.surface !== 'settings') return null;
+    const m = RESET_LABEL_RE.exec(source);
+    if (!m) return null;
+    const prefix = m[1].trim();
+    const sep = m[2];
+    const tail = m[3].trim();
+    if (!prefix || !tail) return null;
+    if (!isTranslatable(prefix)) return null;
+    // Only compose when the tail's translation is already known; otherwise the
+    // whole sentence is translated as one piece, exactly as before.
+    const tailTranslated = lookupTranslation(tail);
+    if (tailTranslated === undefined) return null;
+    return [
+      {
+        text: prefix,
+        translated: null,
+        state: 0,
+        unit: u,
+        sep: sep,
+        tail: tail,
+        tailTranslated: tailTranslated
+      }
+    ];
+  }
+
+  function buildParts(u, source) {
+    const reset = resetLabelParts(u, source);
+    if (reset) return reset;
+    return splitSerialized(source, 1000).map((text) => ({
+      text: text,
+      translated: null,
+      state: 0,
+      unit: u
+    }));
+  }
+
   function resetForSource(u, serialized) {
+    // Everything downstream (cache key, provider text, in-flight entry) uses
+    // the normalised source; only the DOM keeps the original whitespace.
+    const source = normalizeSource(serialized.text);
+    const edge = u.mode === 'swap' ? splitEdgeTokens(source) : { text: source, lead: '', trail: '' };
     u.refs = serialized.refs;
     u.segs = serialized.segs;
-    u.source = serialized.text;
-    u.sourceHash = hash32(serialized.text);
+    u.source = source;
+    u.sourceHash = hash32(source);
+    u.leadTokens = edge.lead;
+    u.trailTokens = edge.trail;
     u.translatedOk = false;
     u.noop = false;
     u.rendered = false;
@@ -1717,24 +2035,38 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
     } catch (_) {
       /* ignore */
     }
-    if (!isTranslatable(serialized.text)) {
+    // The request text has the edge tokens removed; u.source keeps them for
+    // the no-op comparison and the renderer re-attaches them.
+    if (!isTranslatable(edge.text)) {
       u.skip = true;
       u.parts = [];
       return;
     }
     u.skip = false;
-    u.parts = splitSerialized(serialized.text, 1000).map((text) => ({
-      text: text,
-      translated: null,
-      state: 0,
-      unit: u
-    }));
+    u.parts = buildParts(u, edge.text);
     for (const part of u.parts) enqueuePart(u, part);
   }
 
-  function processHost(el, mode, surface) {
+  function processHost(el, mode, surface, atomic) {
+    const atomics = atomic || [];
+    // A settings title is a unit of its own title text only: the summary,
+    // description copy, buttons and icons in the same row are other units or
+    // excluded. Every other host keeps its existing serialization rules.
+    const titleUnit = surface === 'settings' && isTitleHost(el);
     let u = state.unitByHost.get(el);
     if (!el.isConnected) {
+      if (u) dropUnit(u);
+      return;
+    }
+    // React can strip a title down to the hidden copy; it then has no title
+    // text and keeps no unit.
+    if (titleUnit && !isTranslatable(normalizeSource(titleHostText(el, atomics)))) {
+      if (u) dropUnit(u);
+      return;
+    }
+    // A screen-reader copy that React moved inside a title is no longer a unit;
+    // the title never carries it and the tooltip has its own portal copy.
+    if (isAriaCopy(el, false)) {
       if (u) dropUnit(u);
       return;
     }
@@ -1770,12 +2102,12 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
         return;
       }
       restoreSwapText(u);
-      serialized = serializeHost(el, 'swap');
+      serialized = titleUnit ? serializeTitleHost(el, atomics) : serializeHost(el, 'swap', atomics, false);
     } else {
-      serialized = serializeHost(el, mode);
+      serialized = titleUnit ? serializeTitleHost(el, atomics) : serializeHost(el, mode, atomics, false);
     }
 
-    const hash = hash32(serialized.text);
+    const hash = hash32(normalizeSource(serialized.text));
     if (u.sourceHash === hash && (u.translatedOk || u.parts.length)) {
       const refsSame = refsEqual(u.refs, serialized.refs);
       u.refs = serialized.refs;
@@ -1852,6 +2184,9 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
   function teardownAll() {
     for (const u of Array.from(state.units)) dropUnit(u);
     state.queue.length = 0;
+    // The in-session dedupe map is keyed by target language and provider, so a
+    // rebuild must not reuse it.
+    state.textEntries.clear();
     state.renderQueue.clear();
     if (state.flushTimer) {
       clearTimeout(state.flushTimer);
@@ -1869,6 +2204,48 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
     log('provider "' + state.provider + '" is not implemented in P1; idle');
   }
 
+  // Part output: the translation of the part's own text, or, for a reset label
+  // that reuses an option's translation, the composed sentence.
+  function partOutput(p) {
+    if (!p || p.translated == null) return null;
+    if (p.tailTranslated != null) return p.translated + p.sep + p.tailTranslated;
+    return p.translated;
+  }
+
+  // The whole unit's rendered text, edge tokens included. Compared against
+  // u.source to detect a no-op translation.
+  function unitOutput(u) {
+    if (!u || !u.parts) return '';
+    return (u.leadTokens || '') + u.parts.map((p) => partOutput(p) || '').join('') + (u.trailTokens || '');
+  }
+
+  // A string already known in this session: completed in-flight entry first,
+  // then the persistent cache. Used by the reset-label composition so it can
+  // never disagree with the option label's own translation.
+  function lookupTranslation(text) {
+    const entry = state.textEntries.get(text);
+    if (entry && entry.state === 3 && typeof entry.translated === 'string') return entry.translated;
+    return cacheGet(text);
+  }
+
+  function attachPart(entry, u, part) {
+    part.entry = entry;
+    if (entry.state === 3) {
+      // Already translated: fan the result out, no request and no bookkeeping.
+      part.translated = entry.translated;
+      part.state = 3;
+      state.stats.cacheHits++;
+      maybeFinishUnit(u);
+      return;
+    }
+    if (entry.state === 4) {
+      part.state = 4;
+      return;
+    }
+    entry.parts.push(part);
+    part.state = 1;
+  }
+
   function enqueuePart(u, part) {
     if (!state.enabled) return;
     if (!state.targetLang) {
@@ -1880,17 +2257,26 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
       part.state = 4;
       return;
     }
-    const cached = cacheGet(part.text);
+    const text = part.text;
+    const existing = state.textEntries.get(text);
+    if (existing) {
+      // Same normalised string as another unit (another density, a value and
+      // its option, a title and its tooltip): share its request and result.
+      attachPart(existing, u, part);
+      return;
+    }
+    const cached = cacheGet(text);
     if (cached !== undefined) {
-      part.translated = cached;
-      part.state = 3;
-      state.stats.cacheHits++;
-      maybeFinishUnit(u);
+      const hit = { text: text, state: 3, translated: cached, parts: [] };
+      state.textEntries.set(text, hit);
+      attachPart(hit, u, part);
       return;
     }
     state.stats.cacheMisses++;
-    part.state = 1;
-    state.queue.push({ u: u, p: part });
+    const entry = { text: text, state: 1, translated: null, parts: [] };
+    state.textEntries.set(text, entry);
+    attachPart(entry, u, part);
+    state.queue.push(entry);
     scheduleFlush();
   }
 
@@ -1910,11 +2296,13 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
       const batch = [];
       let chars = 0;
       while (state.queue.length && batch.length < s.batchSize) {
+        // The queue holds distinct normalised strings only, so a batch is
+        // already deduplicated.
         const entry = state.queue[0];
-        if (batch.length && chars + entry.p.text.length > s.batchChars) break;
+        if (batch.length && chars + entry.text.length > s.batchChars) break;
         state.queue.shift();
         batch.push(entry);
-        chars += entry.p.text.length;
+        chars += entry.text.length;
       }
       if (!batch.length) break;
       state.inflight++;
@@ -1930,12 +2318,41 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
     if (state.queue.length) scheduleFlush();
   }
 
+  function finishEntry(entry, translated) {
+    entry.translated = translated;
+    entry.state = 3;
+    cacheSet(entry.text, translated);
+    state.stats.translations++;
+    const units = new Set();
+    const live = [];
+    for (const p of entry.parts) {
+      p.translated = translated;
+      p.state = 3;
+      // Parts whose unit was dropped or re-sourced are dead; drop the reference
+      // so a long session does not keep whole DOM subtrees alive.
+      if (p.unit && p.unit.parts && p.unit.parts.indexOf(p) !== -1) {
+        live.push(p);
+        units.add(p.unit);
+      }
+    }
+    entry.parts = live;
+    for (const u of units) maybeFinishUnit(u);
+  }
+
+  function failEntry(entry) {
+    entry.state = 4;
+    for (const p of entry.parts) p.state = 4;
+    entry.parts = [];
+    // Forget the failed string so a later unit may retry it; the parts that
+    // already failed stay failed.
+    if (state.textEntries.get(entry.text) === entry) state.textEntries.delete(entry.text);
+  }
+
   async function runBatch(entries, epoch) {
-    const parts = entries.map((e) => e.p);
-    for (let i = 0; i < parts.length; i += 10) {
+    for (let i = 0; i < entries.length; i += 10) {
       if (!state.enabled || state.epoch !== epoch) return;
-      const chunk = parts.slice(i, i + 10);
-      const texts = chunk.map((p) => p.text);
+      const chunk = entries.slice(i, i + 10);
+      const texts = chunk.map((e) => e.text);
       let translated = null;
       try {
         translated = await translateChunk(texts, epoch);
@@ -1944,19 +2361,12 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
       }
       if (state.epoch !== epoch) return;
       if (!translated || translated.length !== chunk.length) {
-        for (const p of chunk) p.state = 4;
+        for (const e of chunk) failEntry(e);
         state.stats.batchesFailed++;
         state.stats.errors++;
         continue;
       }
-      for (let j = 0; j < chunk.length; j++) {
-        const p = chunk[j];
-        p.translated = translated[j];
-        p.state = 3;
-        state.stats.translations++;
-        cacheSet(p.text, translated[j]);
-      }
-      for (const p of chunk) if (p.unit && p.unit.parts.indexOf(p) !== -1) maybeFinishUnit(p.unit);
+      for (let j = 0; j < chunk.length; j++) finishEntry(chunk[j], translated[j]);
     }
   }
 
@@ -2014,14 +2424,7 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
     if (!u || !u.parts || !u.parts.length) return;
     for (const p of u.parts) if (p.state !== 3) return;
     u.translatedOk = true;
-    let same = true;
-    for (const p of u.parts) {
-      if (p.translated !== p.text) {
-        same = false;
-        break;
-      }
-    }
-    u.noop = same;
+    u.noop = unitOutput(u) === u.source;
     if (u.noop) {
       u.rendered = false;
       return;
@@ -2033,7 +2436,12 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
   // Cache (localStorage, keyed by provider|lang|hash, 3 MB LRU)
   // ---------------------------------------------------------------------------
 
-  const CACHE_PREFIX = 'whtr1|';
+  // v2 keys hold translations of normalised source strings. v1 keys were keyed
+  // by raw whitespace and may hold a different wording for the same source, so
+  // they are purged rather than read.
+  const CACHE_ROOT = 'whtr1|';
+  const CACHE_VERSION = 'v2';
+  const CACHE_PREFIX = CACHE_ROOT + CACHE_VERSION + '|';
   const CACHE_LIMIT = 3 * 1024 * 1024;
   const CACHE_TARGET = Math.floor(CACHE_LIMIT * 0.8);
   let cacheIndex = null;
@@ -2064,13 +2472,23 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
     const ls = storage();
     if (!ls) return;
     const keys = [];
+    const stale = [];
     try {
       for (let i = 0; i < ls.length; i++) {
         const key = ls.key(i);
-        if (key && key.indexOf(CACHE_PREFIX) === 0) keys.push(key);
+        if (!key || key.indexOf(CACHE_ROOT) !== 0) continue;
+        if (key.indexOf(CACHE_PREFIX) === 0) keys.push(key);
+        else stale.push(key);
       }
     } catch (_) {
       return;
+    }
+    for (const key of stale) {
+      try {
+        ls.removeItem(key);
+      } catch (_) {
+        /* ignore */
+      }
     }
     for (const key of keys) {
       let value = null;
@@ -2237,12 +2655,17 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
     const ls = storage();
     cacheIndex = new Map();
     cacheTotal = 0;
+    // Completed in-session entries are part of the cache too; in-flight ones
+    // stay so their units still resolve.
+    for (const [text, entry] of Array.from(state.textEntries)) {
+      if (entry.state === 3) state.textEntries.delete(text);
+    }
     if (!ls) return;
     const keys = [];
     try {
       for (let i = 0; i < ls.length; i++) {
         const key = ls.key(i);
-        if (key && key.indexOf(CACHE_PREFIX) === 0) keys.push(key);
+        if (key && key.indexOf(CACHE_ROOT) === 0) keys.push(key);
       }
     } catch (_) {
       return;
@@ -2369,9 +2792,10 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
     clone.setAttribute(ATTR_CLONE, '1');
     clone.setAttribute(ATTR_UNIT, String(u.id));
     for (const part of u.parts) {
-      if (part.translated == null) continue;
+      const text = partOutput(part);
+      if (text == null) continue;
       try {
-        clone.appendChild(buildFragment(part.translated, u.refs));
+        clone.appendChild(buildFragment(text, u.refs));
       } catch (e) {
         problem('build clone: ' + (e && e.message ? e.message : e));
       }
@@ -2442,7 +2866,8 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
   }
 
   function computeSwapOutputs(u) {
-    const source = u.parts.map((p) => (p.translated == null ? '' : p.translated)).join('');
+    const source =
+      (u.leadTokens || '') + u.parts.map((p) => partOutput(p) || '').join('') + (u.trailTokens || '');
     const groups = [[]];
     for (const seg of u.segs) {
       if (seg.kind === 'token') groups.push([]);
@@ -2504,7 +2929,7 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
   }
 
   function swapOutputsReady(u) {
-    return u.parts.length > 0 && u.parts.every((p) => p.translated != null);
+    return u.parts.length > 0 && u.parts.every((p) => partOutput(p) != null);
   }
 
   // ---------------------------------------------------------------------------
@@ -4881,6 +5306,164 @@ static void P1DestroyDispatchWindow() {
 }
 
 // ---------------------------------------------------------------------------
+// Debug trace of the HTTP relay
+//
+// Only active while the "debug" setting is on, so the normal path builds no
+// trace strings at all. The trace answers one question from outside the app:
+// is the same source string being relayed more than once, and in which
+// batches. Only the request body is logged, never the headers, so neither the
+// API key nor the injected Authorization header can reach the log.
+//
+// The page sends a JSON array of strings. The batch size is the number of
+// string segments, approximated as the occurrences of the literal byte
+// sequence "," plus one: inside a JSON string a quote is escaped as \", so
+// that sequence can only sit between two string elements. An empty body (a
+// GET) has zero segments.
+//
+// A body can be up to 1 MB, so only a short prefix is converted and logged,
+// and every control character is escaped to keep one trace on one line. At
+// most 40 trace lines are written per minute; the first attempt past the
+// budget writes "[trace] throttled" once and the rest stays silent until the
+// window rolls over.
+// ---------------------------------------------------------------------------
+
+static constexpr unsigned kP1TraceLinesPerMinute = 40;
+static constexpr size_t kP1TraceBodyChars = 300;
+static constexpr size_t kP1TraceRespChars = 120;
+
+static SRWLOCK g_p1TraceLock = SRWLOCK_INIT;
+static unsigned long long g_p1TraceWindowStart = 0;
+static unsigned g_p1TraceLines = 0;
+static bool g_p1TraceThrottleLogged = false;
+
+enum class P1TraceDecision { Allow, Throttled, Suppress };
+
+static P1TraceDecision P1TraceReserve() {
+    AcquireSRWLockExclusive(&g_p1TraceLock);
+    unsigned long long now = GetTickCount64();
+    if (g_p1TraceWindowStart == 0 ||
+        now - g_p1TraceWindowStart >= 60ull * 1000ull) {
+        g_p1TraceWindowStart = now;
+        g_p1TraceLines = 0;
+        g_p1TraceThrottleLogged = false;
+    }
+    P1TraceDecision decision = P1TraceDecision::Suppress;
+    if (g_p1TraceLines < kP1TraceLinesPerMinute) {
+        ++g_p1TraceLines;
+        decision = P1TraceDecision::Allow;
+    } else if (!g_p1TraceThrottleLogged) {
+        g_p1TraceThrottleLogged = true;
+        decision = P1TraceDecision::Throttled;
+    }
+    ReleaseSRWLockExclusive(&g_p1TraceLock);
+    return decision;
+}
+
+// Returns true when the caller may write one trace line. Writes the single
+// "[trace] throttled" notice itself, so callers never repeat it.
+static bool P1TraceBegin() {
+    P1TraceDecision decision = P1TraceReserve();
+    if (decision == P1TraceDecision::Throttled) {
+        P0WriteFileLog(L"[trace] throttled");
+        return false;
+    }
+    return decision == P1TraceDecision::Allow;
+}
+
+// Appends at most maxChars characters of text to out, escaping anything that
+// would break the one-line rule or smuggle a control character into the log.
+static void P1TraceAppendEscaped(std::wstring& out,
+                                 const std::wstring& text,
+                                 size_t maxChars) {
+    size_t count = std::min(maxChars, text.size());
+    for (size_t i = 0; i < count; ++i) {
+        wchar_t ch = text[i];
+        switch (ch) {
+            case L'\\':
+                out += L"\\\\";
+                break;
+            case L'\r':
+                out += L"\\r";
+                break;
+            case L'\n':
+                out += L"\\n";
+                break;
+            case L'\t':
+                out += L"\\t";
+                break;
+            default:
+                if (ch < 0x20 || ch == 0x7f) {
+                    wchar_t buffer[8] = {};
+                    swprintf_s(buffer, ARRAYSIZE(buffer), L"\\u%04X",
+                               static_cast<unsigned>(ch));
+                    out += buffer;
+                } else {
+                    out.push_back(ch);
+                }
+                break;
+        }
+    }
+}
+
+// Converts a short UTF-8 prefix and escapes it. The prefix is cut on a UTF-8
+// boundary so a multi-byte character is never split.
+static std::wstring P1TracePreviewUtf8(const std::string& utf8,
+                                       size_t maxChars) {
+    std::wstring preview;
+    if (utf8.empty()) {
+        return preview;
+    }
+    size_t limit = std::min(utf8.size(), maxChars * 4);
+    while (limit > 0 && limit < utf8.size() &&
+           (static_cast<unsigned char>(utf8[limit]) & 0xC0) == 0x80) {
+        --limit;
+    }
+    std::wstring wide = P1Utf8ToWide(utf8.substr(0, limit));
+    P1TraceAppendEscaped(preview, wide, maxChars);
+    return preview;
+}
+
+static unsigned long long P1TraceCountSegments(const std::string& body) {
+    if (body.empty()) {
+        return 0;
+    }
+    unsigned long long count = 1;
+    for (size_t i = 0; i + 2 < body.size(); ++i) {
+        if (body[i] == '"' && body[i + 1] == ',' && body[i + 2] == '"') {
+            ++count;
+        }
+    }
+    return count;
+}
+
+// Two lines per relayed request: the size and batch, then the escaped body
+// prefix. Call only while the request's trace flag is set.
+static void P1TraceHttpRequest(unsigned long long id,
+                               const std::string& body) {
+    if (P1TraceBegin()) {
+        P0WriteFileLog(L"[trace] http id=%llu bytes=%llu batch=%llu", id,
+                       static_cast<unsigned long long>(body.size()),
+                       P1TraceCountSegments(body));
+    }
+    if (P1TraceBegin()) {
+        std::wstring preview = P1TracePreviewUtf8(body, kP1TraceBodyChars);
+        P0WriteFileLog(L"[trace] body id=%llu %s", id, preview.c_str());
+    }
+}
+
+static void P1TraceHttpResponse(unsigned long long id,
+                                int status,
+                                const std::string& body) {
+    if (!P1TraceBegin()) {
+        return;
+    }
+    std::wstring preview = P1TracePreviewUtf8(body, kP1TraceRespChars);
+    P0WriteFileLog(L"[trace] resp id=%llu status=%d bytes=%llu first=%s", id,
+                   status, static_cast<unsigned long long>(body.size()),
+                   preview.c_str());
+}
+
+// ---------------------------------------------------------------------------
 // HTTP request/response structures
 // ---------------------------------------------------------------------------
 
@@ -4893,6 +5476,7 @@ struct P1HttpRequest {
     unsigned long long timeoutMs = 20000;
     std::string apiKey;
     std::wstring apiKeyHost;
+    bool trace = false;       // debug setting at relay time
     void* webView = nullptr;  // owned reference, released on the UI thread
 };
 
@@ -5016,6 +5600,9 @@ static P1HttpReply* P1PerformHttp(const P1HttpRequest* request) {
                            request->id, methodForLog.c_str(),
                            hostForLog.c_str(), stage, reply->error,
                            GetTickCount64() - started);
+            if (request->trace) {
+                P1TraceHttpResponse(request->id, reply->status, reply->body);
+            }
             return reply;
         }
         hostForLog = P1ClipForLog(parts.host, 80);
@@ -5212,6 +5799,9 @@ static P1HttpReply* P1PerformHttp(const P1HttpRequest* request) {
                            request->id,
                            static_cast<unsigned long long>(kP1MaxReplyBytes));
         }
+        if (request->trace) {
+            P1TraceHttpResponse(request->id, reply->status, reply->body);
+        }
         return reply;
     } catch (...) {
         if (reply->error == 0) {
@@ -5224,6 +5814,9 @@ static P1HttpReply* P1PerformHttp(const P1HttpRequest* request) {
                        reply->status, stage, reply->error,
                        static_cast<unsigned long long>(reply->body.size()),
                        elapsed);
+        if (request->trace) {
+            P1TraceHttpResponse(request->id, reply->status, reply->body);
+        }
         return reply;
     }
 }
@@ -5591,6 +6184,11 @@ static void P1HandleHttp(void* sender, const std::wstring& rest) {
     P1SettingsSnapshot snapshot = P1ReadSettings();
     P1KeyInfo key = P1GetKeyInfo();
 
+    // Debug trace: only the body, never the headers, so the key cannot leak.
+    if (snapshot.debug) {
+        P1TraceHttpRequest(id, body);
+    }
+
     auto* request = new (std::nothrow) P1HttpRequest();
     if (!request) {
         P1RejectHttp(sender, id, L"out of memory for the request",
@@ -5606,6 +6204,7 @@ static void P1HandleHttp(void* sender, const std::wstring& rest) {
         static_cast<unsigned long long>(snapshot.timeoutMs);
     request->apiKey = key.key;
     request->apiKeyHost = key.host;
+    request->trace = snapshot.debug;
 
     auto addRef =
         reinterpret_cast<FnAddRef>(P0GetRawSlot(sender, kSlotAddRef));

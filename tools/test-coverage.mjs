@@ -122,8 +122,8 @@ await env.wait(600);
 env.check('select value keeps its unit when the dropdown opens', selectValue.getAttribute('data-wh-unit') === unitBefore, unitBefore + ' -> ' + selectValue.getAttribute('data-wh-unit'));
 env.check('select value is not translated twice', env.text(selectValue) === valueTextBefore, env.text(selectValue));
 env.check(
-  'same string requested once for the value and once for the option',
-  env.requestCount('Where the mouse cursor is') === requestsBefore + 1,
+  'the option reuses the value translation instead of a second request',
+  env.requestCount('Where the mouse cursor is') === requestsBefore,
   requestsBefore + ' -> ' + env.requestCount('Where the mouse cursor is')
 );
 const option = doc.querySelector('#select-dropdown .ant-select-item-option-content');

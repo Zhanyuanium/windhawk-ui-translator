@@ -107,8 +107,8 @@ env.check(
 );
 env.check('closed value is not translated twice', env.text(realContent) === valueBefore, env.text(realContent));
 env.check(
-  'same string requested once for the value and once for the option',
-  env.requestCount('Where the mouse cursor is') === requestsBefore + 1,
+  'the option reuses the value translation instead of a second request',
+  env.requestCount('Where the mouse cursor is') === requestsBefore,
   requestsBefore + ' -> ' + env.requestCount('Where the mouse cursor is')
 );
 const option = doc.querySelector('#select-dropdown-real .ant-select-item-option-content');
