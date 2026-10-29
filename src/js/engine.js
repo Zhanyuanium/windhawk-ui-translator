@@ -96,7 +96,7 @@
       scopeChangelog: true,
       hoverDelayMs: 120,
       shortcutToggle: 'Alt+Q',
-      shortcutMode: 'Alt+W',
+      gestureToggle: true,
       batchSize: 20,
       batchChars: 10000,
       batchIntervalMs: 400,
@@ -115,7 +115,6 @@
     settingsCount: 0,
     connected: false,
     enabled: true,
-    showOrigMode: false,
     targetLang: '',
     provider: 'edge',
     providerWarned: false,
@@ -137,7 +136,7 @@
     renderScheduled: false,
     scanQueue: null,
     scanScheduled: false,
-    shortcuts: { toggle: null, mode: null },
+    shortcuts: { toggle: null },
     settingsAttempts: 0,
     stats: {
       scans: 0,
@@ -185,7 +184,6 @@
     return {
       version: VERSION,
       enabled: state.enabled,
-      mode: state.showOrigMode ? 'original' : 'translation',
       settingsSeen: state.settingsSeen,
       connected: state.connected,
       targetLang: state.targetLang,
@@ -400,11 +398,6 @@
       if (shortcutMatches(state.shortcuts.toggle, e)) {
         e.preventDefault();
         setEnabled(!state.enabled);
-        return;
-      }
-      if (shortcutMatches(state.shortcuts.mode, e)) {
-        e.preventDefault();
-        toggleMode();
       }
     } catch (err) {
       problem('shortcut: ' + (err && err.message ? err.message : err));
@@ -416,12 +409,25 @@
   // ---------------------------------------------------------------------------
 
   const PROSE_SEL = 'h1,h2,h3,h4,h5,h6,p,li,blockquote,td,th';
+  // Block-level elements that make a prose host "mixed": it owns text and also
+  // wraps other blocks, which are translated as their own units.
+  const BLOCK_TAGS = new Set([
+    'ADDRESS', 'ARTICLE', 'ASIDE', 'BLOCKQUOTE', 'DD', 'DETAILS', 'DIV', 'DL',
+    'DT', 'FIELDSET', 'FIGCAPTION', 'FIGURE', 'FOOTER', 'FORM', 'H1', 'H2',
+    'H3', 'H4', 'H5', 'H6', 'HEADER', 'HR', 'LI', 'MAIN', 'NAV', 'OL', 'P',
+    'PRE', 'SECTION', 'SUMMARY', 'TABLE', 'TBODY', 'TD', 'TFOOT', 'TH',
+    'THEAD', 'TR', 'UL'
+  ]);
   const SETTINGS_SELECTORS = [
     '[data-testid="mod-setting-description-text"]',
-    '[data-testid="mod-setting-reset"]',
     '.ant-select-item-option-content',
+    '.ant-select-selection-item',
+    '.ant-select-selection-placeholder',
+    // Title first: the title claims the row, and a reset button nested in it is
+    // picked up by the dedicated nested pass below.
     '.windhawk-row-meta-title',
-    '.windhawk-row-meta-description'
+    '.windhawk-row-meta-description',
+    '[data-testid="mod-setting-reset"]'
   ];
   const LIST_SELECTORS = ['.windhawk-row-meta-title', '.windhawk-row-meta-description', '.ant-typography'];
 
@@ -508,7 +514,10 @@
       const row = el.closest('.windhawk-row');
       if (
         row &&
-        row.querySelector('.ant-select,.ant-switch,.ant-input,.ant-btn,[data-testid="mod-setting-reset"]')
+        row.querySelector(
+          '.ant-select,.ant-switch,.ant-input,.ant-btn,[data-testid="mod-setting-reset"],' +
+          '[data-testid="mod-setting-description"],[data-testid="mod-setting-description-text"]'
+        )
       ) {
         return 'settings';
       }
@@ -525,12 +534,6 @@
       return false;
     }
   }
-
-  // Block-level content marks a container rather than a label sitting next to
-  // an icon. Used by isIconLabelRow below.
-  const BLOCK_CONTENT_SEL =
-    'address,article,aside,blockquote,div,dl,fieldset,figcaption,figure,footer,' +
-    'form,h1,h2,h3,h4,h5,h6,header,hr,li,main,nav,ol,p,pre,section,table,ul';
 
   // The mod details header (Card.Meta title) packs the mod name, the id chip,
   // the metadata line (version / author / process scope) and the action
@@ -554,35 +557,54 @@
     }
   }
 
-  // An icon + label row (author, process scope) carries proper nouns that must
-  // stay as authored. Only skip when the icon is the element's only non-inline
-  // content: a settings description or a summary has no <svg>, so it is never
-  // swallowed by this rule.
-  function isIconLabelRow(el) {
-    let icon = null;
+  // Metadata rows (version, author, process scope) are Typography.Text too, so
+  // they match .ant-typography; each carries an inline icon and is a proper
+  // noun, not prose. Only inside the card head does that icon disqualify a
+  // host: setting titles elsewhere use an ⓘ button and still translate.
+  function hasSvgIcon(el) {
     try {
-      icon = el.querySelector('svg');
+      return !!el.querySelector('svg');
     } catch (_) {
       return false;
     }
-    if (!icon) return false;
-    let blocks = [];
-    try {
-      blocks = Array.from(el.querySelectorAll(BLOCK_CONTENT_SEL));
-    } catch (_) {
-      blocks = [];
-    }
-    for (const block of blocks) {
-      if ((block.textContent || '').trim()) return false;
-    }
-    return true;
   }
 
   function eligibleHost(el) {
     if (!el || el.nodeType !== 1) return false;
-    if (isCardHeadHost(el) && !isTypography(el)) return false;
-    if (isIconLabelRow(el)) return false;
+    if (isCardHeadHost(el)) {
+      if (!isTypography(el)) return false;
+      if (hasSvgIcon(el)) return false;
+    }
     return true;
+  }
+
+  function hasDirectText(el) {
+    try {
+      for (let n = el.firstChild; n; n = n.nextSibling) {
+        if (n.nodeType === 3 && /\S/.test(n.nodeValue || '')) return true;
+      }
+    } catch (_) {
+      /* ignore */
+    }
+    return false;
+  }
+
+  function hasBlockChild(el) {
+    try {
+      for (let n = el.firstElementChild; n; n = n.nextElementSibling) {
+        if (BLOCK_TAGS.has(n.tagName)) return true;
+      }
+    } catch (_) {
+      /* ignore */
+    }
+    return false;
+  }
+
+  // A <li> (or td) that owns a sentence and also wraps a nested list is not a
+  // pure-text block: cloning it would duplicate the nested items. It is
+  // eligible in swap mode, translating only its own text nodes.
+  function isMixedProseHost(el) {
+    return hasDirectText(el) && hasBlockChild(el);
   }
 
   function scanAll() {
@@ -599,6 +621,27 @@
       for (const host of claimed) {
         if (host === el) return false;
         if (host.contains(el) || el.contains(host)) return false;
+      }
+      claimed.push(el);
+      return true;
+    };
+    // A mixed prose host may contain units claimed before it; its own text is
+    // swapped and each nested block stays an atomic placeholder in its source.
+    const claimOuter = (el) => {
+      for (const host of claimed) {
+        if (host === el) return false;
+        if (host.contains(el)) return false;
+      }
+      claimed.push(el);
+      return true;
+    };
+    // A control nested in an already claimed host (the reset button in a
+    // setting title) is an atomic token in that host's source, so its own text
+    // can be swapped as a nested unit.
+    const claimInner = (el) => {
+      for (const host of claimed) {
+        if (host === el) return false;
+        if (el.contains(host)) return false;
       }
       claimed.push(el);
       return true;
@@ -622,10 +665,25 @@
         } catch (_) {
           blocks = [];
         }
+        const mixed = [];
         for (const block of blocks) {
           if (block.closest('[' + ATTR_CLONE + '="1"]')) continue;
           if (block.closest(DENY_ANCESTOR_SEL)) continue;
+          // A settings row can sit inside the details card body; its title is an
+          // h4 but belongs to the swap pass, never to a prose clone.
+          if (
+            block.closest('.windhawk-row') ||
+            block.matches('.windhawk-row-meta-title, .windhawk-row-meta-description')
+          ) {
+            continue;
+          }
           if (!eligibleHost(block)) continue;
+          // A host with its own sentence and nested blocks (a <li> wrapping a
+          // <ul>) cannot be cloned: the nested items are their own units.
+          if (isMixedProseHost(block)) {
+            mixed.push(block);
+            continue;
+          }
           // Keep only the innermost block so a <li><p> pair is not rendered twice.
           try {
             if (block.querySelector(PROSE_SEL)) continue;
@@ -635,6 +693,14 @@
           if (!hasText(block)) continue;
           if (!claim(block)) continue;
           candidates.push({ el: block, mode: 'clone', surface: surface });
+        }
+        // Claim mixed hosts deepest first; each keeps the nested blocks (already
+        // claimed above) as atomic placeholders and swaps only its own text.
+        for (let i = mixed.length - 1; i >= 0; i--) {
+          const block = mixed[i];
+          if (!hasText(block)) continue;
+          if (!claimOuter(block)) continue;
+          candidates.push({ el: block, mode: 'swap', surface: surface });
         }
       }
     }
@@ -657,6 +723,25 @@
           if (!claim(el)) continue;
           candidates.push({ el: el, mode: 'swap', surface: 'settings' });
         }
+      }
+      // The reset button lives inside the setting title, which claims the row
+      // first and serializes the button as an atomic token. Give the button's
+      // own label a nested unit so it translates too; its icon, the ⓘ button
+      // and the switch stay untouched.
+      let resets = [];
+      try {
+        resets = Array.from(document.querySelectorAll('[data-testid="mod-setting-reset"]'));
+      } catch (_) {
+        resets = [];
+      }
+      for (const el of resets) {
+        if (el.closest('[' + ATTR_CLONE + '="1"]')) continue;
+        if (el.closest(DENY_ANCESTOR_SEL)) continue;
+        if (!eligibleHost(el)) continue;
+        if (compactSurface(el) !== 'settings') continue;
+        if (!hasText(el)) continue;
+        if (!claimInner(el)) continue;
+        candidates.push({ el: el, mode: 'swap', surface: 'settings' });
       }
     }
 
@@ -1645,19 +1730,25 @@
       for (const seg of segs) seg.out = '';
       return;
     }
-    if (segs.length === 1) {
-      segs[0].out = edgeSpaces(segs[0].orig, text);
+    // Whitespace-only nodes (for example the indentation after an inline icon
+    // button) must not receive part of the translation when a provider drops
+    // the placeholders.
+    let targets = segs.filter((seg) => /[^\s]/.test(seg.orig || ''));
+    if (!targets.length) targets = segs;
+    for (const seg of segs) if (targets.indexOf(seg) === -1) seg.out = seg.orig;
+    if (targets.length === 1) {
+      targets[0].out = edgeSpaces(targets[0].orig, text);
       return;
     }
     let total = 0;
-    for (const seg of segs) total += Math.max(1, (seg.orig || '').length);
+    for (const seg of targets) total += Math.max(1, (seg.orig || '').length);
     const chars = Array.from(text);
     let index = 0;
     let acc = 0;
-    for (let i = 0; i < segs.length; i++) {
-      const seg = segs[i];
+    for (let i = 0; i < targets.length; i++) {
+      const seg = targets[i];
       acc += Math.max(1, (seg.orig || '').length);
-      let end = i === segs.length - 1 ? chars.length : Math.round((chars.length * acc) / total);
+      let end = i === targets.length - 1 ? chars.length : Math.round((chars.length * acc) / total);
       if (end < index) end = index;
       const piece = chars.slice(index, end).join('');
       index = end;
@@ -1808,7 +1899,7 @@
   }
 
   function effectiveShowOrig(u) {
-    return !state.enabled || state.showOrigMode || u.hoverOrig || u.tapOrig;
+    return !state.enabled || u.hoverOrig || u.tapOrig;
   }
 
   function applyUnit(u, force) {
@@ -1938,24 +2029,34 @@
     }, grace);
   }
 
-  let touchStart = null;
+  // ---------------------------------------------------------------------------
+  // Touch: per-block single tap and the two-finger double tap.
+  //
+  // The single tap is deferred briefly so a second finger can cancel it. Two
+  // pointers down and both lifted, twice within 400 ms, toggles translation
+  // globally exactly like the keyboard shortcut. Each pointer may wander at
+  // most 30 px.
+  // ---------------------------------------------------------------------------
 
-  function onPointerDown(e) {
-    if (!state.enabled || e.pointerType !== 'touch') return;
-    touchStart = { x: e.clientX, y: e.clientY, t: Date.now(), id: e.pointerId };
+  const GESTURE_WINDOW_MS = 400;
+  const GESTURE_SLOP_PX = 30;
+  const TAP_SLOP_PX = 10;
+  const SINGLE_TAP_DELAY_MS = 160;
+
+  let touchStart = null;
+  let pendingTapTimer = 0;
+  const touchPointers = new Map(); // pointerId -> { x, y, at, moved, tapMoved }
+  let twoFingerTap = null; // { ids: [id, id], at, ok }
+  let lastTwoFingerTapAt = 0;
+
+  function cancelPendingTap() {
+    if (!pendingTapTimer) return;
+    clearTimeout(pendingTapTimer);
+    pendingTapTimer = 0;
   }
 
-  function onPointerUp(e) {
-    if (!state.enabled || e.pointerType !== 'touch') return;
-    const start = touchStart;
-    touchStart = null;
-    if (start && start.id === e.pointerId) {
-      const dx = Math.abs(e.clientX - start.x);
-      const dy = Math.abs(e.clientY - start.y);
-      if (dx > 10 || dy > 10 || Date.now() - start.t > 900) return;
-    }
-    const u = unitFromEvent(e);
-    if (!u) return;
+  function toggleTapOrig(u) {
+    if (!state.enabled || !u || !u.el || !u.el.isConnected) return;
     u.tapOrig = !u.tapOrig;
     if (u.hoverTimer) {
       clearTimeout(u.hoverTimer);
@@ -1969,8 +2070,120 @@
     applyUnit(u, true);
   }
 
-  function onPointerCancel() {
+  function queueSingleTap(u) {
+    cancelPendingTap();
+    pendingTapTimer = setTimeout(() => {
+      pendingTapTimer = 0;
+      safe(() => toggleTapOrig(u), 'tap');
+    }, SINGLE_TAP_DELAY_MS);
+  }
+
+  function pointerDistance(start, e) {
+    const dx = Number(e.clientX) - start.x;
+    const dy = Number(e.clientY) - start.y;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  function onPointerDown(e) {
+    if (e.pointerType !== 'touch') return;
+    // Any new touch cancels a queued block tap; a second finger may be the
+    // start of the two-finger gesture even if it lands on a form control.
+    cancelPendingTap();
+    if (isTypingTarget(e.target)) return;
+    const now = Date.now();
+    touchPointers.set(e.pointerId, {
+      x: Number(e.clientX),
+      y: Number(e.clientY),
+      at: now,
+      moved: false,
+      tapMoved: false
+    });
+    if (touchPointers.size === 1) {
+      touchStart = { x: Number(e.clientX), y: Number(e.clientY), t: now, id: e.pointerId };
+      twoFingerTap = null;
+      return;
+    }
+    // A second finger cancels the block tap the first one may have queued.
     touchStart = null;
+    if (touchPointers.size === 2) {
+      let at = now;
+      for (const p of touchPointers.values()) at = Math.min(at, p.at);
+      twoFingerTap = { ids: Array.from(touchPointers.keys()), at: at, ok: true };
+    } else if (twoFingerTap) {
+      twoFingerTap.ok = false;
+    }
+  }
+
+  function onPointerMove(e) {
+    if (e.pointerType !== 'touch') return;
+    const start = touchPointers.get(e.pointerId);
+    if (!start) return;
+    const dist = pointerDistance(start, e);
+    if (dist > TAP_SLOP_PX) start.tapMoved = true;
+    if (start.moved || dist <= GESTURE_SLOP_PX) return;
+    start.moved = true;
+    if (twoFingerTap && twoFingerTap.ids.indexOf(e.pointerId) !== -1) twoFingerTap.ok = false;
+  }
+
+  function onPointerUp(e) {
+    if (e.pointerType !== 'touch') return;
+    const start = touchPointers.get(e.pointerId);
+
+    if (!start) {
+      // Synthetic pointerup without a matching pointerdown: still a tap.
+      if (isTypingTarget(e.target)) return;
+      if (!state.enabled) return;
+      const u = unitFromEvent(e);
+      if (u) queueSingleTap(u);
+      return;
+    }
+
+    touchPointers.delete(e.pointerId);
+    const now = Date.now();
+    const dist = pointerDistance(start, e);
+    const moved = start.moved || dist > GESTURE_SLOP_PX;
+    const tapMoved = start.tapMoved || dist > TAP_SLOP_PX;
+    if (twoFingerTap && twoFingerTap.ids.indexOf(e.pointerId) !== -1 && moved) twoFingerTap.ok = false;
+
+    if (twoFingerTap) {
+      // A two-finger attempt never taps a single block.
+      if (touchPointers.size === 0) {
+        const tap = twoFingerTap;
+        twoFingerTap = null;
+        const ok = tap.ok && now - tap.at <= GESTURE_WINDOW_MS;
+        if (!ok) return;
+        const on = !!state.settings.gestureToggle;
+        if (on && lastTwoFingerTapAt && now - lastTwoFingerTapAt <= GESTURE_WINDOW_MS) {
+          lastTwoFingerTapAt = 0;
+          setEnabled(!state.enabled);
+        } else if (on) {
+          lastTwoFingerTapAt = now;
+        }
+      }
+      return;
+    }
+
+    if (touchPointers.size > 0) return; // another finger is still down
+    if (touchStart && touchStart.id === e.pointerId) {
+      const elapsed = now - touchStart.t;
+      touchStart = null;
+      if (tapMoved || elapsed > 900) return;
+    } else {
+      touchStart = null;
+    }
+    if (!state.enabled) return;
+    const u = unitFromEvent(e);
+    if (u) queueSingleTap(u);
+  }
+
+  function onPointerCancel(e) {
+    const id = e && e.pointerId;
+    if (id == null) touchPointers.clear();
+    else touchPointers.delete(id);
+    touchStart = null;
+    if (touchPointers.size === 0) twoFingerTap = null;
+    else if (twoFingerTap) twoFingerTap.ok = false;
+    cancelPendingTap();
   }
 
   // ---------------------------------------------------------------------------
@@ -2019,7 +2232,9 @@
     if (!state.enabled || !state.settingsSeen) return;
     for (const record of records) {
       if (!isOurMutation(record)) {
-        scheduleScan(150);
+        // A tab panel (settings) can mount in a single React commit; scan on
+        // the next task so its first paint is translated, not 150 ms later.
+        scheduleScan(0);
         return;
       }
     }
@@ -2099,6 +2314,8 @@
     next.concurrency = clamp(next.concurrency, 1, 8);
     next.timeoutMs = clamp(next.timeoutMs, 1000, 120000);
     next.cacheTtlDays = clamp(next.cacheTtlDays, 0, 3650);
+    next.gestureToggle = next.gestureToggle !== false;
+    if (!next.gestureToggle) lastTwoFingerTapAt = 0;
     next.debug = !!next.debug;
 
     state.settings = next;
@@ -2110,7 +2327,6 @@
     if (state.provider !== provider) state.providerWarned = false;
     state.provider = provider;
     state.shortcuts.toggle = parseShortcut(next.shortcutToggle);
-    state.shortcuts.mode = parseShortcut(next.shortcutMode);
 
     if (next.clearCache) {
       cacheClear();
@@ -2157,15 +2373,6 @@
     } else {
       log('disabled');
     }
-  }
-
-  function toggleMode() {
-    state.showOrigMode = !state.showOrigMode;
-    for (const u of state.units) {
-      if (!state.showOrigMode) u.tapOrig = false;
-      applyUnit(u, true);
-    }
-    log('mode: ' + (state.showOrigMode ? 'original' : 'translation'));
   }
 
   function onMessage(e) {
@@ -2240,8 +2447,9 @@
       document.addEventListener('pointerover', (e) => safe(() => onPointerOver(e), 'pointerover'), true);
       document.addEventListener('pointerout', (e) => safe(() => onPointerOut(e), 'pointerout'), true);
       document.addEventListener('pointerdown', (e) => safe(() => onPointerDown(e), 'pointerdown'), true);
+      document.addEventListener('pointermove', (e) => safe(() => onPointerMove(e), 'pointermove'), true);
       document.addEventListener('pointerup', (e) => safe(() => onPointerUp(e), 'pointerup'), true);
-      document.addEventListener('pointercancel', () => safe(onPointerCancel, 'pointercancel'), true);
+      document.addEventListener('pointercancel', (e) => safe(() => onPointerCancel(e), 'pointercancel'), true);
       window.addEventListener('keydown', (e) => safe(() => onKeyDown(e), 'keydown'));
       window.addEventListener('load', () => {
         safe(() => {

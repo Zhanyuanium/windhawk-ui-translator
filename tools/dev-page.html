@@ -50,13 +50,14 @@
     <code>settings?</code> and <code>http</code> messages with canned
     Microsoft-style Edge responses. The engine is loaded from
     <code>../src/js/engine.js</code>. Hover a translated block to see the
-    original, move away to restore the translation.
+    original, move away to restore the translation. On touch, tap a block to
+    toggle it; two-finger double tap anywhere toggles translation globally.
   </p>
   <div class="toolbar">
     <button id="btn-tap">Simulate tap (touch)</button>
+    <button id="btn-gesture">Simulate two-finger double tap</button>
     <button id="btn-hover">Simulate hover</button>
     <button id="btn-leave">Simulate pointer out</button>
-    <button id="btn-mode">Toggle original mode (Alt+W)</button>
     <button id="btn-toggle">Toggle engine (Alt+Q)</button>
     <button id="btn-clear">Clear cache + reload</button>
     <button id="btn-rescan">Rescan</button>
@@ -105,6 +106,15 @@
       <div class="windhawk-row-meta-title">Translation provider</div>
       <div data-testid="mod-setting-description-text">This description contains <code>inline code</code> and must keep it.</div>
       <div class="ant-select-item-option-content">Microsoft Edge (free)</div>
+    </div>
+    <div class="windhawk-row" data-testid="mod-setting">
+      <h4 class="windhawk-row-meta-title">Monitor
+        <button type="button" data-testid="mod-setting-description" aria-label="Description"><svg viewBox="0 0 16 16"><path d="M0 0h16v16z"/></svg></button>
+      </h4>
+      <div data-testid="mod-setting-description-text">Only the windows on the switcher's monitor</div>
+      <div class="ant-select">
+        <div class="ant-select-selector"><span class="ant-select-selection-item">Microsoft Edge (free)</span></div>
+      </div>
     </div>
   </section>
 
@@ -156,7 +166,7 @@
     scopeChangelog: true,
     hoverDelayMs: 120,
     shortcutToggle: 'Alt+Q',
-    shortcutMode: 'Alt+W',
+    gestureToggle: true,
     batchSize: 20,
     batchChars: 10000,
     batchIntervalMs: 80,
@@ -324,7 +334,7 @@
     const target = firstTranslated();
     if (!target) { statsEl.textContent = 'no translated clone yet'; return; }
     pointer('pointerup', target);
-    setTimeout(showStats, 50);
+    setTimeout(showStats, 300);
   });
 
   document.getElementById('btn-hover').addEventListener('click', () => {
@@ -341,11 +351,21 @@
     setTimeout(showStats, 400);
   });
 
-  document.getElementById('btn-mode').addEventListener('click', () => {
-    document.documentElement.dispatchEvent(new KeyboardEvent('keydown', {
-      bubbles: true, code: 'KeyW', altKey: true
-    }));
-    setTimeout(showStats, 100);
+  document.getElementById('btn-gesture').addEventListener('click', () => {
+    const touch = (type, x, y, id) => {
+      document.body.dispatchEvent(new PointerEvent(type, {
+        bubbles: true, cancelable: true, pointerType: 'touch', pointerId: id, clientX: x, clientY: y
+      }));
+    };
+    const tap = () => {
+      touch('pointerdown', 10, 10, 11);
+      touch('pointerdown', 40, 10, 12);
+      touch('pointerup', 10, 10, 11);
+      touch('pointerup', 40, 10, 12);
+    };
+    tap();
+    setTimeout(tap, 120);
+    setTimeout(showStats, 700);
   });
 
   document.getElementById('btn-toggle').addEventListener('click', () => {
