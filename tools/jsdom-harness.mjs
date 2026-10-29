@@ -7,7 +7,7 @@
  *
  *   import { JSDOM } from 'jsdom';
  *   import { mount, fixture } from '.../tools/jsdom-harness.mjs';
- *   const env = mount(JSDOM, { html: fixture.installedMods() });
+ *   const env = mount(JSDOM, { html: fixture.modsTable() });
  *   await env.wait(1200);
  *   env.check('name translated', env.hasCJK(env.text(env.doc.getElementById('table-name'))));
  *   env.report();
@@ -78,6 +78,78 @@ export const fixture = {
           <div class="windhawk-row-meta">
             <h4 class="windhawk-row-meta-title" id="tile-name2">Taskbar Clock</h4>
             <div class="windhawk-row-meta-description" id="tile-desc2">Replaces the tray clock.</div>
+          </div>
+        </div>
+      </div>`);
+  },
+
+  /** Explore page tile: Card.Meta title and description. */
+  exploreTile() {
+    return page(`
+      <div class="ant-listy" id="explore-grid">
+        <div class="ant-card ant-listy-item" id="explore-card">
+          <div class="ant-card-body">
+            <div class="ant-card-meta">
+              <div class="ant-card-meta-detail">
+                <div class="ant-card-meta-title" id="explore-name">Better Dialogs</div>
+                <div class="ant-card-meta-description" id="explore-desc">Improves Windows dialog boxes.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>`);
+  },
+
+  /**
+   * Explore tile in the real ModCard shape: the Card.Meta title holds a
+   * mod-card-title box with the name Typography, the status ribbon and an
+   * optional local-mod icon, followed by the metadata line (version, author,
+   * process scope, each with an icon). Only the Typography is the name.
+   */
+  modCard() {
+    return page(`
+      <div class="ant-listy" id="modcard-grid">
+        <div class="ant-card ant-listy-item" id="modcard-ribbon-card">
+          <div class="ant-card-body">
+            <div class="ant-card-meta">
+              <div class="ant-card-meta-detail">
+                <div class="ant-card-meta-title" id="modcard-ribbon-meta">
+                  <div class="sc-mod-card-title" data-testid="mod-card-title">
+                    <span class="ant-typography sc-ellipsis" id="modcard-ribbon-name"
+                          title="Windows 11 Taskbar Styler">Windows 11 Taskbar Styler</span>
+                    <div class="ant-ribbon-wrapper"><div class="ant-ribbon ant-ribbon-placement-end" id="modcard-ribbon">已安装</div></div>
+                    <span class="anticon sc-local-icon" id="modcard-local-icon" aria-label="Local mod"><svg viewBox="0 0 16 16"><path d="M0 0h16v16z"/></svg></span>
+                  </div>
+                  <div class="ModMetadataLine-sc-abc" id="modcard-ribbon-meta-line">
+                    <span class="sc-meta-item"><span class="anticon"><svg viewBox="0 0 16 16"><path d="M0 0h16v16z"/></svg></span>1.2.0</span>
+                    <span class="sc-meta-item"><span class="anticon"><svg viewBox="0 0 16 16"><path d="M0 0h16v16z"/></svg></span>m417z</span>
+                    <span class="sc-meta-item"><span class="anticon"><svg viewBox="0 0 16 16"><path d="M0 0h16v16z"/></svg></span>explorer.exe</span>
+                  </div>
+                </div>
+                <div class="ant-card-meta-description" id="modcard-ribbon-desc">Animates the taskbar Dock.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="ant-card ant-listy-item" id="modcard-plain-card">
+          <div class="ant-card-body">
+            <div class="ant-card-meta">
+              <div class="ant-card-meta-detail">
+                <div class="ant-card-meta-title" id="modcard-plain-meta">
+                  <div class="sc-mod-card-title" data-testid="mod-card-title">
+                    <span class="ant-typography sc-ellipsis" id="modcard-plain-name"
+                          title="Better file sizes in Explorer details">Better file sizes in Explorer details</span>
+                  </div>
+                  <div class="ModMetadataLine-sc-def" id="modcard-plain-meta-line">
+                    <span class="sc-meta-item"><span class="anticon"><svg viewBox="0 0 16 16"><path d="M0 0h16v16z"/></svg></span>1.0.0</span>
+                    <span class="sc-meta-item"><span class="anticon"><svg viewBox="0 0 16 16"><path d="M0 0h16v16z"/></svg></span>m417z</span>
+                    <span class="sc-meta-item"><span class="anticon"><svg viewBox="0 0 16 16"><path d="M0 0h16v16z"/></svg></span>explorer.exe</span>
+                  </div>
+                </div>
+                <div class="ant-card-meta-description" id="modcard-plain-desc">Shows folder sizes in the details pane.</div>
+              </div>
+            </div>
           </div>
         </div>
       </div>`);
@@ -702,11 +774,12 @@ export const fixture = {
     return dropdown;
   },
 
-  /** All four surfaces in one page. */
+  /** All surfaces in one page. */
   all() {
     const body = (html) => html.replace(/^[\s\S]*<body>/, '').replace(/<\/body>[\s\S]*$/, '');
     return page(
-      body(this.tileGrid()) + body(this.modsTable()) + body(this.detailsHeader()) + body(this.compactSettings())
+      body(this.tileGrid()) + body(this.exploreTile()) + body(this.modsTable()) +
+      body(this.detailsHeader()) + body(this.compactSettings())
     );
   }
 };
@@ -839,8 +912,10 @@ export function mount(JSDOM, options) {
       for (const batch of requests) if (batch.indexOf(text) !== -1) n++;
       return n;
     },
+    checks: 0,
     failures: [],
     check(name, ok, detail) {
+      env.checks++;
       if (ok) {
         console.log('PASS ' + name);
       } else {
@@ -850,14 +925,8 @@ export function mount(JSDOM, options) {
       }
     },
     report() {
-      console.log('');
       console.log('stats ' + JSON.stringify(env.api() ? env.api().stats() : {}));
-      if (env.failures.length) {
-        console.log(env.failures.length + ' failure(s)');
-        return env.failures.length;
-      }
-      console.log('all checks passed');
-      return 0;
+      return env.failures.length;
     }
   };
 

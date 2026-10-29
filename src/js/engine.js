@@ -1,15 +1,11 @@
 /*!
  * windhawk-ui-translator - page-side engine (P1)
  *
- * Runs inside the Windhawk 2.0 UI (http://tauri.localhost/), injected by the
- * mod at document-created time and again on navigation completion.
- *
- * Self-contained ES2020 IIFE: no imports, no eval, no network access. Every
- * byte leaves the page through the mod's `whtr1` channel (see docs/PROTOCOL.md).
- *
- * Default view is the translation in place. Pointer over a translated block
- * shows the original; pointer out restores the translation. On touch a tap
- * toggles the original for that block.
+ * Runs inside the Windhawk 2.0 UI, injected at document-created time and again
+ * on navigation completion. Self-contained ES2020 IIFE: no imports, no eval,
+ * no network access; every byte leaves the page through the mod's `whtr1`
+ * channel (see docs/PROTOCOL.md). Translation renders in place; pointer over a
+ * block shows the original, and on touch a tap toggles that block.
  */
 (() => {
   'use strict';
@@ -18,8 +14,7 @@
   const TAG = 'whtr1';
   const SEP = '\x1f';
 
-  // Attributes we own. data-wh-orig hides React's own node, data-wh-clone
-  // marks our clone, data-wh-swapped marks a text-node swap.
+  // Attributes we own: the hidden React node, our clone and a text-node swap.
   const ATTR_ORIG = 'data-wh-orig';
   const ATTR_CLONE = 'data-wh-clone';
   const ATTR_SWAPPED = 'data-wh-swapped';
@@ -52,15 +47,12 @@
 
   const clean = (s) => String(s == null ? '' : s).replace(/\x1f/g, ' ');
 
-  // One source string, one translation. Every unit's serialized text is
-  // collapsed to single spaces and trimmed before it becomes a cache key, a
-  // provider request or an in-flight key; the DOM keeps its own whitespace for
-  // restoring the original.
+  // Cache keys, provider requests and in-flight keys all use this normalised
+  // form; the DOM keeps its own whitespace for restoring the original.
   const normalizeSource = (s) => String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
 
   const hash32 = (s) => {
-    // FNV-1a, 32 bit; collisions are made less likely by appending the length
-    // in the cache key.
+    // FNV-1a, 32 bit; the cache key also carries the length against collisions.
     let h = 0x811c9dc5;
     for (let i = 0; i < s.length; i++) {
       h ^= s.charCodeAt(i);
@@ -134,9 +126,8 @@
     nextUnitId: 1,
     nextRequestId: 1,
     pending: new Map(),
-    // Normalised source text -> shared translation entry. Every unit that asks
-    // for a string already queued, in flight or translated attaches here, so a
-    // distinct string is requested exactly once per epoch.
+    // Normalised source -> shared translation entry, so a distinct string is
+    // requested once per epoch.
     textEntries: new Map(),
     queue: [],
     inflight: 0,
@@ -169,8 +160,7 @@
   }
 
   function problem(msg) {
-    // Errors are rare and the protocol wants them in p0.log even when verbose
-    // logging is off.
+    // Errors go to p0.log even when verbose logging is off.
     send(TAG + SEP + 'log' + SEP + ('whtr: ' + clean(msg)).slice(0, 500));
   }
 
@@ -429,14 +419,9 @@
     'PRE', 'SECTION', 'SUMMARY', 'TABLE', 'TBODY', 'TD', 'TFOOT', 'TH',
     'THEAD', 'TR', 'UL'
   ]);
-  // Closed select hosts. antd 6 (the Windhawk 2.0 UI) no longer renders a
-  // `.ant-select-selector`; a single select's value is a text node inside
-  // `.ant-select-content`, which also carries the `title` attribute and holds
-  // the search `<input role="combobox">` as its last child. Its placeholder is
-  // a `.ant-select-placeholder` div in the same slot, and an option with its
-  // own className/style wraps the label in `.ant-select-content-value`.
-  // `.ant-select-selection-item` / `-placeholder` remain for antd 5 and for
-  // antd 6's multiple/tags mode. The search input is atomic in every case.
+  // Closed select hosts. antd 6 renders a single select's value as a text node
+  // in `.ant-select-content` (which also carries `title` and the search input);
+  // `.ant-select-selection-item` remains for antd 5 and multiple/tags mode.
   const SELECT_HOST_SELECTORS = [
     '.ant-select-single .ant-select-content',
     '.ant-select-content-value',
@@ -445,49 +430,49 @@
     '.ant-select-selection-placeholder'
   ];
   const SELECT_HOST_SET = new Set(SELECT_HOST_SELECTORS);
-  // The description text rendered for a setting. In the compact density it sits
-  // inside the title row; the title unit never carries it (see
-  // serializeTitleHost) and, nested in a title, it is not a unit of its own
-  // either. Outside a title (the visible tooltip portal) it is translated like
-  // any other string.
+  // A setting description. Inside the compact title row it belongs to the
+  // tooltip, not the title unit; the visible portal copy translates normally.
   const DESC_TEXT_SEL = '[data-testid="mod-setting-description-text"]';
-  // The collapsed current-value summary in a setting's title row
-  // ("Non-default"). It shares the row with the title but is a string of its
-  // own and must never leak into the title unit.
+  // The collapsed current-value summary ("Non-default"): a string of its own.
   const SUMMARY_TEXT_SEL = '[data-testid="mod-setting-summary"]';
   const TITLE_SEL = '.windhawk-row-meta-title';
-  // styled-components keeps the component name as the class prefix
-  // (SettingTitleText-sc-xxxx), so a substring match finds the title text in
-  // both densities without depending on the generated suffix.
+  // styled-components keeps the component name as the class prefix, so a
+  // substring match survives the generated suffix.
   const TITLE_TEXT_SEL = '[class*="SettingTitleText"]';
   const SETTINGS_SELECTORS = [
     DESC_TEXT_SEL,
-    // Claimed before the title host: a summary nested in the title row must be
-    // its own unit, not a placeholder in the title.
+    // Claimed before the title host so a summary nested in the title row stays
+    // its own unit.
     SUMMARY_TEXT_SEL,
     '.ant-select-item-option-content',
-    // The closed control's current value and placeholder live inside a form
-    // control that is otherwise atomic; only their text nodes are swapped, and
-    // the search input beside them is never touched.
+    // Only the text of a closed control's value/placeholder is swapped; the
+    // search input stays atomic.
     ...SELECT_HOST_SELECTORS,
-    // The description is claimed before the title host too, so a copy nested in
-    // the title row still becomes its own unit; the title unit itself reads only
-    // the title text.
+    // Claimed before the title host so a copy nested in the title row is its
+    // own unit; the title reads only the title text.
     '.windhawk-row-meta-description',
     '.windhawk-row-meta-title',
     '[data-testid="mod-setting-reset"]'
   ];
-  // Mod names: the tile grid's title, the table view's name link, and the bare
-  // name div in the details header's Card.Meta title.
-  const NAME_LIST_SELECTORS = ['.windhawk-row-meta-title'];
-  // Mod summaries: the tile grid's description, the table's description cell
-  // (an antd Typography.Text) and the details header's Typography summary.
-  const SUMMARY_LIST_SELECTORS = ['.windhawk-row-meta-description', '.ant-typography'];
+  // Mod names: installed-list row title, tile Card.Meta title and the details
+  // header's name div. On a tile only the Typography inside the mod-card-title
+  // box is the name; the ribbon, local-mod icon and metadata line are siblings.
+  const NAME_LIST_SELECTORS = ['.windhawk-row-meta-title', '.ant-card-meta-title'];
+  const MOD_CARD_TITLE_SEL = '[data-testid="mod-card-title"]';
+  // Never part of a name unit: an icon, the status ribbon, a metadata line.
+  const NAME_IMPURE_SEL =
+    'svg,[class*="ant-ribbon"],[class*="MetadataLine"],[data-testid*="metadata"]';
+  // Mod summaries: tile/table descriptions and the details header Typography.
+  const SUMMARY_LIST_SELECTORS = [
+    '.windhawk-row-meta-description',
+    '.ant-card-meta-description',
+    '.ant-typography'
+  ];
   const MODS_TABLE_SEL = '[data-testid="installed-mods-table"]';
   const ROW_SELECT_SEL = '[data-testid="mod-row-select"]';
 
-  // Elements whose whole subtree is left alone. Everything else is either a
-  // structural inline wrapper or an atomic placeholder (see serializeHost).
+  // Subtrees left alone; everything else is an inline wrapper or an atomic
+  // placeholder (see serializeHost).
   const SKIP_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'LINK', 'META', 'BASE', 'TITLE']);
   const ATOMIC_TAGS = new Set([
     'CODE', 'PRE', 'KBD', 'SAMP', 'VAR', 'IMG', 'BR', 'HR', 'SVG', 'MATH',
@@ -592,8 +577,7 @@
     }
   }
 
-  // Debug-only trail for select hosts that the settings pass skipped. Off by
-  // default and capped per scan so a page full of selects cannot flood the log.
+  // Debug-only trail for skipped select hosts, capped per scan.
   let debugSelectBudget = 0;
 
   function debugSelectReject(el, sel, reason) {
@@ -612,11 +596,8 @@
     log('select host rejected (' + reason + '): ' + sel + ' <' + name + '> "' + text + '"');
   }
 
-  // Debug-only diagnosis for a settings row whose title stays untranslated. One
-  // line per row for the first few rows, at most 6 per scan: the row's testid
-  // and setting key, whether the title host was claimed (and by which nested
-  // host), and a shallow skeleton of the title host built from tag names and
-  // class lists only, never text.
+  // Debug-only diagnosis for an untranslated setting title: one line per row,
+  // six rows per scan, tag/class skeleton only, never text.
   const DEBUG_ROW_BUDGET = 6;
 
   function elementSignature(el) {
@@ -708,18 +689,15 @@
     }
     if (!eligibleHost(el)) return 'card head';
     if (compactSurface(el) !== 'settings') return 'not a settings surface';
-    // A select host whose text sits one level deeper is fine (the serializer
-    // flattens inline wrappers); only a host with no text at all is skipped.
+    // Inline wrappers are flattened by the serializer; only a host with no text
+    // at all is skipped.
     if (!hasText(el)) return hasDirectText(el) ? 'no text' : 'no direct text';
     return '';
   }
 
-  // The mod details header (Card.Meta title) packs the mod name, the id chip,
-  // the metadata line (version / author / process scope) and the action
-  // buttons into one subtree. Only the summary Typography element there is
-  // prose; the rest are proper nouns or controls. This rule deliberately wins
-  // over every other selector: nothing but .ant-typography in a card head is
-  // ever eligible.
+  // The details header packs the mod name, id chip, metadata line and buttons
+  // into one subtree. Only its summary Typography is prose, so the card-head
+  // rule wins over every other selector.
   function isCardHeadHost(el) {
     try {
       return !!el.closest('.ant-card-head');
@@ -736,10 +714,8 @@
     }
   }
 
-  // Metadata rows (version, author, process scope) are Typography.Text too, so
-  // they match .ant-typography; each carries an inline icon and is a proper
-  // noun, not prose. Only inside the card head does that icon disqualify a
-  // host: setting titles elsewhere use an ⓘ button and still translate.
+  // Metadata rows are Typography too but carry an icon and are proper nouns.
+  // Only inside the card head does that disqualify a host.
   function hasSvgIcon(el) {
     try {
       return !!el.querySelector('svg');
@@ -748,56 +724,115 @@
     }
   }
 
-  // The details header's name is a bare div in the Card.Meta title, outside the
-  // Typography summary. It is the first div in the meta title that owns text
-  // directly: the metadata items hold their text in an icon-bearing Typography
-  // span and the id chip follows the name.
+  // A name unit is name text only: no icon, no status ribbon, no metadata line
+  // text. Checked when a host is resolved and again before a unit is made.
+  function nameHostClean(el) {
+    if (!el || el.nodeType !== 1) return false;
+    try {
+      if (el.matches(NAME_IMPURE_SEL)) return false;
+      if (el.closest('[class*="MetadataLine"],[data-testid*="metadata"]')) return false;
+      if (el.querySelector(NAME_IMPURE_SEL)) return false;
+    } catch (_) {
+      return false;
+    }
+    return true;
+  }
+
+  // The details header's name is the first bare div in the meta title that owns
+  // text directly; the metadata items hold theirs in icon-bearing spans.
+  function headerNameHost(meta) {
+    let divs = [];
+    try {
+      divs = Array.from(meta.querySelectorAll('div'));
+    } catch (_) {
+      divs = [];
+    }
+    for (const el of divs) {
+      if (el.closest('.ant-typography')) continue;
+      if (!hasDirectText(el)) continue;
+      if (!hasText(el)) continue;
+      if (!nameHostClean(el)) continue;
+      return el;
+    }
+    return null;
+  }
+
+  // A tile's Card.Meta title: the name is the EllipsisText Typography inside
+  // the mod-card-title box. The ribbon, local-mod icon and metadata line sit
+  // beside it and must never join the unit.
+  function tileNameHost(meta) {
+    let box = null;
+    try {
+      box = meta.querySelector(MOD_CARD_TITLE_SEL);
+    } catch (_) {
+      box = null;
+    }
+    let typo = null;
+    try {
+      typo = (box || meta).querySelector('.ant-typography');
+    } catch (_) {
+      typo = null;
+    }
+    if (typo && typo !== meta && nameHostClean(typo)) return typo;
+    // The older shape puts the name straight in the meta title; use it only
+    // when it carries nothing but the name.
+    if (!box && nameHostClean(meta)) return meta;
+    return null;
+  }
+
+  // One resolver for every name surface: installed-list row title, tile name,
+  // details header name.
+  function resolveNameHost(el) {
+    if (!el || el.nodeType !== 1) return null;
+    try {
+      if (el.matches('.windhawk-row-meta-title')) return nameHostClean(el) ? el : null;
+      if (el.matches('.ant-card-meta-title')) {
+        if (el.closest('.ant-card-head') || el.closest('[data-testid="mod-details"]')) {
+          return headerNameHost(el);
+        }
+        return tileNameHost(el);
+      }
+    } catch (_) {
+      return null;
+    }
+    return nameHostClean(el) ? el : null;
+  }
+
   function detailsNameHosts() {
     const out = [];
     let metas = [];
     try {
-      metas = Array.from(document.querySelectorAll('.ant-card-meta-title'));
+      metas = Array.from(
+        document.querySelectorAll(
+          '.ant-card-head .ant-card-meta-title, [data-testid="mod-details"] .ant-card-meta-title'
+        )
+      );
     } catch (_) {
       return out;
     }
     for (const meta of metas) {
-      if (!meta.closest('.ant-card-head') && !meta.closest('[data-testid="mod-details"]')) continue;
-      let divs = [];
-      try {
-        divs = Array.from(meta.querySelectorAll('div'));
-      } catch (_) {
-        divs = [];
-      }
-      for (const el of divs) {
-        if (el.closest('.ant-typography')) continue;
-        if (hasSvgIcon(el)) continue;
-        if (!hasDirectText(el)) continue;
-        if (!hasText(el)) continue;
-        out.push(el);
-        break;
-      }
+      const el = resolveNameHost(meta);
+      if (el) out.push(el);
     }
     return out;
   }
 
-  // Every surface a mod name appears on: the tile grid's row title, the table
-  // view's name link and the details header's name div. Settings titles share
-  // the .windhawk-row-meta-title class; the settings pass claims them first and
-  // compactSurface keeps them out of the name pass.
+  // Every name surface: tile/explore titles, table name link, details name div.
+  // Settings titles share the row-title class and are kept out by compactSurface.
   function nameHosts() {
     const out = [];
     const add = (el) => {
       if (el && out.indexOf(el) === -1) out.push(el);
     };
     try {
-      for (const a of document.querySelectorAll(MODS_TABLE_SEL + ' tbody a')) add(a);
+      for (const a of document.querySelectorAll(MODS_TABLE_SEL + ' tbody a')) add(resolveNameHost(a));
     } catch (_) {
       /* ignore */
     }
     try {
       for (const box of document.querySelectorAll(ROW_SELECT_SEL)) {
         const cell = box.closest('td');
-        if (cell) add(cell.querySelector('a'));
+        if (cell) add(resolveNameHost(cell.querySelector('a')));
       }
     } catch (_) {
       /* ignore */
@@ -805,10 +840,9 @@
     for (const sel of NAME_LIST_SELECTORS) {
       try {
         for (const el of document.querySelectorAll(sel)) {
-          // A row title inside a card head is part of the header's metadata,
-          // not a mod name; the name div is added by detailsNameHosts above.
+          // A title inside a card head is header metadata, not a mod name.
           if (el.closest('.ant-card-head')) continue;
-          add(el);
+          add(resolveNameHost(el));
         }
       } catch (_) {
         /* ignore */
@@ -823,6 +857,9 @@
     for (const sel of SUMMARY_LIST_SELECTORS) {
       try {
         for (const el of document.querySelectorAll(sel)) {
+          // A tile's name Typography is never a summary, even with the name
+          // scope off.
+          if (sel === '.ant-typography' && el.closest(MOD_CARD_TITLE_SEL)) continue;
           if (out.indexOf(el) === -1) out.push(el);
         }
       } catch (_) {
@@ -853,11 +890,8 @@
   function hasBlockChild(el, atomic, skipAria) {
     try {
       for (let n = el.firstElementChild; n; n = n.nextElementSibling) {
-        // A claimed descendant is an atomic placeholder, not a block that makes
-        // the wrapper a container: it must not turn an inline wrapper into an
-        // opaque token that loses the wrapper's own text. The excluded
-        // screen-reader copy is dropped from the source altogether, so it must
-        // not turn a label wrapper into a container either.
+        // A claimed descendant or the excluded screen-reader copy is a
+        // placeholder, not a block that makes this wrapper a container.
         if (atomic && atomic.has(n)) continue;
         if (isAriaCopy(n, skipAria)) continue;
         if (BLOCK_TAGS.has(n.tagName)) return true;
@@ -868,16 +902,13 @@
     return false;
   }
 
-  // A <li> (or td) that owns a sentence and also wraps a nested list is not a
-  // pure-text block: cloning it would duplicate the nested items. It is
-  // eligible in swap mode, translating only its own text nodes.
+  // Own sentence plus nested blocks: cloning would duplicate the nested items.
   function isMixedProseHost(el) {
     return hasDirectText(el) && hasBlockChild(el);
   }
 
   function scanAll() {
-    // The document-created injection may run before <head> exists; retry the
-    // stylesheet on every scan until it lands.
+    // The document-created injection may run before <head> exists.
     installCss();
     if (!state.enabled || !state.settingsSeen) return;
     state.stats.scans++;
@@ -893,10 +924,8 @@
       claimed.push(el);
       return true;
     };
-    // A swap host may contain units claimed before it (deepest first): its own
-    // text is swapped and each claimed descendant stays an atomic placeholder
-    // in its source, so that text is never translated twice. It may not sit
-    // inside an already claimed host.
+    // A swap host may contain units claimed before it (deepest first); those
+    // stay atomic placeholders and are never translated twice.
     const claimSwap = (el) => {
       for (const host of claimed) {
         if (host === el || host.contains(el)) return null;
@@ -908,9 +937,7 @@
       claimed.push(el);
       return atomic;
     };
-    // A control nested in an already claimed host (the reset button in a
-    // setting title) is an atomic token in that host's source, so its own text
-    // can be swapped as a nested unit.
+    // A control nested in a claimed host (the reset button) gets its own unit.
     const claimInner = (el) => {
       for (const host of claimed) {
         if (host === el) return false;
@@ -920,8 +947,7 @@
       return true;
     };
 
-    // README / changelog prose blocks. React owns these nodes, so they are
-    // rendered as a translated clone.
+    // README / changelog prose: React owns the nodes, so render a translated clone.
     if (state.settings.scopeReadme || state.settings.scopeChangelog) {
       let bodies = [];
       try {
@@ -942,8 +968,7 @@
         for (const block of blocks) {
           if (block.closest('[' + ATTR_CLONE + '="1"]')) continue;
           if (block.closest(DENY_ANCESTOR_SEL)) continue;
-          // A settings row can sit inside the details card body; its title is an
-          // h4 but belongs to the swap pass, never to a prose clone.
+          // A settings row inside the card body belongs to the swap pass, never a clone.
           if (
             block.closest('.windhawk-row') ||
             block.matches('.windhawk-row-meta-title, .windhawk-row-meta-description')
@@ -951,8 +976,7 @@
             continue;
           }
           if (!eligibleHost(block)) continue;
-          // A host with its own sentence and nested blocks (a <li> wrapping a
-          // <ul>) cannot be cloned: the nested items are their own units.
+          // Own sentence plus nested blocks: swap only the host's own text.
           if (isMixedProseHost(block)) {
             mixed.push(block);
             continue;
@@ -967,8 +991,7 @@
           if (!claim(block)) continue;
           candidates.push({ el: block, mode: 'clone', surface: surface });
         }
-        // Claim mixed hosts deepest first; each keeps the nested blocks (already
-        // claimed above) as atomic placeholders and swaps only its own text.
+        // Deepest first: each keeps the nested blocks as atomic placeholders.
         for (let i = mixed.length - 1; i >= 0; i--) {
           const block = mixed[i];
           if (!hasText(block)) continue;
@@ -991,18 +1014,15 @@
         }
         const selectHost = SELECT_HOST_SET.has(sel);
         for (const el of list) {
-          // A screen-reader copy nested inside a title is never a unit of its
-          // own: the title unit carries only the title text (see
-          // serializeTitleHost). The visible tooltip copy is a portal outside
-          // the title and is claimed here like any other description.
+          // A hidden copy nested in a title is never its own unit; the visible
+          // tooltip portal outside the title is claimed like any description.
           if (sel === DESC_TEXT_SEL && el.closest(TITLE_SEL)) continue;
           const reason = settingsRejectReason(el);
           if (reason) {
             if (selectHost) debugSelectReject(el, sel, reason);
             continue;
           }
-          // A title that carried nothing but the excluded screen-reader copy
-          // has no title text and gets no unit at all.
+          // A title with no text but the excluded copy gets no unit.
           if (isTitleHost(el) && !isTranslatable(normalizeSource(titleHostText(el, claimed)))) continue;
           const atomic = claimSwap(el);
           if (!atomic) {
@@ -1012,10 +1032,8 @@
           candidates.push({ el: el, mode: 'swap', surface: 'settings', atomic: atomic });
         }
       }
-      // The reset button lives inside the setting title, which claims the row
-      // first and serializes the button as an atomic token. Give the button's
-      // own label a nested unit so it translates too; its icon, the ⓘ button
-      // and the switch stay untouched.
+      // The reset button is an atomic token in the title's source; give its
+      // label a nested unit so it translates too.
       let resets = [];
       try {
         resets = Array.from(document.querySelectorAll('[data-testid="mod-setting-reset"]'));
@@ -1033,8 +1051,7 @@
       }
     }
 
-    // Mod names: tile grid title, table name link, details header name. Swap
-    // mode keeps the link/div in place and only replaces its text node.
+    // Mod names: swap mode keeps the link/div and replaces only its text node.
     if (scopeEnabled('name')) {
       for (const el of nameHosts()) {
         if (el.closest('[' + ATTR_CLONE + '="1"]')) continue;
@@ -1048,8 +1065,7 @@
       }
     }
 
-    // Mod summaries: tile grid description, table description cell, details
-    // header Typography summary. Also swap.
+    // Mod summaries: same swap rule.
     if (scopeEnabled('summary')) {
       for (const el of summaryHosts()) {
         if (el.closest('[' + ATTR_CLONE + '="1"]')) continue;
@@ -1121,9 +1137,8 @@
   // ---------------------------------------------------------------------------
   // Serialization: text with placeholders
   //
-  // clone mode:  <n>inner</n>   structural wrapper (cloned on render)
-  //              {{n}}           atomic node (code, img, input, unknown tag)
-  // swap mode:   {{n}} only; inline wrappers are flattened into text segments.
+  // clone mode: <n>inner</n> structural wrapper, {{n}} atomic node
+  // swap mode:  {{n}} only; inline wrappers are flattened into text
   // ---------------------------------------------------------------------------
 
   function isSkippedElement(el) {
@@ -1139,22 +1154,17 @@
     return false;
   }
 
-  // In swap mode a label's text may sit in nested inline markup: the compact
-  // settings density puts the title in a span inside the title row, and antd
-  // wraps a select's value in a span of its own. Those wrappers are part of the
-  // text flow, not containers, so their text nodes are swapped rather than the
-  // wrapper being kept as one atomic token. Clone mode keeps structural markup.
+  // Swap mode treats inline wrappers as text flow (a title span, a select's
+  // value span); clone mode keeps structural markup.
   function isInlineWrapper(el, mode, atomic, skipAria) {
     if (STRUCT_TAGS.has(el.tagName)) return true;
     if (mode !== 'swap') return false;
     if (!BLOCK_TAGS.has(el.tagName)) return true;
-    // A bare div used as a label line (not a container of other blocks) is
-    // still part of the text flow.
+    // A bare div used as a label line is still part of the text flow.
     return el.tagName === 'DIV' && !hasBlockChild(el, atomic, skipAria);
   }
 
-  // A setting title host: its title text is a unit of its own and the rest of
-  // the row is never part of it.
+  // A setting title host: only its title text is the unit.
   function isTitleHost(el) {
     try {
       return !!el.matches(TITLE_SEL);
@@ -1163,10 +1173,8 @@
     }
   }
 
-  // The hidden copy of a setting description duplicates the visible tooltip.
-  // Inside a title host it must never reach a request, not even as an atomic
-  // placeholder, so serialization drops it and its subtree entirely. The
-  // visible tooltip copy is a portal outside the title and stays in scope.
+  // The hidden description copy duplicates the tooltip; inside a title it is
+  // dropped from the source entirely, not even emitted as a placeholder.
   function isAriaCopy(el, hostIsTitle) {
     try {
       if (!el.matches(DESC_TEXT_SEL)) return false;
@@ -1176,10 +1184,8 @@
     }
   }
 
-  // The title text span styled-components renders inside the title row. The
-  // generated suffix changes per build, but the component name is kept as the
-  // class prefix, so a substring match is stable. The closest title check keeps
-  // a nested row's title from being taken for this row's.
+  // The title text span inside the row; the closest-title check keeps a nested
+  // row's title from being taken for this row's.
   function titleTextHost(host) {
     try {
       const el = host.querySelector(TITLE_TEXT_SEL);
@@ -1190,9 +1196,7 @@
     return null;
   }
 
-  // Row content that shares the title row but is never part of the title text.
-  // The screen-reader description copy is dropped by isAriaCopy; atomic
-  // elements (the ⓘ/reset buttons, icons) are filtered separately.
+  // Row content that shares the title row but never joins the title text.
   function isTitleExtra(el) {
     try {
       return !!el.closest(SUMMARY_TEXT_SEL) || !!el.closest('[data-testid="mod-setting-reset"]');
@@ -1201,10 +1205,8 @@
     }
   }
 
-  // Walk only the text of the title text span, or only the host's direct text
-  // when the row has no title text span. `onText` receives every text node that
-  // belongs to the unit. Descendants claimed as their own units are skipped:
-  // they are not part of the title and never become a placeholder in it.
+  // Walk the title text span, or the host's direct text when there is none.
+  // Claimed descendants are skipped: they never become a placeholder here.
   function walkTitleText(root, directOnly, onText, atomic) {
     const atomics = atomic && atomic.length ? new Set(atomic) : null;
     const visit = (node) => {
@@ -1235,8 +1237,7 @@
     return text;
   }
 
-  // Swap serialization for a title unit: text only, no refs and no
-  // placeholders. Inline markup inside the title text span is flattened.
+  // Title units are text only: no refs, no placeholders.
   function serializeTitleHost(host, atomic) {
     const target = titleTextHost(host);
     const segs = [];
@@ -1249,11 +1250,8 @@
     return { text: text, refs: [], segs: segs };
   }
 
-  // `atomic` lists descendants claimed as their own units: they are emitted as
-  // placeholders and never walked, so their text is not translated a second
-  // time as part of this host. `skipAria` drops the screen-reader copy of a
-  // setting description without a placeholder; title hosts use
-  // serializeTitleHost instead.
+  // `atomic` descendants are emitted as placeholders and never walked;
+  // `skipAria` drops the hidden description copy without a placeholder.
   function serializeHost(host, mode, atomic, skipAria) {
     const atomics = atomic && atomic.length ? new Set(atomic) : null;
     const refs = [];
@@ -1415,12 +1413,10 @@
     return false;
   }
 
-  // Edge atomic placeholders are structure, not text: a closed select renders
-  // its value as "Where the mouse cursor is{{0}}" (the search input) while the
-  // same option in the dropdown renders as plain "Where the mouse cursor is".
-  // Both must share one source string and one translation, so the edge tokens
-  // are removed from the request text and re-attached around the rendered
-  // output; their DOM nodes never move.
+  // A closed select renders its value with the search input as an edge token
+  // ("Where the mouse cursor is{{0}}"), the dropdown option without it. Both
+  // must share one source and translation, so edge tokens are split off and
+  // re-attached around the output; their DOM nodes never move.
   function splitEdgeTokens(text) {
     let lead = '';
     let trail = '';
@@ -1438,10 +1434,8 @@
     return { text: normalizeSource(rest), lead: lead, trail: trail };
   }
 
-  // "<prefix>: <tail>" where the tail is an option label that already has a
-  // translation. "Reset to default: Flip 3D (Vista stack)" must reuse the
-  // option's own translation for the tail instead of translating the whole
-  // sentence, which can word the same option differently.
+  // "<prefix>: <tail>" whose tail is an option label with a known translation:
+  // reuse that translation instead of wording the sentence differently.
   const RESET_LABEL_RE = /^([^:：]{1,80}?)([:：][ ]?)(\S(?:[\s\S]*\S)?)$/;
 
   function resetLabelParts(u, source) {
@@ -1453,8 +1447,8 @@
     const tail = m[3].trim();
     if (!prefix || !tail) return null;
     if (!isTranslatable(prefix)) return null;
-    // Only compose when the tail's translation is already known; otherwise the
-    // whole sentence is translated as one piece, exactly as before.
+    // Only compose when the tail is already translated; otherwise translate the
+    // whole sentence as one piece.
     const tailTranslated = lookupTranslation(tail);
     if (tailTranslated === undefined) return null;
     return [
@@ -1482,8 +1476,7 @@
   }
 
   function resetForSource(u, serialized) {
-    // Everything downstream (cache key, provider text, in-flight entry) uses
-    // the normalised source; only the DOM keeps the original whitespace.
+    // Downstream keys use the normalised source; the DOM keeps its whitespace.
     const source = normalizeSource(serialized.text);
     const edge = u.mode === 'swap' ? splitEdgeTokens(source) : { text: source, lead: '', trail: '' };
     u.refs = serialized.refs;
@@ -1521,8 +1514,7 @@
     } catch (_) {
       /* ignore */
     }
-    // The request text has the edge tokens removed; u.source keeps them for
-    // the no-op comparison and the renderer re-attaches them.
+    // u.source keeps the edge tokens for the no-op comparison; requests do not.
     if (!isTranslatable(edge.text)) {
       u.skip = true;
       u.parts = [];
@@ -1535,23 +1527,26 @@
 
   function processHost(el, mode, surface, atomic) {
     const atomics = atomic || [];
-    // A settings title is a unit of its own title text only: the summary,
-    // description copy, buttons and icons in the same row are other units or
-    // excluded. Every other host keeps its existing serialization rules.
+    // A settings title is a unit of its title text only; the rest of the row is
+    // other units or excluded.
     const titleUnit = surface === 'settings' && isTitleHost(el);
     let u = state.unitByHost.get(el);
     if (!el.isConnected) {
       if (u) dropUnit(u);
       return;
     }
-    // React can strip a title down to the hidden copy; it then has no title
-    // text and keeps no unit.
+    // A name unit is name text only; refuse an icon, ribbon or metadata host
+    // even if a caller ever hands one over.
+    if (surface === 'name' && !nameHostClean(el)) {
+      if (u) dropUnit(u);
+      return;
+    }
+    // A title stripped down to the hidden copy keeps no unit.
     if (titleUnit && !isTranslatable(normalizeSource(titleHostText(el, atomics)))) {
       if (u) dropUnit(u);
       return;
     }
-    // A screen-reader copy that React moved inside a title is no longer a unit;
-    // the title never carries it and the tooltip has its own portal copy.
+    // A hidden copy moved inside a title is no longer a unit.
     if (isAriaCopy(el, false)) {
       if (u) dropUnit(u);
       return;
@@ -1599,8 +1594,7 @@
       u.refs = serialized.refs;
       u.segs = serialized.segs;
       if (mode === 'swap') {
-        // React can replace the text nodes with identical text; the old
-        // translation is still valid, but the outputs must be remapped.
+        // React replaced the text nodes with identical text: remap the outputs.
         if (u.translatedOk && !u.noop && u.parts.length) {
           computeSwapOutputs(u);
           u.rendered = true;
@@ -1670,8 +1664,7 @@
   function teardownAll() {
     for (const u of Array.from(state.units)) dropUnit(u);
     state.queue.length = 0;
-    // The in-session dedupe map is keyed by target language and provider, so a
-    // rebuild must not reuse it.
+    // The dedupe map is keyed by language/provider, so a rebuild must not reuse it.
     state.textEntries.clear();
     state.renderQueue.clear();
     if (state.flushTimer) {
@@ -1690,24 +1683,21 @@
     log('provider "' + state.provider + '" is not implemented in P1; idle');
   }
 
-  // Part output: the translation of the part's own text, or, for a reset label
-  // that reuses an option's translation, the composed sentence.
+  // A part's output, composing the cached tail for a reset label.
   function partOutput(p) {
     if (!p || p.translated == null) return null;
     if (p.tailTranslated != null) return p.translated + p.sep + p.tailTranslated;
     return p.translated;
   }
 
-  // The whole unit's rendered text, edge tokens included. Compared against
-  // u.source to detect a no-op translation.
+  // The unit's rendered text including edge tokens, for the no-op comparison.
   function unitOutput(u) {
     if (!u || !u.parts) return '';
     return (u.leadTokens || '') + u.parts.map((p) => partOutput(p) || '').join('') + (u.trailTokens || '');
   }
 
-  // A string already known in this session: completed in-flight entry first,
-  // then the persistent cache. Used by the reset-label composition so it can
-  // never disagree with the option label's own translation.
+  // A string already known this session (completed entry, then the persistent
+  // cache); used so a reset label never disagrees with the option label.
   function lookupTranslation(text) {
     const entry = state.textEntries.get(text);
     if (entry && entry.state === 3 && typeof entry.translated === 'string') return entry.translated;
@@ -1746,8 +1736,7 @@
     const text = part.text;
     const existing = state.textEntries.get(text);
     if (existing) {
-      // Same normalised string as another unit (another density, a value and
-      // its option, a title and its tooltip): share its request and result.
+      // The same normalised string as another unit: share its request and result.
       attachPart(existing, u, part);
       return;
     }
@@ -1782,8 +1771,7 @@
       const batch = [];
       let chars = 0;
       while (state.queue.length && batch.length < s.batchSize) {
-        // The queue holds distinct normalised strings only, so a batch is
-        // already deduplicated.
+        // The queue holds distinct normalised strings only.
         const entry = state.queue[0];
         if (batch.length && chars + entry.text.length > s.batchChars) break;
         state.queue.shift();
@@ -1814,8 +1802,7 @@
     for (const p of entry.parts) {
       p.translated = translated;
       p.state = 3;
-      // Parts whose unit was dropped or re-sourced are dead; drop the reference
-      // so a long session does not keep whole DOM subtrees alive.
+      // A part whose unit was dropped or re-sourced is dead: release it.
       if (p.unit && p.unit.parts && p.unit.parts.indexOf(p) !== -1) {
         live.push(p);
         units.add(p.unit);
@@ -1829,8 +1816,7 @@
     entry.state = 4;
     for (const p of entry.parts) p.state = 4;
     entry.parts = [];
-    // Forget the failed string so a later unit may retry it; the parts that
-    // already failed stay failed.
+    // Forget the failed string so a later unit may retry it.
     if (state.textEntries.get(entry.text) === entry) state.textEntries.delete(entry.text);
   }
 
@@ -1922,8 +1908,7 @@
   // Cache (localStorage, keyed by provider|lang|hash, 3 MB LRU)
   // ---------------------------------------------------------------------------
 
-  // v2 keys hold translations of normalised source strings. v1 keys were keyed
-  // by raw whitespace and may hold a different wording for the same source, so
+  // v1 keys were keyed by raw whitespace and may hold a different wording, so
   // they are purged rather than read.
   const CACHE_ROOT = 'whtr1|';
   const CACHE_VERSION = 'v2';
@@ -2141,8 +2126,7 @@
     const ls = storage();
     cacheIndex = new Map();
     cacheTotal = 0;
-    // Completed in-session entries are part of the cache too; in-flight ones
-    // stay so their units still resolve.
+    // Completed in-session entries are part of the cache; in-flight ones stay.
     for (const [text, entry] of Array.from(state.textEntries)) {
       if (entry.state === 3) state.textEntries.delete(text);
     }
@@ -2325,9 +2309,7 @@
       for (const seg of segs) seg.out = '';
       return;
     }
-    // Whitespace-only nodes (for example the indentation after an inline icon
-    // button) must not receive part of the translation when a provider drops
-    // the placeholders.
+    // Whitespace-only nodes must not receive part of the translation.
     let targets = segs.filter((seg) => /[^\s]/.test(seg.orig || ''));
     if (!targets.length) targets = segs;
     for (const seg of segs) if (targets.indexOf(seg) === -1) seg.out = seg.orig;
@@ -2406,8 +2388,7 @@
       if (!node || !node.isConnected) continue;
       const want = seg.out == null ? seg.orig : seg.out;
       if (node.nodeValue === want) continue;
-      // A third value means React re-rendered this node; leave it for the
-      // observer and translate the new source instead of fighting React.
+      // A third value means React re-rendered the node; let the observer rescan.
       if (node.nodeValue !== seg.orig && node.nodeValue !== seg.out) continue;
       node.nodeValue = want;
       state.written.set(node, want);
@@ -2613,8 +2594,7 @@
     }
     if (!u.hoverOrig) return;
     if (u.leaveTimer) clearTimeout(u.leaveTimer);
-    // Short grace: hiding the clone reveals React's node under the cursor, which
-    // must not immediately restart the hover loop.
+    // Short grace: hiding the clone must not immediately restart the hover loop.
     const grace = Math.max(120, clamp(state.settings.hoverDelayMs, 0, 2000));
     u.leaveTimer = setTimeout(() => {
       u.leaveTimer = 0;
@@ -2630,8 +2610,7 @@
   //
   // The single tap is deferred briefly so a second finger can cancel it. Two
   // pointers down and both lifted, twice within 400 ms, toggles translation
-  // globally exactly like the keyboard shortcut. Each pointer may wander at
-  // most 30 px.
+  // globally like the keyboard shortcut. Each pointer may wander at most 30 px.
   // ---------------------------------------------------------------------------
 
   const GESTURE_WINDOW_MS = 400;
@@ -2682,8 +2661,8 @@
 
   function onPointerDown(e) {
     if (e.pointerType !== 'touch') return;
-    // Any new touch cancels a queued block tap; a second finger may be the
-    // start of the two-finger gesture even if it lands on a form control.
+    // Gesture tracking runs whether or not translation is enabled; only the
+    // per-block tap is gated on it. Any new touch cancels a queued tap.
     cancelPendingTap();
     if (isTypingTarget(e.target)) return;
     const now = Date.now();
@@ -2782,6 +2761,16 @@
     cancelPendingTap();
   }
 
+  // Called on every enable/disable: a pointer or half-finished gesture from
+  // before the switch must not be paired with the next one.
+  function resetPointerState() {
+    touchPointers.clear();
+    touchStart = null;
+    twoFingerTap = null;
+    lastTwoFingerTapAt = 0;
+    cancelPendingTap();
+  }
+
   // ---------------------------------------------------------------------------
   // Mutation observer
   // ---------------------------------------------------------------------------
@@ -2828,8 +2817,7 @@
     if (!state.enabled || !state.settingsSeen) return;
     for (const record of records) {
       if (!isOurMutation(record)) {
-        // A tab panel (settings) can mount in a single React commit; scan on
-        // the next task so its first paint is translated, not 150 ms later.
+        // A settings tab can mount in one React commit; scan on the next task.
         scheduleScan(0);
         return;
       }
@@ -2900,9 +2888,8 @@
     );
   }
 
-  // The first protocol revision carried a single `scopeList` for names and
-  // summaries. A payload that predates the split keeps its choice; a payload
-  // without the old key (or any of the new ones) means both are on.
+  // The first protocol revision had a single `scopeList`; a payload without the
+  // split keys keeps its choice, and no key at all means both are on.
   function applyScopeSettings(raw, next) {
     const has = (key) => Object.prototype.hasOwnProperty.call(raw, key);
     const legacy = has('scopeList') ? !!raw.scopeList : undefined;
@@ -2964,16 +2951,19 @@
       teardownAll();
       scheduleScan(0);
     } else {
-      // Non-structural settings: re-apply hover state (delay may have changed)
-      // and let cached, already rendered units stay as they are.
+      // Re-apply hover state (delay may have changed); rendered units stay as they are.
       for (const u of state.units) applyUnit(u, true);
     }
   }
 
   function setEnabled(on) {
     on = !!on;
+    resetPointerState();
     if (state.enabled === on) {
-      if (on) scheduleScan(0);
+      if (on) {
+        if (!state.settingsSeen) requestSettings();
+        else scheduleScan(0);
+      }
       return;
     }
     state.enabled = on;
@@ -2981,7 +2971,13 @@
     teardownAll();
     if (on) {
       log('enabled');
-      scheduleScan(0);
+      // Recovery from any state: without settings there is nothing to scan.
+      if (!state.settingsSeen) {
+        if (!state.connected) connect();
+        requestSettings();
+      } else {
+        scheduleScan(0);
+      }
     } else {
       log('disabled');
     }
@@ -3085,8 +3081,7 @@
 
   try {
     if (window.__WHTR__ && window.__WHTR__.__engine) {
-      // The mod runs the document-created script and the navigation-completed
-      // script; the second injection must not build a second engine.
+      // The navigation-completed injection must not build a second engine.
       try {
         window.__WHTR__.__engine.revive();
       } catch (_) {
