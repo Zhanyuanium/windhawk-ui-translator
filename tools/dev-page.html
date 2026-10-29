@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WHTR dev page - Windhawk UI translator</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    margin: 0;
+    padding: 24px;
+    font: 15px/1.55 "Segoe UI", system-ui, sans-serif;
+    background: #f6f7f9;
+    color: #1c1e21;
+  }
+  @media (prefers-color-scheme: dark) {
+    body { background: #17181b; color: #e6e6e8; }
+    .panel, .card { background: #1f2125; border-color: #33363c; }
+    code, pre { background: #26282d; }
+  }
+  h1 { font-size: 22px; margin: 0 0 8px; }
+  h2 { font-size: 18px; margin: 0 0 12px; }
+  .panel { max-width: 880px; margin: 0 0 18px; padding: 16px 20px; border: 1px solid #dfe1e5; border-radius: 8px; background: #fff; }
+  .card { border: 1px solid #dfe1e5; border-radius: 6px; margin: 12px 0; background: #fff; }
+  .ant-card-head { padding: 8px 12px; border-bottom: 1px solid #e6e8eb; font-weight: 600; }
+  .ant-card-body { padding: 10px 14px; }
+  .ant-card-body > :first-child { margin-top: 0; }
+  .ant-card-body > :last-child { margin-bottom: 0; }
+  .windhawk-row { padding: 10px 0; border-bottom: 1px solid #eceef1; }
+  .windhawk-row-meta-title { font-weight: 600; }
+  .windhawk-row-meta-description { color: #555; font-size: 13px; }
+  .ant-select-item-option-content { padding: 4px 8px; }
+  code, pre { font-family: Consolas, "Cascadia Mono", monospace; background: #f1f2f4; }
+  code { padding: 1px 4px; border-radius: 3px; font-size: 0.92em; }
+  pre { padding: 10px; overflow: auto; border-radius: 5px; }
+  .toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  button { font: inherit; padding: 5px 10px; border-radius: 5px; border: 1px solid #b9bdc4; background: #fff; cursor: pointer; }
+  button:hover { background: #eef1f6; }
+  #stats { white-space: pre-wrap; font-family: Consolas, monospace; font-size: 12px; margin: 10px 0 0; }
+  #stub-log { max-height: 220px; overflow: auto; white-space: pre-wrap; font-family: Consolas, monospace; font-size: 11px; margin: 10px 0 0; }
+  .hint { color: #666; font-size: 13px; }
+</style>
+</head>
+<body>
+
+<div class="panel">
+  <h1>Windhawk UI translator - page engine dev harness</h1>
+  <p class="hint">
+    The stub below fakes <code>window.chrome.webview</code> and answers the
+    <code>settings?</code> and <code>http</code> messages with canned
+    Microsoft-style Edge responses. The engine is loaded from
+    <code>../src/js/engine.js</code>. Hover a translated block to see the
+    original, move away to restore the translation.
+  </p>
+  <div class="toolbar">
+    <button id="btn-tap">Simulate tap (touch)</button>
+    <button id="btn-hover">Simulate hover</button>
+    <button id="btn-leave">Simulate pointer out</button>
+    <button id="btn-mode">Toggle original mode (Alt+W)</button>
+    <button id="btn-toggle">Toggle engine (Alt+Q)</button>
+    <button id="btn-clear">Clear cache + reload</button>
+    <button id="btn-rescan">Rescan</button>
+  </div>
+  <pre id="stats">engine not started</pre>
+</div>
+
+<div class="panel">
+  <h2>Mock Windhawk markup</h2>
+
+  <section data-testid="mod-details">
+    <div class="ant-card">
+      <div class="ant-card-head"><div class="ant-card-head-title">README</div></div>
+      <div class="ant-card-body">
+        <h1>Windhawk UI Translator</h1>
+        <p>This mod translates mod descriptions and settings into your language.</p>
+        <p>Install the mod with <code>windhawk-cli mod install</code> and restart the app.</p>
+        <ul>
+          <li>Read the <a href="#docs">documentation</a> first.</li>
+          <li>Enable the <strong>settings</strong> scope.</li>
+        </ul>
+        <blockquote>Translations are cached locally.</blockquote>
+        <pre><code>{"targetLang": "zh-CN", "provider": "edge"}</code></pre>
+        <p>https://mods.windhawk.net/</p>
+        <p>v2.0.0-alpha.8</p>
+        <p>12345</p>
+      </div>
+    </div>
+
+    <div class="ant-card">
+      <div class="ant-card-head"><div class="ant-card-head-title">Changelog</div></div>
+      <div class="ant-card-body">
+        <p>Version 1.0.0 adds the Edge provider.</p>
+        <p>The settings page now keeps inline <code>code</code> intact.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="settings-panel">
+    <div class="windhawk-row" data-testid="mod-setting">
+      <div class="windhawk-row-meta-title">Target language</div>
+      <div class="windhawk-row-meta-description">Choose the language used for translated text.</div>
+      <button data-testid="mod-setting-reset">Reset</button>
+    </div>
+    <div class="windhawk-row" data-testid="mod-setting">
+      <div class="windhawk-row-meta-title">Translation provider</div>
+      <div data-testid="mod-setting-description-text">This description contains <code>inline code</code> and must keep it.</div>
+      <div class="ant-select-item-option-content">Microsoft Edge (free)</div>
+    </div>
+  </section>
+
+  <section class="list-panel">
+    <div class="windhawk-row">
+      <div class="windhawk-row-meta-title">Windhawk UI Translator</div>
+      <div class="windhawk-row-meta-description">Translates mod content in place.</div>
+    </div>
+    <p class="ant-typography">Generic typography block with version 1.2.3 inside.</p>
+  </section>
+</div>
+
+<div class="panel">
+  <h2>Stub log</h2>
+  <pre id="stub-log"></pre>
+</div>
+
+<script>
+/* ------------------------------------------------------------------ *
+ * WebView2 stub: answers settings? and http with canned Edge replies.
+ * ------------------------------------------------------------------ */
+(() => {
+  const SEP = '\x1f';
+  const listeners = [];
+  const logEl = document.getElementById('stub-log');
+
+  const log = (line) => {
+    const stamp = new Date().toISOString().slice(11, 23);
+    logEl.textContent += '[' + stamp + '] ' + line + '\n';
+    const lines = logEl.textContent.split('\n');
+    if (lines.length > 120) logEl.textContent = lines.slice(-100).join('\n');
+  };
+
+  const send = (data) => {
+    for (const fn of listeners.slice()) {
+      try { fn({ data: data }); } catch (e) { log('listener threw: ' + e); }
+    }
+  };
+
+  const settings = {
+    targetLang: 'zh-CN',
+    provider: 'edge',
+    llmBaseUrl: '',
+    llmModel: '',
+    llmKeySource: 'none',
+    scopeReadme: true,
+    scopeSettings: true,
+    scopeList: true,
+    scopeChangelog: true,
+    hoverDelayMs: 120,
+    shortcutToggle: 'Alt+Q',
+    shortcutMode: 'Alt+W',
+    batchSize: 20,
+    batchChars: 10000,
+    batchIntervalMs: 80,
+    concurrency: 2,
+    timeoutMs: 30000,
+    cacheEnabled: true,
+    cacheTtlDays: 30,
+    clearCache: false,
+    debug: true
+  };
+
+  const DICT = {
+    the: '这个', a: '一个', an: '一个', and: '并且', or: '或', to: '以', of: '的',
+    this: '此', that: '那个', is: '是', are: '是', be: '为', was: '曾经',
+    with: '使用', without: '不使用', for: '用于', from: '来自', in: '在', on: '在',
+    by: '由', as: '作为', at: '在', it: '它', its: '它的', into: '进入',
+    install: '安装', installs: '安装', installed: '已安装', restart: '重启',
+    windhawk: 'Windhawk', mod: '模组', mods: '模组', ui: '界面',
+    translate: '翻译', translates: '翻译', translated: '已翻译', translation: '翻译',
+    translations: '翻译', translator: '翻译器', language: '语言', languages: '语言',
+    target: '目标', provider: '提供方', edge: 'Edge', free: '免费',
+    setting: '设置', settings: '设置', description: '描述', descriptions: '描述',
+    reset: '重置', choose: '选择', used: '使用的', text: '文本', content: '内容',
+    documentation: '文档', read: '阅读', first: '首先', enable: '启用', scope: '范围',
+    cached: '缓存', locally: '在本地', readme: '自述文件', changelog: '更新日志',
+    version: '版本', adds: '增加', page: '页面', now: '现在', keeps: '保持',
+    inline: '内联', code: '代码', intact: '完整', must: '必须', keep: '保留',
+    generic: '通用', typography: '排版', block: '块', inside: '在其中',
+    place: '位置'
+  };
+
+  function fakeTranslate(text) {
+    const out = String(text).replace(/[A-Za-z][A-Za-z'’\-]*/g, (word) => {
+      return DICT[word.toLowerCase()] || word;
+    });
+    if (!/[\u4e00-\u9fff]/.test(out)) return '译：' + out;
+    return out;
+  }
+
+  function handleHttp(id, bodyText) {
+    if (window.__WHTR_DEV_FAIL_HTTP__ > 0) {
+      window.__WHTR_DEV_FAIL_HTTP__--;
+      log('http reply ' + id + ': forced 500');
+      send('whtr1' + SEP + 'http' + SEP + id + SEP + '500' + SEP + '0' + SEP + '');
+      return;
+    }
+    let input = null;
+    try {
+      input = JSON.parse(bodyText);
+    } catch (_) {
+      input = null;
+    }
+    if (!Array.isArray(input)) {
+      send('whtr1' + SEP + 'http' + SEP + id + SEP + '400' + SEP + '0' + SEP + '{"error":"bad request"}');
+      return;
+    }
+    const payload = input.map((text) => ({ translations: [{ text: fakeTranslate(text), to: 'zh-Hans' }] }));
+    log('http reply ' + id + ': ' + input.length + ' string(s), first=' + JSON.stringify(input[0]).slice(0, 80));
+    setTimeout(() => {
+      send('whtr1' + SEP + 'http' + SEP + id + SEP + '200' + SEP + '0' + SEP + JSON.stringify(payload));
+    }, 20);
+  }
+
+  function replySettings() {
+    log('settings reply');
+    send('whtr1' + SEP + 'settings' + SEP + JSON.stringify(settings));
+  }
+
+  window.chrome = window.chrome || {};
+  window.chrome.webview = {
+    addEventListener(type, fn) {
+      if (type === 'message' && typeof fn === 'function') listeners.push(fn);
+    },
+    removeEventListener(type, fn) {
+      const at = listeners.indexOf(fn);
+      if (type === 'message' && at !== -1) listeners.splice(at, 1);
+    },
+    postMessage(message) {
+      const text = String(message);
+      if (text === 'whtr1' + SEP + 'settings?') {
+        log('page -> mod: settings?');
+        setTimeout(replySettings, 15);
+        return;
+      }
+      if (text.indexOf('whtr1' + SEP + 'log' + SEP) === 0) {
+        log('mod log: ' + text.split(SEP, 3)[2]);
+        return;
+      }
+      if (text.indexOf('whtr1' + SEP + 'http' + SEP) === 0) {
+        const head = text.split(SEP, 6);
+        const id = head[2];
+        const count = Number(head[5]);
+        const fields = text.split(SEP, 6 + count * 2 + 1);
+        const body = fields[6 + count * 2] == null ? '' : fields[6 + count * 2];
+        const headerNames = [];
+        for (let i = 0; i < count; i++) headerNames.push(fields[6 + i * 2]);
+        log('page -> mod: http #' + id + ' ' + head[3] + ' ' + head[4] +
+          ' headers=[' + headerNames.join(', ') + ']');
+        handleHttp(id, body);
+        return;
+      }
+      log('page -> mod (unhandled): ' + text.slice(0, 120));
+    }
+  };
+  log('stub installed');
+
+  // Debug handle used by the headless harness and the buttons below.
+  window.__WHTR_DEV__ = {
+    settings: settings,
+    send: send,
+    pushSettings: function () {
+      send('whtr1' + SEP + 'settings' + SEP + JSON.stringify(settings));
+    }
+  };
+})();
+</script>
+
+<script src="../src/js/engine.js"></script>
+
+<script>
+/* ------------------------------------------------------------------ *
+ * Harness controls and status readout.
+ * ------------------------------------------------------------------ */
+(() => {
+  const statsEl = document.getElementById('stats');
+  const firstTranslated = () => document.querySelector('[data-wh-clone="1"]');
+
+  const showStats = () => {
+    const api = window.__WHTR__;
+    if (!api) {
+      statsEl.textContent = 'engine not started (window.__WHTR__ missing)';
+      return;
+    }
+    const stats = api.stats();
+    const clones = document.querySelectorAll('[data-wh-clone="1"]').length;
+    const swapped = document.querySelectorAll('[data-wh-swapped="1"]').length;
+    const hidden = document.querySelectorAll('[data-wh-orig="1"]').length;
+    statsEl.textContent = JSON.stringify(stats, null, 2) +
+      '\nclones=' + clones + ' swapped=' + swapped + ' hiddenOriginals=' + hidden;
+  };
+
+  const pointer = (type, target) => {
+    const rect = target.getBoundingClientRect();
+    const event = new PointerEvent(type, {
+      bubbles: true,
+      cancelable: true,
+      pointerType: 'touch',
+      pointerId: 1,
+      clientX: Math.round(rect.left + rect.width / 2),
+      clientY: Math.round(rect.top + rect.height / 2)
+    });
+    target.dispatchEvent(event);
+  };
+  const mouse = (type, target) => {
+    target.dispatchEvent(new PointerEvent(type, {
+      bubbles: true,
+      cancelable: true,
+      pointerType: 'mouse',
+      pointerId: 2,
+      relatedTarget: null
+    }));
+  };
+
+  document.getElementById('btn-tap').addEventListener('click', () => {
+    const target = firstTranslated();
+    if (!target) { statsEl.textContent = 'no translated clone yet'; return; }
+    pointer('pointerup', target);
+    setTimeout(showStats, 50);
+  });
+
+  document.getElementById('btn-hover').addEventListener('click', () => {
+    const target = firstTranslated();
+    if (!target) { statsEl.textContent = 'no translated clone yet'; return; }
+    mouse('pointerover', target);
+    setTimeout(showStats, 400);
+  });
+
+  document.getElementById('btn-leave').addEventListener('click', () => {
+    const target = firstTranslated();
+    if (!target) { statsEl.textContent = 'no translated clone yet'; return; }
+    mouse('pointerout', target);
+    setTimeout(showStats, 400);
+  });
+
+  document.getElementById('btn-mode').addEventListener('click', () => {
+    document.documentElement.dispatchEvent(new KeyboardEvent('keydown', {
+      bubbles: true, code: 'KeyW', altKey: true
+    }));
+    setTimeout(showStats, 100);
+  });
+
+  document.getElementById('btn-toggle').addEventListener('click', () => {
+    document.documentElement.dispatchEvent(new KeyboardEvent('keydown', {
+      bubbles: true, code: 'KeyQ', altKey: true
+    }));
+    setTimeout(showStats, 100);
+  });
+
+  document.getElementById('btn-rescan').addEventListener('click', () => {
+    if (window.__WHTR__) window.__WHTR__.rescan();
+    setTimeout(showStats, 300);
+  });
+
+  document.getElementById('btn-clear').addEventListener('click', () => {
+    try {
+      const keys = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key && key.indexOf('whtr1|') === 0) keys.push(key);
+      }
+      for (const key of keys) localStorage.removeItem(key);
+    } catch (_) { /* ignore */ }
+    location.reload();
+  });
+
+  setInterval(showStats, 500);
+  setTimeout(showStats, 100);
+})();
+</script>
+</body>
+</html>

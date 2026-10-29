@@ -1,0 +1,9 @@
+node_modules/
+dist/
+build/
+*.pch
+*.log
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

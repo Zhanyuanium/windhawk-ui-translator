@@ -1,0 +1,24 @@
+# NOTICE
+
+Windhawk UI Translator
+Copyright (C) 2026 Zhanyuanium
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. See LICENSE for the full text.
+
+## Third-party code
+
+Parts of the in-page translation engine are derived from
+**kiss-translator** (https://github.com/fishjar/kiss-translator),
+Copyright (C) fishjar, licensed under GPL-3.0. Derived files live under
+`src/js/vendor/` and carry a header naming the upstream file they came from.
+Modified portions are documented in the header of each such file.
+
+The WebView2 hook design follows the publicly documented WebView2 COM API
+(`AddScriptToExecuteOnDocumentCreated`, web message channel) and the
+static-loader resolution path used by wry / Tauri.
+
+Windhawk itself (https://github.com/ramensoftware/windhawk) is a separate
+project by Ramen Software and is not covered by this license.
