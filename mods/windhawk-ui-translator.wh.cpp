@@ -77,8 +77,8 @@
 - llmApiKey: ""
   $name: API key (plaintext fallback)
   $name:zh-CN: API 密钥（明文备用）
-  $description: Only used when the key source is "setting". It is stored as plain text in the registry, so prefer the credential source.
-  $description:zh-CN: 仅在密钥来源为“设置项”时使用。密钥会以明文写入注册表，建议优先使用凭据管理器。
+  $description: Used when the key source is "setting", and as the fallback when the credential is missing. It is stored as plain text in the registry, so prefer the credential source.
+  $description:zh-CN: 在密钥来源为“设置项”时使用，凭据缺失时也会作为备用。密钥会以明文写入注册表，建议优先使用凭据管理器。
 - llmKeySource: credential
   $name: API key source
   $name:zh-CN: 密钥来源
@@ -92,6 +92,12 @@
   - credential: Windows 凭据管理器
   - setting: 上面的 API 密钥设置项
   - none: 不使用密钥
+- glossary:
+    - ""
+  $name: Glossary
+  $name:zh-CN: 术语表
+  $description: "One entry per line, written as source=target. Sent with every LLM request and takes priority over the model's own wording. Ignored by the free providers."
+  $description:zh-CN: 每行一条，写成“原文=译文”。随每个大模型请求一起发送，优先级高于模型自己的措辞。免费接口不使用本项。
 - scopeReadme: true
   $name: Translate mod descriptions
   $name:zh-CN: 翻译模组说明
@@ -479,7 +485,7 @@ static constexpr size_t kEnvVtblSlots = 64;
 
 static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
 /*!
- * windhawk-ui-translator - page-side engine (P1)
+ * windhawk-ui-translator - page-side engine (P2)
  *
  * Runs inside the Windhawk 2.0 UI, injected at document-created time and again
  * on navigation completion. Self-contained ES2020 IIFE: no imports, no eval,
@@ -490,7 +496,7 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
 (() => {
   'use strict';
 
-  const VERSION = '1.0.0-p1';
+  const VERSION = '1.0.0-p2';
   const TAG = 'whtr1';
   const SEP = '\x1f';
 
@@ -568,6 +574,7 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
       llmBaseUrl: '',
       llmModel: '',
       llmKeySource: 'none',
+      glossary: [],
       scopeReadme: true,
       scopeSettings: true,
       scopeModName: true,
@@ -596,7 +603,10 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
     enabled: true,
     targetLang: '',
     provider: 'edge',
-    providerWarned: false,
+    // Set once an LLM batch failed: the rest of the session stays on Edge.
+    llmFallback: false,
+    llmWarned: false,
+    googleWarned: false,
     epoch: 0,
     units: new Set(),
     unitByHost: new WeakMap(),
@@ -669,6 +679,8 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
       connected: state.connected,
       targetLang: state.targetLang,
       provider: state.provider,
+      activeProvider: activeProvider(),
+      llmFallback: state.llmFallback,
       units: state.units.size,
       translated: translated,
       rendered: rendered,
@@ -2157,10 +2169,112 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
   // Translation queue
   // ---------------------------------------------------------------------------
 
-  function warnProviderOnce() {
-    if (state.providerWarned) return;
-    state.providerWarned = true;
-    log('provider "' + state.provider + '" is not implemented in P1; idle');
+  // The provider actually serving requests right now. A failed LLM session
+  // falls back to Edge and never retries the LLM until the page reloads.
+  function activeProvider() {
+    return state.provider === 'llm' && !state.llmFallback ? 'llm' : 'edge';
+  }
+
+  function llmConfigured() {
+    const s = state.settings;
+    return !!(String(s.llmBaseUrl || '').trim() && String(s.llmModel || '').trim());
+  }
+
+  // Settings JSON has no glossary key yet; read it when a build adds one.
+  // Entries are `source=target` strings (also accept an object map).
+  function glossaryEntries() {
+    const raw = state.settings.glossary;
+    const out = [];
+    const seen = new Set();
+    const add = (src, dst) => {
+      const a = String(src == null ? '' : src).trim();
+      const b = String(dst == null ? '' : dst).trim();
+      if (!a || !b) return;
+      const key = a.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push([a, b]);
+    };
+    if (Array.isArray(raw)) {
+      for (const item of raw) {
+        const line = String(item == null ? '' : item).trim();
+        if (!line) continue;
+        const at = line.indexOf('=');
+        if (at <= 0) continue;
+        add(line.slice(0, at), line.slice(at + 1));
+      }
+    } else if (raw && typeof raw === 'object') {
+      for (const key of Object.keys(raw)) add(key, raw[key]);
+    }
+    return out;
+  }
+
+  function glossarySignature(settings) {
+    const raw = settings && settings.glossary;
+    if (!Array.isArray(raw)) return raw && typeof raw === 'object' ? JSON.stringify(raw) : '';
+    return raw.map((item) => String(item == null ? '' : item).trim()).filter(Boolean).join('\u0001');
+  }
+
+  function glossaryObject(entries) {
+    const out = {};
+    for (const [src, dst] of entries) out[src] = dst;
+    return out;
+  }
+
+  function buildLlmSystemPrompt(entries) {
+    const lines = [
+      'You are a translation API. Translate every input segment into ' +
+        (state.targetLang || 'the target language') + '.',
+      'Return one raw JSON object and nothing else: {"translations":[{"id":<n>,"text":"<translation>"}]}',
+      'No prose, no explanations, no markdown and no code fences.',
+      'Keep every placeholder exactly as given: {{n}} atomic tokens and <n>...</n> structural tags ' +
+        '(also written <n>…</n>). Never translate, rename, drop, duplicate or reorder them.',
+      'Translate only human-readable text. Never translate code, identifiers, URLs, version numbers, ' +
+        'or text that is already in the target language.',
+      'Keep the id, count and order of the input segments.'
+    ];
+    if (entries.length) {
+      lines.push('Glossary (mandatory, takes priority over any other wording; apply every glossary entry):');
+      for (const [src, dst] of entries) lines.push('- ' + src + '=' + dst);
+    }
+    return lines.join('\n');
+  }
+
+  function llmUrl() {
+    const base = String(state.settings.llmBaseUrl || '').trim().replace(/\/+$/, '');
+    if (!base) return '';
+    return base + '/chat/completions';
+  }
+
+  function buildLlmBody(entries) {
+    const glossary = glossaryEntries();
+    const user = {
+      targetLanguage: state.targetLang,
+      segments: entries.map((entry, index) => ({ id: index + 1, text: entry.text }))
+    };
+    if (glossary.length) user.glossary = glossaryObject(glossary);
+    return JSON.stringify({
+      model: String(state.settings.llmModel || '').trim(),
+      temperature: 0,
+      messages: [
+        { role: 'system', content: buildLlmSystemPrompt(glossary) },
+        { role: 'user', content: JSON.stringify(user) }
+      ]
+    });
+  }
+
+  function warnLlmOnce(why) {
+    if (state.llmWarned) return;
+    state.llmWarned = true;
+    log(
+      'llm: ' + why + '; falling back to Edge (Edge fallback)' +
+      (state.llmFallback ? ' for this session' : ' for these segments')
+    );
+  }
+
+  function disableLlm(why) {
+    state.llmFallback = true;
+    warnLlmOnce(why);
   }
 
   // A part's output, composing the cached tail for a reset label.
@@ -2208,11 +2322,7 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
       part.state = 4;
       return;
     }
-    if (state.provider !== 'edge') {
-      warnProviderOnce();
-      part.state = 4;
-      return;
-    }
+    const provider = activeProvider();
     const text = part.text;
     const existing = state.textEntries.get(text);
     if (existing) {
@@ -2220,15 +2330,15 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
       attachPart(existing, u, part);
       return;
     }
-    const cached = cacheGet(text);
+    const cached = cacheGet(text, provider);
     if (cached !== undefined) {
-      const hit = { text: text, state: 3, translated: cached, parts: [] };
+      const hit = { text: text, state: 3, translated: cached, parts: [], provider: provider };
       state.textEntries.set(text, hit);
       attachPart(hit, u, part);
       return;
     }
     state.stats.cacheMisses++;
-    const entry = { text: text, state: 1, translated: null, parts: [] };
+    const entry = { text: text, state: 1, translated: null, parts: [], provider: provider };
     state.textEntries.set(text, entry);
     attachPart(entry, u, part);
     state.queue.push(entry);
@@ -2245,15 +2355,19 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
   }
 
   function flushQueue() {
-    if (!state.enabled || state.provider !== 'edge' || !state.targetLang) return;
+    if (!state.enabled || !state.targetLang) return;
     const s = state.settings;
+    // The LLM protocol is capped harder than Edge: 12 segments / 6000 chars.
+    const llm = activeProvider() === 'llm';
+    const maxSegments = llm ? Math.min(s.batchSize, LLM_MAX_SEGMENTS) : s.batchSize;
+    const maxChars = llm ? Math.min(s.batchChars, LLM_MAX_CHARS) : s.batchChars;
     while (state.queue.length && state.inflight < s.concurrency) {
       const batch = [];
       let chars = 0;
-      while (state.queue.length && batch.length < s.batchSize) {
+      while (state.queue.length && batch.length < maxSegments) {
         // The queue holds distinct normalised strings only.
         const entry = state.queue[0];
-        if (batch.length && chars + entry.text.length > s.batchChars) break;
+        if (batch.length && chars + entry.text.length > maxChars) break;
         state.queue.shift();
         batch.push(entry);
         chars += entry.text.length;
@@ -2272,10 +2386,11 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
     if (state.queue.length) scheduleFlush();
   }
 
-  function finishEntry(entry, translated) {
+  function finishEntry(entry, translated, provider) {
     entry.translated = translated;
     entry.state = 3;
-    cacheSet(entry.text, translated);
+    entry.provider = provider || activeProvider();
+    cacheSet(entry.text, translated, entry.provider);
     state.stats.translations++;
     const units = new Set();
     const live = [];
@@ -2301,31 +2416,64 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
   }
 
   async function runBatch(entries, epoch) {
-    for (let i = 0; i < entries.length; i += 10) {
+    const provider = activeProvider();
+    const chunkSize = provider === 'llm' ? LLM_MAX_SEGMENTS : 10;
+    for (let i = 0; i < entries.length; i += chunkSize) {
       if (!state.enabled || state.epoch !== epoch) return;
-      const chunk = entries.slice(i, i + 10);
-      const texts = chunk.map((e) => e.text);
-      let translated = null;
-      try {
-        translated = await translateChunk(texts, epoch);
-      } catch (e) {
-        translated = null;
-      }
-      if (state.epoch !== epoch) return;
-      if (!translated || translated.length !== chunk.length) {
-        for (const e of chunk) failEntry(e);
+      const chunk = entries.slice(i, i + chunkSize);
+      if (provider === 'llm' && !state.llmFallback) {
+        const result = await translateLlmBatch(chunk, epoch);
+        if (!result) return; // disabled or epoch changed
+        if (result.texts && result.texts.length === chunk.length) {
+          const missing = [];
+          for (let j = 0; j < chunk.length; j++) {
+            if (result.texts[j] != null) finishEntry(chunk[j], result.texts[j], 'llm');
+            else missing.push(chunk[j]);
+          }
+          if (missing.length) {
+            // Valid ids keep their LLM text; the omitted ones go to Edge.
+            warnLlmOnce('reply omitted ' + missing.length + ' segment(s)');
+            await runEdgeEntries(missing, epoch);
+          }
+          continue;
+        }
+        // Network error, non-2xx, unparseable reply or no id matched: this
+        // batch goes to Edge and the rest of the session stays there.
+        disableLlm(result.why || 'request failed');
         state.stats.batchesFailed++;
         state.stats.errors++;
+        await runEdgeEntries(chunk, epoch);
         continue;
       }
-      for (let j = 0; j < chunk.length; j++) finishEntry(chunk[j], translated[j]);
+      await runEdgeEntries(chunk, epoch);
     }
+  }
+
+  async function runEdgeEntries(entries, epoch) {
+    if (!entries.length) return;
+    const texts = entries.map((e) => e.text);
+    let translated = null;
+    try {
+      translated = await translateEdgeChunk(texts, epoch);
+    } catch (_) {
+      translated = null;
+    }
+    if (state.epoch !== epoch) return;
+    if (!translated || translated.length !== entries.length) {
+      for (const e of entries) failEntry(e);
+      state.stats.batchesFailed++;
+      state.stats.errors++;
+      return;
+    }
+    for (let j = 0; j < entries.length; j++) finishEntry(entries[j], translated[j], 'edge');
   }
 
   const EDGE_URL =
     'https://edge.microsoft.com/translate/translatetext?from=&to=';
+  const LLM_MAX_SEGMENTS = 12;
+  const LLM_MAX_CHARS = 6000;
 
-  async function translateChunk(texts, epoch) {
+  async function translateEdgeChunk(texts, epoch) {
     const url = EDGE_URL + encodeURIComponent(state.targetLang) + '&isEnterpriseClient=false';
     let why = '';
     for (let attempt = 0; attempt <= 2; attempt++) {
@@ -2352,6 +2500,101 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
     }
     problem('edge failed: ' + why);
     return null;
+  }
+
+  async function translateLlmBatch(entries, epoch) {
+    const url = llmUrl();
+    if (!url) return { why: 'no LLM endpoint configured', texts: null };
+    const body = buildLlmBody(entries);
+    if (state.settings.debug) {
+      // Debug only, truncated; the API key never exists on this side. Strip a
+      // query string so a key embedded in the base URL cannot leak either.
+      const logUrl = url.replace(/[?#].*$/, '');
+      log('llm POST ' + logUrl + ' body=' + body.slice(0, 240) + (body.length > 240 ? '...' : ''));
+    }
+    let why = '';
+    for (let attempt = 0; attempt <= 1; attempt++) {
+      if (!state.enabled || state.epoch !== epoch) return null;
+      if (state.llmFallback) return { why: 'fallback active', texts: null };
+      // No Authorization header here: the page never sees the key; the mod
+      // injects it for the llmBaseUrl host (docs/PROTOCOL.md).
+      const res = await httpRequest({
+        method: 'POST',
+        url: url,
+        headers: { 'Content-Type': 'application/json' },
+        body: body
+      });
+      if (!state.enabled || state.epoch !== epoch) return null;
+      if (res.error === 0 && res.status >= 200 && res.status < 300) {
+        const map = parseLlmReply(res.body, entries.length);
+        if (map && map.size) {
+          const texts = entries.map((entry, index) => (map.has(index + 1) ? map.get(index + 1) : null));
+          return { why: '', texts: texts };
+        }
+        why = map ? 'reply had no usable translations' : 'unparseable reply';
+        break;
+      }
+      why = 'status=' + res.status + ' error=' + res.error;
+      // -2 is the page-side timeout; 12002 is ERROR_WINHTTP_TIMEOUT from the
+      // mod. Other transport errors fall back without a retry.
+      const retryable =
+        res.error === -2 || res.error === 12002 ||
+        res.status === 429 || (res.status >= 500 && res.status <= 599);
+      if (!retryable || attempt >= 1) break;
+      log('llm retry after ' + why);
+      await sleep(400 + Math.random() * 200);
+    }
+    return { why: why, texts: null };
+  }
+
+  // The chat reply's message content may be fenced or surrounded by prose;
+  // only the first `{` through the last `}` is the JSON object.
+  function llmContent(outer) {
+    if (!outer || typeof outer !== 'object') return null;
+    // Some OpenAI-compatible proxies answer with the object itself.
+    if (Array.isArray(outer.translations)) return JSON.stringify(outer);
+    const choice = Array.isArray(outer.choices) ? outer.choices[0] : null;
+    const message = choice && choice.message ? choice.message : null;
+    if (!message) return null;
+    if (typeof message.content === 'string') return message.content;
+    if (Array.isArray(message.content)) {
+      let out = '';
+      for (const part of message.content) if (part && typeof part.text === 'string') out += part.text;
+      return out;
+    }
+    return null;
+  }
+
+  function parseLlmReply(body, count) {
+    let outer = null;
+    try {
+      outer = JSON.parse(body);
+    } catch (_) {
+      outer = null;
+    }
+    // Prefer the chat envelope's message content; a proxy may also answer with
+    // the JSON object or a fenced block as the raw body.
+    let content = outer ? llmContent(outer) : null;
+    if (content == null) content = String(body == null ? '' : body);
+    const first = content.indexOf('{');
+    const last = content.lastIndexOf('}');
+    if (first === -1 || last <= first) return null;
+    let data = null;
+    try {
+      data = JSON.parse(content.slice(first, last + 1));
+    } catch (_) {
+      return null;
+    }
+    if (!data || !Array.isArray(data.translations)) return null;
+    const map = new Map();
+    for (const item of data.translations) {
+      if (!item) continue;
+      const id = Number(item.id);
+      if (!isFinite(id) || id < 1 || id > count) continue;
+      if (typeof item.text !== 'string' || !item.text.trim()) continue;
+      if (!map.has(id)) map.set(id, item.text);
+    }
+    return map;
   }
 
   function parseEdgeResponse(body, count) {
@@ -2385,13 +2628,13 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
   }
 
   // ---------------------------------------------------------------------------
-  // Cache (localStorage, keyed by provider|lang|hash, 3 MB LRU)
+  // Cache (localStorage, keyed by provider|model|lang|hash, 3 MB LRU)
   // ---------------------------------------------------------------------------
 
   // v1 keys were keyed by raw whitespace and may hold a different wording, so
-  // they are purged rather than read.
+  // they are purged rather than read. v3 adds provider and model to every key.
   const CACHE_ROOT = 'whtr1|';
-  const CACHE_VERSION = 'v2';
+  const CACHE_VERSION = 'v3';
   const CACHE_PREFIX = CACHE_ROOT + CACHE_VERSION + '|';
   const CACHE_LIMIT = 3 * 1024 * 1024;
   const CACHE_TARGET = Math.floor(CACHE_LIMIT * 0.8);
@@ -2407,8 +2650,12 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
     }
   }
 
-  function cacheKey(text) {
-    return CACHE_PREFIX + state.provider + '|' + state.targetLang + '|' + hash32(text) + '|' + text.length;
+  function cacheKey(text, provider) {
+    const p = provider || activeProvider();
+    return (
+      CACHE_PREFIX + p + '|' + String(state.settings.llmModel || '').trim() + '|' + state.targetLang + '|' +
+      hash32(text) + '|' + text.length
+    );
   }
 
   function cacheTtlMs() {
@@ -2469,12 +2716,12 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
     }
   }
 
-  function cacheGet(text) {
+  function cacheGet(text, provider) {
     if (!state.settings.cacheEnabled) return undefined;
     const ls = storage();
     if (!ls) return undefined;
     cacheEnsureIndex();
-    const key = cacheKey(text);
+    const key = cacheKey(text, provider);
     let raw = null;
     try {
       raw = ls.getItem(key);
@@ -2530,13 +2777,13 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
     return rec.t;
   }
 
-  function cacheSet(text, translated) {
+  function cacheSet(text, translated, provider) {
     if (!state.settings.cacheEnabled) return;
     if (typeof translated !== 'string') return;
     const ls = storage();
     if (!ls) return;
     cacheEnsureIndex();
-    const key = cacheKey(text);
+    const key = cacheKey(text, provider);
     const value = JSON.stringify({ t: translated, at: Date.now(), used: Date.now() });
     try {
       ls.setItem(key, value);
@@ -3352,14 +3599,29 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
 
   function resolveProvider() {
     const p = String(state.settings.provider || 'auto').toLowerCase();
-    if (p === 'auto' || p === 'edge') return 'edge';
-    return p;
+    if (p === 'google') {
+      if (!state.googleWarned) {
+        state.googleWarned = true;
+        log('provider "google" is not implemented; using Edge');
+      }
+      return 'edge';
+    }
+    if (p === 'llm') return 'llm';
+    if (p === 'auto') {
+      const keySource = String(state.settings.llmKeySource || 'none').toLowerCase();
+      return keySource !== 'none' && llmConfigured() ? 'llm' : 'edge';
+    }
+    return 'edge';
   }
 
   function rebuildKeysChanged(prev, next) {
     return (
       prev.targetLang !== next.targetLang ||
       prev.provider !== next.provider ||
+      prev.llmBaseUrl !== next.llmBaseUrl ||
+      prev.llmModel !== next.llmModel ||
+      prev.llmKeySource !== next.llmKeySource ||
+      glossarySignature(prev) !== glossarySignature(next) ||
       prev.scopeReadme !== next.scopeReadme ||
       prev.scopeSettings !== next.scopeSettings ||
       prev.scopeModName !== next.scopeModName ||
@@ -3402,8 +3664,14 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
     state.settingsAttempts = 0;
 
     state.targetLang = resolveTarget(next.targetLang);
+    const prevProvider = state.provider;
     const provider = resolveProvider();
-    if (state.provider !== provider) state.providerWarned = false;
+    if (prevProvider !== provider) {
+      // A new provider choice is a fresh start; a previous LLM failure must not
+      // pin this configuration to Edge.
+      state.llmFallback = false;
+      state.llmWarned = false;
+    }
     state.provider = provider;
     state.shortcuts.toggle = parseShortcut(next.shortcutToggle);
 
@@ -3415,7 +3683,7 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
 
     const isFirst = state.settingsCount === 0;
     state.settingsCount++;
-    const changed = isFirst || rebuildKeysChanged(prev, next);
+    const changed = isFirst || prevProvider !== provider || rebuildKeysChanged(prev, next);
 
     log(
       'settings: lang=' + state.targetLang + ' provider=' + state.provider +
@@ -3424,7 +3692,6 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
     );
 
     if (!state.targetLang) problem('no target language resolved; idle');
-    if (state.provider !== 'edge') warnProviderOnce();
 
     if (changed) {
       state.epoch++;
@@ -4669,6 +4936,7 @@ struct P1SettingsSnapshot {
     std::wstring credentialTarget;
     std::wstring llmApiKey;
     std::wstring keySourceSetting;
+    std::vector<std::wstring> glossary;
     std::wstring shortcutToggle;
     bool gestureToggle = true;
     bool scopeReadme = true;
@@ -4723,6 +4991,30 @@ static P1SettingsSnapshot P1ReadSettings() {
     s.llmApiKey = P1ReadStringSetting(L"llmApiKey", L"", true);
     s.keySourceSetting =
         P1ReadStringSetting(L"llmKeySource", L"credential", false);
+    // A list setting: elements are read as `glossary[0]`, `glossary[1]`, ... and
+    // the first missing (or empty) entry ends the list. The settings block needs
+    // one default row because Windhawk rejects an empty array; that row is empty
+    // and therefore reads back as an empty list.
+    s.glossary.clear();
+    for (int index = 0;; ++index) {
+        PCWSTR value = Wh_GetStringSetting(L"glossary[%d]", index);
+        std::wstring entry;
+        if (value) {
+            try {
+                entry.assign(value);
+            } catch (...) {
+            }
+            Wh_FreeStringSetting(value);
+        }
+        if (entry.empty()) {
+            break;
+        }
+        try {
+            s.glossary.push_back(entry);
+        } catch (...) {
+            break;
+        }
+    }
     // Empty is a valid value for the shortcut: it disables it.
     s.shortcutToggle = P1ReadStringSetting(L"shortcutToggle", L"Alt+Q", true);
     s.gestureToggle = Wh_GetIntSetting(L"gestureToggle") != 0;
@@ -4815,12 +5107,27 @@ static std::wstring P1BuildSettingsJson(const P1SettingsSnapshot& s,
         sepName(name);
         json += value ? L"true" : L"false";
     };
+    auto appendStringArray = [&](const wchar_t* name,
+                                 const std::vector<std::wstring>& values) {
+        sepName(name);
+        json += L"[";
+        bool firstItem = true;
+        for (const std::wstring& value : values) {
+            if (!firstItem) {
+                json += L",";
+            }
+            firstItem = false;
+            P1JsonEscapeAppend(json, value);
+        }
+        json += L"]";
+    };
 
     appendString(L"targetLang", s.targetLang);
     appendString(L"provider", s.provider);
     appendString(L"llmBaseUrl", s.llmBaseUrl);
     appendString(L"llmModel", s.llmModel);
     appendString(L"llmKeySource", keySource);
+    appendStringArray(L"glossary", s.glossary);
     appendBool(L"scopeReadme", s.scopeReadme);
     appendBool(L"scopeSettings", s.scopeSettings);
     appendBool(L"scopeModName", s.scopeModName);
@@ -4851,6 +5158,25 @@ struct P1KeyInfo {
     std::string key;      // UTF-8, empty when there is no key
     std::wstring host;    // lower-case host of llmBaseUrl, may be empty
 };
+
+// Hosts that never receive the LLM key, whatever llmBaseUrl says: these are the
+// free translation endpoints, which need no auth. Compared case-insensitively.
+static bool P1HostExcludedFromAuth(const std::wstring& host) {
+    return P1EqualsNoCase(host, L"edge.microsoft.com") ||
+           P1EqualsNoCase(host, L"translate.googleapis.com");
+}
+
+// Only the host decides whether a request gets the key: ports and paths are
+// ignored. `llmBaseUrl` of `https://api.example.com/v1` therefore covers
+// `https://api.example.com/v1/chat/completions`, any port, and any letter case
+// in the host.
+static bool P1HostMatchesKey(const std::wstring& requestHost,
+                             const std::wstring& keyHost) {
+    if (requestHost.empty() || keyHost.empty()) {
+        return false;
+    }
+    return P1EqualsNoCase(requestHost, keyHost);
+}
 
 static std::mutex g_p1KeyMutex;
 static bool g_p1KeyCacheValid = false;
@@ -5046,12 +5372,18 @@ static P1KeyInfo P1BuildKeyInfo(const P1SettingsSnapshot& s) {
                L"disabled");
     }
 
+    // Anything but the three documented values is treated as none, with one
+    // line, so a typo can never silently send a key.
     std::wstring source = P1Lower(s.keySourceSetting);
-    if (source != L"credential" && source != L"setting") {
-        if (source != L"none") {
-            P0_LOG(L"[p1] unknown llmKeySource '%s'; treating it as none",
-                   s.keySourceSetting.c_str());
-        }
+    if (source != L"credential" && source != L"setting" && source != L"none") {
+        P0_LOG(L"[p1] unknown llmKeySource '%s'; treating it as none",
+               s.keySourceSetting.c_str());
+        source = L"none";
+    }
+
+    if (source == L"none") {
+        // The user asked for no key: neither the credential nor the plaintext
+        // field is read.
         info.source = L"none";
         return info;
     }
@@ -5060,22 +5392,39 @@ static P1KeyInfo P1BuildKeyInfo(const P1SettingsSnapshot& s) {
         std::string key;
         DWORD error = 0;
         if (P1ReadCredentialKey(s.credentialTarget, key, error)) {
-            info.source = L"credential";
             P1SanitizeKey(key);
-            info.key = key;
-            P0_LOG(L"[p1] credential target=%s found=1 bytes=%llu",
-                   s.credentialTarget.c_str(),
-                   static_cast<unsigned long long>(key.size()));
-            return info;
+            if (!key.empty()) {
+                P0_LOG(L"[p1] credential target=%s found=1 bytes=%llu",
+                       s.credentialTarget.c_str(),
+                       static_cast<unsigned long long>(key.size()));
+                info.source = L"credential";
+                info.key = std::move(key);
+                return info;
+            }
+            // A blob that decodes to nothing is a missing key as well.
+            error = ERROR_INVALID_DATA;
         }
-        P0_LOG(L"[p1] credential target=%s found=0 error=%lu; falling back to "
-               L"the setting",
-               s.credentialTarget.c_str(), error);
+        // Exactly one line, with the target name and the Win32 error, so a
+        // missing credential is diagnosable from p0.log. The key value itself
+        // is never part of any log call. Then the plaintext setting is used if
+        // it has anything in it.
+        P0_LOG(L"[p1] credential target=%s found=0 error=%lu; plaintext "
+               L"fallback=%s",
+               s.credentialTarget.c_str(), error,
+               s.llmApiKey.empty() ? L"absent" : L"used");
+        source = L"setting";
     }
 
+    std::string fallback = P1WideToUtf8(s.llmApiKey);
+    P1SanitizeKey(fallback);
+    if (fallback.empty()) {
+        // No key anywhere: report none, so the page knows the key is missing.
+        info.source = L"none";
+        info.key.clear();
+        return info;
+    }
     info.source = L"setting";
-    info.key = P1WideToUtf8(s.llmApiKey);
-    P1SanitizeKey(info.key);
+    info.key = std::move(fallback);
     return info;
 }
 
@@ -5425,8 +5774,8 @@ struct P1HttpRequest {
     std::vector<std::pair<std::wstring, std::wstring>> headers;
     std::string body;
     unsigned long long timeoutMs = 20000;
-    std::string apiKey;
-    std::wstring apiKeyHost;
+    std::string apiKey;       // never passed to a log call; header only
+    std::wstring apiKeyHost;  // lower-case host the key is allowed for
     bool trace = false;       // debug setting at relay time
     void* webView = nullptr;  // owned reference, released on the UI thread
 };
@@ -5614,6 +5963,10 @@ static P1HttpReply* P1PerformHttp(const P1HttpRequest* request) {
         }
 
         stage = L"headers";
+        // The key lives in P1HttpRequest::apiKey and in this header block, and
+        // nowhere else. Neither is ever passed to a log call: every log line in
+        // this function takes only the host, the stage, an error/status code or
+        // a body, and the trace functions receive the request body alone.
         std::wstring headerBlock;
         for (const auto& header : request->headers) {
             headerBlock += header.first;
@@ -5630,9 +5983,14 @@ static P1HttpReply* P1PerformHttp(const P1HttpRequest* request) {
             }
         }
 
-        bool hostMatchesKey = !request->apiKey.empty() &&
-                              !request->apiKeyHost.empty() &&
-                              P1EqualsNoCase(parts.host, request->apiKeyHost);
+        bool hostMatchesKey =
+            !request->apiKey.empty() &&
+            P1HostMatchesKey(parts.host, request->apiKeyHost);
+        // The free endpoints never take the key, even when llmBaseUrl is
+        // misconfigured to point at one of them.
+        if (hostMatchesKey && P1HostExcludedFromAuth(parts.host)) {
+            hostMatchesKey = false;
+        }
         if (hostMatchesKey && parts.secure && !hasAuthorization) {
             headerBlock += L"Authorization: Bearer ";
             headerBlock += P1Utf8ToWide(request->apiKey);

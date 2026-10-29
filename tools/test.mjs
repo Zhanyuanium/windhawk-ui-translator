@@ -751,22 +751,22 @@ async function consistencyCase() {
   await cacheEnv.wait(1400);
   const cacheKeys = [];
   for (let i = 0; i < ls.length; i++) cacheKeys.push(ls.key(i));
-  const v1Keys = cacheKeys.filter((key) => key.indexOf('whtr1|') === 0 && key.indexOf('whtr1|v2|') !== 0);
-  const v2Keys = cacheKeys.filter((key) => key.indexOf('whtr1|v2|') === 0);
+  const v1Keys = cacheKeys.filter((key) => key.indexOf('whtr1|') === 0 && key.indexOf('whtr1|v3|') !== 0);
+  const v3Keys = cacheKeys.filter((key) => key.indexOf('whtr1|v3|') === 0);
   const cacheValue = cacheEnv.text(cacheEnv.doc.getElementById('real-content'));
 
   cacheEnv.check('v1 cache entries are purged', v1Keys.length === 0, v1Keys.join(' | '));
-  cacheEnv.check('v2 cache entries are written', v2Keys.length > 0, String(v2Keys.length));
+  cacheEnv.check('v3 cache entries are written', v3Keys.length > 0, String(v3Keys.length));
   cacheEnv.check('v1 translation is not reused', cacheValue.indexOf('OLD-V1') === -1, cacheValue);
   cacheEnv.check(
     'normalised key is the one written',
-    v2Keys.some((key) => key === 'whtr1|v2|edge|zh-Hans|' + hash32(plain) + '|' + plain.length),
-    v2Keys.join(' | ')
+    v3Keys.some((key) => key === 'whtr1|v3|edge||zh-Hans|' + hash32(plain) + '|' + plain.length),
+    v3Keys.join(' | ')
   );
   cacheEnv.check(
     'raw-whitespace key is not written',
-    v2Keys.every((key) => key !== 'whtr1|v2|edge|zh-Hans|' + hash32(raw) + '|' + raw.length),
-    v2Keys.join(' | ')
+    v3Keys.every((key) => key !== 'whtr1|v3|edge||zh-Hans|' + hash32(raw) + '|' + raw.length),
+    v3Keys.join(' | ')
   );
   cacheEnv.report();
   cacheEnv.window.close();
@@ -968,6 +968,463 @@ async function claimCase() {
 }
 
 // ---------------------------------------------------------------------------
+// llm: the OpenAI-compatible provider
+// ---------------------------------------------------------------------------
+const LLM_SETTINGS = {
+  provider: 'llm',
+  llmBaseUrl: 'https://llm.local/v1/',
+  llmModel: 'test-model',
+  llmKeySource: 'credential'
+};
+
+function llmPayload(record) {
+  let parsed = null;
+  try {
+    parsed = JSON.parse(record.body);
+  } catch (_) {
+    parsed = null;
+  }
+  if (!parsed || !Array.isArray(parsed.messages)) return null;
+  const last = parsed.messages[parsed.messages.length - 1];
+  let user = null;
+  try {
+    user = JSON.parse(last && last.content);
+  } catch (_) {
+    user = null;
+  }
+  return { body: parsed, user: user };
+}
+
+function llmSegments(record) {
+  const payload = llmPayload(record);
+  return payload && payload.user && Array.isArray(payload.user.segments) ? payload.user.segments : [];
+}
+
+function llmReply(record, translations, fenced) {
+  const json = JSON.stringify({ translations: translations });
+  const content = fenced ? '```json\n' + json + '\n```' : json;
+  return {
+    status: 200,
+    error: 0,
+    body: JSON.stringify({ choices: [{ message: { role: 'assistant', content: content } }] })
+  };
+}
+
+function isLlmRequest(record) {
+  return record.url.indexOf('/chat/completions') !== -1;
+}
+
+function edgeTexts(record) {
+  try {
+    const parsed = JSON.parse(record.body);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function capTitle(index, length) {
+  let text = 'Cap item ' + index + ' ';
+  while (text.length < length) text += 'word ';
+  return text.slice(0, length - 1).trim() + '.';
+}
+
+function capPage(count, length) {
+  let rows = '';
+  for (let i = 0; i < count; i++) {
+    rows +=
+      '<div class="ant-listy-item"><div class="windhawk-row-meta">' +
+      '<h4 class="windhawk-row-meta-title" id="cap-name-' + i + '">' + capTitle(i, length) + '</h4>' +
+      '</div></div>';
+  }
+  return '<!doctype html><html lang="en"><head></head><body><div class="ant-listy" id="tile-grid">' + rows + '</div></body></html>';
+}
+
+async function llmCase() {
+  const mapping = new Map([
+    ['Better Dialogs', '甲'],
+    ['Improves Windows dialog boxes.', '乙'],
+    ['Taskbar Clock', '丙'],
+    ['Replaces the tray clock.', '丁']
+  ]);
+  const glossary = ['mod=模组', 'windhawk = 风鹰'];
+
+  // URL joining, prompt, glossary, fenced JSON and id mapping, in one request.
+  const env = mount(JSDOM, {
+    html: fixture.tileGrid(),
+    settings: Object.assign({}, LLM_SETTINGS, { glossary: glossary }),
+    respond: (record) => {
+      if (!isLlmRequest(record)) return null;
+      const translations = llmSegments(record)
+        .map((segment) => ({ id: segment.id, text: mapping.get(segment.text) || '译文' }))
+        .reverse();
+      return llmReply(record, translations, true);
+    }
+  });
+  await env.wait(1600);
+
+  const requests = env.llmRequests();
+  env.check('llm: exactly one chat request for the batch', requests.length === 1, String(requests.length));
+  const request = requests[0] || { url: '', headers: [], body: '{}' };
+  env.check(
+    'llm: base URL ending in /v1 joins without a doubled slash',
+    request.url === 'https://llm.local/v1/chat/completions',
+    request.url
+  );
+  env.check(
+    'llm: the page never adds Authorization',
+    request.headers.every((pair) => String(pair[0]).toLowerCase() !== 'authorization'),
+    JSON.stringify(request.headers)
+  );
+  env.check(
+    'llm: request carries JSON content type',
+    request.headers.some((pair) => String(pair[0]).toLowerCase() === 'content-type' && pair[1] === 'application/json'),
+    JSON.stringify(request.headers)
+  );
+
+  const payload = llmPayload(request) || { body: {}, user: {} };
+  const system = payload.body.messages && payload.body.messages[0] ? payload.body.messages[0].content : '';
+  env.check('llm: model is the configured one', payload.body.model === 'test-model', JSON.stringify(payload.body.model));
+  env.check('llm: temperature is 0', payload.body.temperature === 0, String(payload.body.temperature));
+  env.check('llm: system prompt states the placeholder rules', system.indexOf('{{n}}') !== -1 && system.indexOf('<n>...</n>') !== -1, system);
+  env.check('llm: system prompt lists the glossary', system.indexOf('Glossary') !== -1 && system.indexOf('mod=模组') !== -1 && system.indexOf('windhawk=风鹰') !== -1, system);
+  env.check('llm: system prompt names the target language', system.indexOf('zh-Hans') !== -1, system);
+  env.check(
+    'llm: user payload carries the glossary object',
+    payload.user.glossary && payload.user.glossary.mod === '模组' && payload.user.glossary.windhawk === '风鹰',
+    JSON.stringify(payload.user.glossary)
+  );
+  env.check('llm: user payload names the target language', payload.user.targetLanguage === 'zh-Hans', String(payload.user.targetLanguage));
+  env.check(
+    'llm: segment ids are 1..n in order',
+    JSON.stringify((payload.user.segments || []).map((segment) => segment.id)) === '[1,2,3,4]',
+    JSON.stringify(payload.user.segments)
+  );
+
+  const name = env.doc.getElementById('tile-name');
+  const desc = env.doc.getElementById('tile-desc');
+  const name2 = env.doc.getElementById('tile-name2');
+  const desc2 = env.doc.getElementById('tile-desc2');
+  env.check('llm: id 1 lands on its own unit', env.text(name) === '甲', env.text(name));
+  env.check('llm: id 2 lands on its own unit', env.text(desc) === '乙', env.text(desc));
+  env.check('llm: id 3 lands on its own unit', env.text(name2) === '丙', env.text(name2));
+  env.check('llm: id 4 lands on its own unit', env.text(desc2) === '丁', env.text(desc2));
+  env.check('llm: no engine problems', env.problems.length === 0, env.problems.join(' | '));
+  env.report();
+  env.window.close();
+
+  // One request per distinct string, fan-out to every unit.
+  const dedupe = mount(JSDOM, {
+    html:
+      '<!doctype html><html lang="en"><head></head><body><div class="ant-listy" id="tile-grid">' +
+      '<div class="ant-listy-item"><div class="windhawk-row-meta">' +
+      '<h4 class="windhawk-row-meta-title" id="dup-name-1">Same title</h4></div></div>' +
+      '<div class="ant-listy-item"><div class="windhawk-row-meta">' +
+      '<h4 class="windhawk-row-meta-title" id="dup-name-2">Same title</h4></div></div>' +
+      '</div></body></html>',
+    settings: Object.assign({}, LLM_SETTINGS),
+    respond: (record) => {
+      if (!isLlmRequest(record)) return null;
+      return llmReply(record, llmSegments(record).map((segment) => ({ id: segment.id, text: '同' })));
+    }
+  });
+  await dedupe.wait(1400);
+  const dedupeRequests = dedupe.llmRequests();
+  dedupe.check('llm dedupe: one request for the shared string', dedupeRequests.length === 1, String(dedupeRequests.length));
+  dedupe.check(
+    'llm dedupe: the request carries one segment',
+    dedupeRequests.length === 1 && llmSegments(dedupeRequests[0]).length === 1,
+    dedupeRequests.length === 1 ? String(llmSegments(dedupeRequests[0]).length) : '-'
+  );
+  dedupe.check(
+    'llm dedupe: both units receive the translation',
+    dedupe.text(dedupe.doc.getElementById('dup-name-1')) === '同' &&
+      dedupe.text(dedupe.doc.getElementById('dup-name-2')) === '同',
+    dedupe.text(dedupe.doc.getElementById('dup-name-1')) + ' | ' + dedupe.text(dedupe.doc.getElementById('dup-name-2'))
+  );
+  dedupe.report();
+  dedupe.window.close();
+
+  // A base URL without /v1 joins the same way.
+  const bare = mount(JSDOM, {
+    html: fixture.tileGrid(),
+    settings: Object.assign({}, LLM_SETTINGS, { llmBaseUrl: 'https://llm.local/' }),
+    respond: (record) => {
+      if (!isLlmRequest(record)) return null;
+      return llmReply(record, llmSegments(record).map((segment) => ({ id: segment.id, text: '译' + segment.id })));
+    }
+  });
+  await bare.wait(1400);
+  bare.check(
+    'llm: a base URL without /v1 joins the path',
+    bare.llmRequests().length === 1 && bare.llmRequests()[0].url === 'https://llm.local/chat/completions',
+    bare.llmRequests().map((item) => item.url).join(' | ')
+  );
+  bare.report();
+  bare.window.close();
+
+  // 12 segments and 6000 characters per LLM request, larger queues split.
+  const segmentCap = mount(JSDOM, {
+    html: capPage(16, 40),
+    settings: Object.assign({}, LLM_SETTINGS, { batchSize: 50, batchChars: 50000 }),
+    respond: (record) => {
+      if (!isLlmRequest(record)) return null;
+      return llmReply(record, llmSegments(record).map((segment) => ({ id: segment.id, text: '译' + segment.id })));
+    }
+  });
+  await segmentCap.wait(1600);
+  const segmentBatches = segmentCap.llmRequests().map((item) => llmSegments(item));
+  segmentCap.check(
+    'llm cap: no request exceeds 12 segments',
+    segmentBatches.every((batch) => batch.length <= 12),
+    segmentBatches.map((batch) => batch.length).join(',')
+  );
+  segmentCap.check(
+    'llm cap: a larger queue produces more batches',
+    segmentBatches.length === 2 && segmentBatches[0].length === 12 && segmentBatches[1].length === 4,
+    segmentBatches.map((batch) => batch.length).join(',')
+  );
+  segmentCap.report();
+  segmentCap.window.close();
+
+  const charCap = mount(JSDOM, {
+    html: capPage(14, 600),
+    settings: Object.assign({}, LLM_SETTINGS, { batchSize: 50, batchChars: 50000 }),
+    respond: (record) => {
+      if (!isLlmRequest(record)) return null;
+      return llmReply(record, llmSegments(record).map((segment) => ({ id: segment.id, text: '译' + segment.id })));
+    }
+  });
+  await charCap.wait(1600);
+  const charBatches = charCap.llmRequests().map((item) => llmSegments(item));
+  charCap.check(
+    'llm cap: no request exceeds 6000 characters',
+    charBatches.every((batch) => batch.reduce((sum, segment) => sum + segment.text.length, 0) <= 6000),
+    charBatches.map((batch) => batch.reduce((sum, segment) => sum + segment.text.length, 0)).join(',')
+  );
+  charCap.check(
+    'llm cap: the character cap splits before the segment cap',
+    charBatches.length === 2 && charBatches[0].length === 10 && charBatches[1].length === 4,
+    charBatches.map((batch) => batch.length).join(',')
+  );
+  charCap.report();
+  charCap.window.close();
+
+  // Missing ids: the present ids keep the LLM text, the omitted ones fall back
+  // to Edge, and the batch is not allowed to shift text between units.
+  const missing = mount(JSDOM, {
+    html: fixture.tileGrid(),
+    settings: Object.assign({}, LLM_SETTINGS),
+    respond: (record) => {
+      if (!isLlmRequest(record)) return null;
+      const segments = llmSegments(record);
+      const translations = [];
+      for (const segment of segments) {
+        if (segment.text === 'Better Dialogs') translations.push({ id: segment.id, text: '甲' });
+        if (segment.text === 'Taskbar Clock') translations.push({ id: segment.id, text: '丙' });
+      }
+      return llmReply(record, translations);
+    }
+  });
+  await missing.wait(1800);
+  const missingEdge = missing.httpRequests.filter((item) => !isLlmRequest(item));
+  const missingEdgeTexts = missingEdge.reduce((all, item) => all.concat(edgeTexts(item)), []);
+  missing.check('llm missing: present ids keep their LLM text', missing.text(missing.doc.getElementById('tile-name')) === '甲', missing.text(missing.doc.getElementById('tile-name')));
+  missing.check('llm missing: a later present id keeps its LLM text', missing.text(missing.doc.getElementById('tile-name2')) === '丙', missing.text(missing.doc.getElementById('tile-name2')));
+  missing.check(
+    'llm missing: omitted ids do not receive another segment text',
+    missing.text(missing.doc.getElementById('tile-desc')) !== '甲' && missing.text(missing.doc.getElementById('tile-desc')) !== '乙',
+    missing.text(missing.doc.getElementById('tile-desc'))
+  );
+  missing.check(
+    'llm missing: omitted ids fall back to Edge',
+    missing.text(missing.doc.getElementById('tile-desc')) === defaultTranslate('Improves Windows dialog boxes.') &&
+      missing.text(missing.doc.getElementById('tile-desc2')) === defaultTranslate('Replaces the tray clock.'),
+    missing.text(missing.doc.getElementById('tile-desc')) + ' | ' + missing.text(missing.doc.getElementById('tile-desc2'))
+  );
+  missing.check(
+    'llm missing: one Edge request carries the omitted segments',
+    missingEdge.length === 1 &&
+      missingEdgeTexts.indexOf('Improves Windows dialog boxes.') !== -1 &&
+      missingEdgeTexts.indexOf('Replaces the tray clock.') !== -1 &&
+      missingEdgeTexts.indexOf('Better Dialogs') === -1,
+    missingEdgeTexts.join(' | ')
+  );
+  missing.check('llm missing: the fallback is logged once', missing.logs.filter((line) => line.indexOf('falling back to Edge') !== -1).length === 1, missing.logs.join(' | '));
+  missing.check('llm missing: no engine problems', missing.problems.length === 0, missing.problems.join(' | '));
+  missing.report();
+  missing.window.close();
+
+  // An empty translations array is a batch failure: Edge takes over and the
+  // session never retries the LLM, including for text discovered later.
+  const empty = mount(JSDOM, {
+    html: fixture.tileGrid(),
+    settings: Object.assign({}, LLM_SETTINGS),
+    respond: (record) => (isLlmRequest(record) ? llmReply(record, []) : null)
+  });
+  await empty.wait(1800);
+  const emptyDoc = empty.doc;
+  const late = emptyDoc.createElement('div');
+  late.className = 'ant-listy-item';
+  late.innerHTML =
+    '<div class="windhawk-row-meta"><h4 class="windhawk-row-meta-title" id="late-name">Late setting</h4>' +
+    '<div class="windhawk-row-meta-description" id="late-desc">Added after the fallback.</div></div>';
+  emptyDoc.getElementById('tile-grid').appendChild(late);
+  await empty.wait(900);
+
+  empty.check('llm empty: the batch falls back to Edge', empty.hasCJK(empty.text(emptyDoc.getElementById('tile-name'))) && empty.hasCJK(empty.text(emptyDoc.getElementById('tile-desc'))), empty.text(emptyDoc.getElementById('tile-name')) + ' | ' + empty.text(emptyDoc.getElementById('tile-desc')));
+  empty.check('llm empty: no LLM retry after the fallback', empty.llmRequests().length === 1, String(empty.llmRequests().length));
+  empty.check('llm empty: later text goes straight to Edge', empty.hasCJK(empty.text(emptyDoc.getElementById('late-name'))) && empty.hasCJK(empty.text(emptyDoc.getElementById('late-desc'))), empty.text(emptyDoc.getElementById('late-name')) + ' | ' + empty.text(emptyDoc.getElementById('late-desc')));
+  empty.check('llm empty: fallback is logged once', empty.logs.filter((line) => line.indexOf('falling back to Edge') !== -1).length === 1, empty.logs.join(' | '));
+  empty.check('llm empty: no engine problems', empty.problems.length === 0, empty.problems.join(' | '));
+  empty.report();
+  empty.window.close();
+
+  // A 500 gets exactly one retry, then the batch falls back to Edge.
+  const failing = mount(JSDOM, {
+    html: fixture.tileGrid(),
+    settings: Object.assign({}, LLM_SETTINGS),
+    respond: (record) => (isLlmRequest(record) ? { status: 500, error: 0, body: 'server error' } : null)
+  });
+  await failing.wait(2600);
+  failing.check('llm 500: exactly one retry', failing.llmRequests().length === 2, String(failing.llmRequests().length));
+  failing.check('llm 500: the batch falls back to Edge', failing.hasCJK(failing.text(failing.doc.getElementById('tile-name'))) && failing.hasCJK(failing.text(failing.doc.getElementById('tile-desc'))), failing.text(failing.doc.getElementById('tile-name')) + ' | ' + failing.text(failing.doc.getElementById('tile-desc')));
+  failing.check('llm 500: fallback is logged once', failing.logs.filter((line) => line.indexOf('falling back to Edge') !== -1).length === 1, failing.logs.join(' | '));
+  failing.check('llm 500: no engine problems', failing.problems.length === 0, failing.problems.join(' | '));
+  failing.report();
+  failing.window.close();
+
+  // A timeout is retried once too; a successful retry keeps the LLM.
+  let timeoutAttempts = 0;
+  const slow = mount(JSDOM, {
+    html: fixture.tileGrid(),
+    settings: Object.assign({}, LLM_SETTINGS, { timeoutMs: 1000 }),
+    respond: (record) => {
+      if (!isLlmRequest(record)) return null;
+      timeoutAttempts++;
+      if (timeoutAttempts === 1) return { drop: true };
+      return llmReply(record, llmSegments(record).map((segment) => ({ id: segment.id, text: '慢' + segment.id })));
+    }
+  });
+  await slow.wait(2800);
+  slow.check('llm timeout: the request is retried once', slow.llmRequests().length === 2, String(slow.llmRequests().length));
+  slow.check('llm timeout: the retry keeps the LLM', slow.text(slow.doc.getElementById('tile-name')) === '慢1', slow.text(slow.doc.getElementById('tile-name')));
+  slow.check(
+    'llm timeout: no Edge request after a successful retry',
+    slow.httpRequests.every((request) => isLlmRequest(request)),
+    slow.httpRequests.map((request) => request.url).join(' | ')
+  );
+  slow.report();
+  slow.window.close();
+
+  // auto resolves to LLM only when a key source is configured.
+  const autoNone = mount(JSDOM, {
+    html: fixture.tileGrid(),
+    settings: Object.assign({}, LLM_SETTINGS, { provider: 'auto', llmKeySource: 'none' })
+  });
+  await autoNone.wait(1400);
+  autoNone.check('llm auto: key source none resolves to Edge', autoNone.api().stats().provider === 'edge', JSON.stringify(autoNone.api().stats()));
+  autoNone.check('llm auto: key source none sends no LLM request', autoNone.llmRequests().length === 0, String(autoNone.llmRequests().length));
+  autoNone.check('llm auto: Edge still translates', autoNone.hasCJK(autoNone.text(autoNone.doc.getElementById('tile-name'))), autoNone.text(autoNone.doc.getElementById('tile-name')));
+  autoNone.report();
+  autoNone.window.close();
+
+  const autoKey = mount(JSDOM, {
+    html: fixture.tileGrid(),
+    settings: Object.assign({}, LLM_SETTINGS, { provider: 'auto', llmKeySource: 'credential' }),
+    respond: (record) => {
+      if (!isLlmRequest(record)) return null;
+      return llmReply(record, llmSegments(record).map((segment) => ({ id: segment.id, text: '自动' + segment.id })));
+    }
+  });
+  await autoKey.wait(1400);
+  autoKey.check('llm auto: a key source resolves to LLM', autoKey.api().stats().provider === 'llm', JSON.stringify(autoKey.api().stats()));
+  autoKey.check('llm auto: LLM serves the request', autoKey.llmRequests().length === 1, String(autoKey.llmRequests().length));
+  autoKey.check('llm auto: LLM text is rendered', autoKey.text(autoKey.doc.getElementById('tile-name')) === '自动1', autoKey.text(autoKey.doc.getElementById('tile-name')));
+  autoKey.report();
+  autoKey.window.close();
+
+  // google stays a one-line warning and behaves like Edge.
+  const google = mount(JSDOM, {
+    html: fixture.tileGrid(),
+    settings: Object.assign({}, LLM_SETTINGS, { provider: 'google' })
+  });
+  await google.wait(1400);
+  google.check('llm google: resolves to Edge', google.api().stats().provider === 'edge', JSON.stringify(google.api().stats()));
+  google.check('llm google: warns once', google.logs.filter((line) => line.indexOf('"google" is not implemented') !== -1).length === 1, google.logs.join(' | '));
+  google.check('llm google: Edge translates', google.hasCJK(google.text(google.doc.getElementById('tile-name'))), google.text(google.doc.getElementById('tile-name')));
+  google.report();
+  google.window.close();
+
+  // Cache keys carry provider and model: Edge text is never reused by the LLM,
+  // and a model change is a miss.
+  const cacheEnv = mount(JSDOM, {
+    html: fixture.tileGrid(),
+    settings: { provider: 'edge', cacheEnabled: true },
+    respond: (record) => {
+      if (!isLlmRequest(record)) return null;
+      const payload = llmPayload(record);
+      const model = payload ? payload.body.model : '?';
+      return llmReply(
+        record,
+        llmSegments(record).map((segment) => ({ id: segment.id, text: 'L' + model + ':' + segment.text }))
+      );
+    }
+  });
+  const cacheKeys = () => {
+    const ls = cacheEnv.window.localStorage;
+    const out = [];
+    for (let i = 0; i < ls.length; i++) out.push(ls.key(i));
+    return out;
+  };
+  await cacheEnv.wait(1400);
+  const edgeKeys = cacheKeys().filter((key) => key.indexOf('whtr1|v3|edge|') === 0);
+  cacheEnv.check('llm cache: Edge key is written', edgeKeys.length > 0, cacheKeys().join(' | '));
+
+  cacheEnv.pushSettings(
+    Object.assign({}, cacheEnv.settings, {
+      provider: 'llm',
+      llmBaseUrl: 'https://llm.local/v1',
+      llmModel: 'model-a',
+      llmKeySource: 'credential'
+    })
+  );
+  await cacheEnv.wait(1400);
+  const afterA = cacheEnv.text(cacheEnv.doc.getElementById('tile-name'));
+  cacheEnv.check('llm cache: Edge text is not reused for the LLM', afterA.indexOf('Lmodel-a:') === 0, afterA);
+  cacheEnv.check(
+    'llm cache: model-a key is written',
+    cacheKeys().some((key) => key.indexOf('whtr1|v3|llm|model-a|') === 0),
+    cacheKeys().join(' | ')
+  );
+  cacheEnv.check(
+    'llm cache: Edge key stays separate',
+    cacheKeys().some((key) => key.indexOf('whtr1|v3|edge|') === 0),
+    cacheKeys().join(' | ')
+  );
+
+  cacheEnv.pushSettings(Object.assign({}, cacheEnv.settings, { llmModel: 'model-b' }));
+  await cacheEnv.wait(1400);
+  const afterB = cacheEnv.text(cacheEnv.doc.getElementById('tile-name'));
+  cacheEnv.check('llm cache: a model change misses the cache', afterB.indexOf('Lmodel-b:') === 0, afterB);
+  cacheEnv.check(
+    'llm cache: model-b key is written',
+    cacheKeys().some((key) => key.indexOf('whtr1|v3|llm|model-b|') === 0),
+    cacheKeys().join(' | ')
+  );
+  cacheEnv.check(
+    'llm cache: the model-a key is kept',
+    cacheKeys().some((key) => key.indexOf('whtr1|v3|llm|model-a|') === 0),
+    cacheKeys().join(' | ')
+  );
+  cacheEnv.check('llm cache: no engine problems', cacheEnv.problems.length === 0, cacheEnv.problems.join(' | '));
+  cacheEnv.report();
+  cacheEnv.window.close();
+
+  return counts(env, dedupe, bare, segmentCap, charCap, missing, empty, failing, slow, autoNone, autoKey, google, cacheEnv);
+}
+
+// ---------------------------------------------------------------------------
 // gesture: two-finger double tap and shortcut enable/disable cycles
 // ---------------------------------------------------------------------------
 function touch(env, type, id, x, y) {
@@ -1109,6 +1566,7 @@ const CASES = [
   ['select: antd 6 closed select hosts', selectCase],
   ['title: settings title units', titleCase],
   ['consistency: one source, one translation', consistencyCase],
+  ['llm: OpenAI-compatible provider', llmCase],
   ['claim: claim rules and hidden copies', claimCase],
   ['gesture: two-finger double tap and shortcut cycles', gestureCase]
 ];

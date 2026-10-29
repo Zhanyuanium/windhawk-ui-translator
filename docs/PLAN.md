@@ -1,8 +1,8 @@
 # Implementation plan
 
-Status: P0–P2 complete; P3 partially done (batching and the cache are in, the LLM and
-Google providers are not). This document is the agreed scope; update it when decisions
-change.
+Status: P0–P2 complete (P2 now includes the OpenAI-compatible LLM provider); P3
+partially done (the Google provider is not implemented). This document is the agreed
+scope; update it when decisions change.
 
 ## Problem
 
@@ -82,21 +82,64 @@ windhawk-ui.exe (Tauri/wry, STA UI thread)
 * Inline markup is protected with the placeholder scheme ported from kiss-translator.
 * Batching: ≤20 segments / ≤10000 chars / 400 ms window, concurrency 4–6, retry 2× with
   backoff on 429/5xx.
-* Providers: only the Microsoft Edge free endpoint is implemented; `auto` resolves to it.
-  OpenAI-compatible chat completions (JSON batch protocol, glossary) and Google
-  `translateHtml` / `gtx` are still P3 work.
+* Providers: Microsoft Edge (free), Google (free, not implemented yet) and an
+  OpenAI-compatible chat-completions endpoint; see [Providers](#providers).
 * Default target language follows the app: `document.documentElement.lang`, falling back
   to `navigator.language` (the Windows display language).
 * Cache: `localStorage` (`http://tauri.localhost` is a secure context), key
   `provider|lang|sha1(text)`, 30-day TTL, LRU trim at 3 MB.
+
+## Providers
+
+The `provider` setting resolves as follows:
+
+* `edge` — Microsoft's free endpoint; never the LLM.
+* `google` — Google's free endpoint. Not implemented yet, so it currently resolves to
+  Edge like `auto` without a key.
+* `llm` — the OpenAI-compatible endpoint. A missing key is not a reason to switch:
+  the request goes out without `Authorization` and the endpoint decides.
+* `auto` — the LLM only when a key is configured and `llmBaseUrl` plus `llmModel` are
+  set; otherwise Edge. "A key is configured" means `llmKeySource` is `credential` (a
+  credential was actually read) or `setting` (the plaintext field is non-empty). A
+  missing credential with an empty plaintext field reports `none`, so `auto` stays on
+  Edge.
+
+### LLM request shape
+
+One chat-completions request per batch:
+
+```
+POST <llmBaseUrl>/chat/completions
+Content-Type: application/json
+Authorization: Bearer <key>        <- added by the mod, never by the page
+
+{"model": "<llmModel>", "temperature": 0, "messages": [
+  {"role": "system", "content": "<prompt>"},
+  {"role": "user", "content": "{\"targetLanguage\":\"<tag>\",\"segments\":[{\"id\":1,\"text\":\"...\"}],\"glossary\":{\"source\":\"target\"}}"}
+]}
+```
+
+* The user message is the batch as a JSON string; `glossary` is present only when the
+  setting has entries.
+* The prompt asks for one raw JSON object `{"translations":[{"id": 1, "text": "..."}]}`.
+  Ids are 1-based positions in `segments`; the reply may be fenced or wrapped in prose,
+  so the page takes the first `{` through the last `}`.
+* At most 12 segments / 6000 characters per request, one retry on timeout/429/5xx; a
+  failed LLM session falls back to Edge until the page reloads.
 
 ## Secrets
 
 The LLM key is read in C++ from Windows Credential Manager (`CredReadW`, generic
 credential target named in the settings) with a plaintext settings field as fallback.
 Write the credential with `cmdkey /generic:<target> /user:translator /pass:<key>`; the mod
-reads it at start and whenever the settings change. The key is never logged and never sent
-to the page.
+reads it at start and whenever the settings change. A missing credential logs one line
+with the target name and the Win32 error, then falls back to the plaintext setting if it
+has a value; `llmKeySource` reports `credential` only when a key was actually read,
+`setting` when the plaintext field supplies it, `none` otherwise. The `Authorization`
+header is added only for requests whose host equals `llmBaseUrl`'s host
+(case-insensitive; port and path ignored, so `<llmBaseUrl>/chat/completions` matches) and
+never for `edge.microsoft.com` or `translate.googleapis.com`. The key is never logged and
+never sent to the page.
 
 ## Phases
 
@@ -104,8 +147,8 @@ to the page.
 | --- | --- | --- |
 | P0 ✅ | hook chain, script injection, message bridge, logging | log shows hook + injection + `p0:ack` round trip |
 | P1 ✅ | bridge, settings, one provider (Edge) | hovering a block on the details page yields Chinese |
-| P2 ✅ | scanner coverage: README, settings, mod names, summaries, changelog | all five surfaces covered, code blocks untouched |
-| P3 🚧 | LLM and Google providers, glossary | batching and the cache are done; the LLM and Google backends are still idle |
+| P2 ✅ | scanner coverage (README, settings, mod names, summaries, changelog) and the OpenAI-compatible LLM provider: chat completions, glossary, credential-backed key injection | all five surfaces covered, code blocks untouched; LLM translations work with a configured key |
+| P3 🚧 | Google provider and remaining polish | the Google backend is still idle |
 | P4 ✅ | interaction: in-place swap, hover-revert, tap toggle, two-finger double tap, shortcut | implemented; no React errors seen when switching tabs or mods |
 | P5 🚧 | unload safety, long documents, docs, build script | safe mode recovers; docs complete |
 | P6 (optional) | source-tab comments (CodeMirror decorations) | — |

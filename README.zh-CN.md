@@ -33,12 +33,34 @@ Windhawk 2.0 自身的界面已经本地化，但模组作者写的内容只有�
 * 触屏：点一下切换该文本块的原文；双指连点两次则像快捷键一样整体开、关翻译，`gestureToggle` 可关闭该手势。
 * `Alt+Q` 开、关翻译；快捷键可配置，留空表示不启用。
 * 默认目标语言跟随 Windhawk 界面语言，其次跟随 Windows 显示语言。
-* 目前实现的翻译后端是微软免费的 Edge 接口（`provider: edge`，`auto` 当前也解析到它）。OpenAI 兼容接口与 Google 选项已经在设置里，但尚未实现。
+* 翻译后端：微软免费的 Edge 接口（无需密钥）、兼容 OpenAI 的大模型接口（需要密钥，见下文），以及 Google（尚未实现）。`auto` 只有在配置了密钥时才优先用大模型，否则仍走 Edge。
 * 翻译结果缓存在 `localStorage`，有效期 `cacheTtlDays`；`clearCache` 会在下次启动时清空一次。
+
+## 使用大模型
+
+除了免费的 Edge 接口，本模组也可以走任意兼容 OpenAI 的 chat completions 接口。相关设置项：
+
+| 设置项 | 含义 |
+| --- | --- |
+| `provider` | `auto`、`edge`、`google` 或 `llm`。`auto` 只在配置了密钥时才用大模型，否则仍走 Edge。 |
+| `llmBaseUrl` | 接口根地址，例如 `https://api.openai.com/v1`；请求时会追加 `/chat/completions`。 |
+| `llmModel` | 模型名称，例如 `gpt-4o-mini`。 |
+| `credentialTarget` | 保存密钥的 Windows 凭据管理器名称（默认 `windhawk-ui-translator`）。 |
+| `llmKeySource` | `credential`（默认）、`setting` 或 `none`。 |
+| `llmApiKey` | 明文备用密钥；`llmKeySource` 为 `setting` 时使用，凭据缺失时也会作为备用。 |
+| `glossary` | 随每个大模型请求发送的术语表，每行一条 `原文=译文`。 |
+
+把密钥存成普通凭据（在普通终端里执行）：
+
+```powershell
+cmdkey /generic:windhawk-ui-translator /user:translator /pass:<你的 API 密钥>
+```
+
+模组在启动时和每次设置变更后读取凭据。密钥不会下发给页面，也不会写进日志。凭据不存在时，模组会记一行日志（含凭据名称与 Win32 错误码），然后使用填好的 `llmApiKey`；只有真正读到了密钥，`llmKeySource` 才会报告 `credential`，因此没有可用密钥时 `auto` 会一直留在 Edge。密钥只会附加到主机名与 `llmBaseUrl` 一致的请求上，免费接口永远不带密钥。
 
 ## 隐私
 
-译文文本会发送给你配置的翻译服务。没有遥测、没有统计，除配置的服务外不访问网络。LLM key 优先从 Windows 凭据管理器读取，不写日志。
+译文文本会发送给你配置的翻译服务。没有遥测、没有统计，除配置的服务外不访问网络。LLM 密钥从 Windows 凭据管理器读取（也可以改用明文设置项），不会写日志，也不会下发给页面。
 
 ## 开发
 

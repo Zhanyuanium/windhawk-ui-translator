@@ -31,6 +31,7 @@ export const DEFAULT_SETTINGS = {
   llmBaseUrl: '',
   llmModel: '',
   llmKeySource: 'none',
+  glossary: [],
   scopeReadme: true,
   scopeSettings: true,
   scopeModName: true,
@@ -793,6 +794,7 @@ export const fixture = {
 export function mount(JSDOM, options) {
   const html = options && options.html ? options.html : fixture.all();
   const translate = (options && options.translate) || defaultTranslate;
+  const respond = options && options.respond;
   const settings = Object.assign({}, DEFAULT_SETTINGS, (options && options.settings) || {});
 
   const dom = new JSDOM(html, {
@@ -805,10 +807,64 @@ export function mount(JSDOM, options) {
 
   const listeners = [];
   const requests = [];
+  const httpRequests = [];
   const logs = [];
   const problems = [];
   const emit = (data) => {
     for (const fn of listeners) fn({ data: data });
+  };
+
+  // The text segments a request carries, whether it is an Edge array or an
+  // OpenAI-compatible chat body.
+  const bodyTexts = (body) => {
+    let parsed = null;
+    try {
+      parsed = JSON.parse(body);
+    } catch (_) {
+      parsed = null;
+    }
+    if (Array.isArray(parsed)) return parsed.slice();
+    if (parsed && Array.isArray(parsed.messages)) {
+      const last = parsed.messages[parsed.messages.length - 1];
+      let payload = null;
+      try {
+        payload = JSON.parse(last && last.content);
+      } catch (_) {
+        payload = null;
+      }
+      if (payload && Array.isArray(payload.segments)) return payload.segments.map((item) => item.text);
+    }
+    return [];
+  };
+
+  const defaultReply = (record) => {
+    let parsed = null;
+    try {
+      parsed = JSON.parse(record.body);
+    } catch (_) {
+      parsed = null;
+    }
+    if (Array.isArray(parsed)) {
+      return {
+        status: 200,
+        error: 0,
+        body: JSON.stringify(parsed.map((text) => ({ translations: [{ text: translate(text) }] })))
+      };
+    }
+    if (parsed && Array.isArray(parsed.messages)) {
+      const texts = bodyTexts(record.body);
+      const out = {
+        translations: texts.map((text, index) => ({ id: index + 1, text: translate(text) }))
+      };
+      return {
+        status: 200,
+        error: 0,
+        body: JSON.stringify({
+          choices: [{ message: { role: 'assistant', content: JSON.stringify(out) } }]
+        })
+      };
+    }
+    return { status: 200, error: 0, body: '[]' };
   };
 
   window.chrome = {
@@ -835,18 +891,32 @@ export function mount(JSDOM, options) {
         const fields = msg.split(SEP);
         const id = fields[2];
         const count = Number(fields[5]);
-        let input = [];
-        try {
-          input = JSON.parse(fields[6 + count * 2]);
-        } catch (_) {
-          input = [];
-        }
-        requests.push(input.slice());
+        const headers = [];
+        for (let i = 0; i < count; i++) headers.push([fields[6 + i * 2], fields[7 + i * 2]]);
+        const body = fields[6 + count * 2];
+        const record = {
+          id: id,
+          method: fields[3],
+          url: fields[4],
+          headers: headers,
+          body: body
+        };
+        httpRequests.push(record);
+        requests.push(bodyTexts(body));
         setTimeout(() => {
-          const translated = input.map((text) => translate(text));
+          let reply = null;
+          try {
+            reply = respond ? respond(record) : null;
+          } catch (_) {
+            reply = null;
+          }
+          if (!reply) reply = defaultReply(record);
+          if (reply.drop) return;
           emit(
-            TAG + SEP + 'http' + SEP + id + SEP + '200' + SEP + '0' + SEP +
-            JSON.stringify(translated.map((text) => ({ translations: [{ text: text }] })))
+            TAG + SEP + 'http' + SEP + id + SEP +
+            String(reply.status == null ? 0 : reply.status) + SEP +
+            String(reply.error == null ? 0 : reply.error) + SEP +
+            String(reply.body == null ? '' : reply.body)
           );
         }, 2);
       }
@@ -861,6 +931,7 @@ export function mount(JSDOM, options) {
     doc: doc,
     settings: settings,
     requests: requests,
+    httpRequests: httpRequests,
     logs: logs,
     problems: problems,
     api() {
@@ -911,6 +982,9 @@ export function mount(JSDOM, options) {
       let n = 0;
       for (const batch of requests) if (batch.indexOf(text) !== -1) n++;
       return n;
+    },
+    llmRequests() {
+      return httpRequests.filter((request) => request.url.indexOf('/chat/completions') !== -1);
     },
     checks: 0,
     failures: [],

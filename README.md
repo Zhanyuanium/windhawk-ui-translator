@@ -52,17 +52,46 @@ phases.
 * `Alt+Q` toggles translation; the shortcut is configurable and an empty value disables it.
 * Default target language follows Windhawk's UI language, then the Windows display
   language.
-* The translation backend implemented today is Microsoft's free Edge endpoint
-  (`provider: edge`, and `auto` currently resolves to it). The OpenAI-compatible and
-  Google options exist in the settings but are not implemented yet.
+* Translation backends: Microsoft's free Edge endpoint (no key), an OpenAI-compatible
+  LLM endpoint (needs a key, see below) and Google (not implemented yet). `auto` prefers
+  the LLM only when a key is configured and stays on Edge otherwise.
 * Results are cached in `localStorage` for `cacheTtlDays`; `clearCache` clears the cache
   once on the next start.
+
+## Using an LLM
+
+Besides the free Edge endpoint, the mod can translate through any OpenAI-compatible
+chat-completions endpoint. The relevant settings:
+
+| Setting | Meaning |
+| --- | --- |
+| `provider` | `auto`, `edge`, `google` or `llm`. `auto` uses the LLM only when a key is configured; otherwise it stays on Edge. |
+| `llmBaseUrl` | API root, for example `https://api.openai.com/v1`; `/chat/completions` is appended. |
+| `llmModel` | Model name, for example `gpt-4o-mini`. |
+| `credentialTarget` | Windows Credential Manager target that holds the key (default `windhawk-ui-translator`). |
+| `llmKeySource` | `credential` (default), `setting` or `none`. |
+| `llmApiKey` | Plaintext fallback; used when `llmKeySource` is `setting` and when the credential is missing. |
+| `glossary` | `source=target` entries sent with every LLM request, one per line. |
+
+Store the key as a generic credential, in a normal shell:
+
+```powershell
+cmdkey /generic:windhawk-ui-translator /user:translator /pass:<your-api-key>
+```
+
+The mod reads the credential at start and after every settings change. The key never
+reaches the page and never appears in the log. When the credential is missing, the mod
+logs one line with the target name and the Win32 error, then uses `llmApiKey` if it is
+filled in; `llmKeySource` reports `credential` only when a key was actually read, so
+`auto` stays on Edge until one is available. The key is attached only to requests whose
+host matches `llmBaseUrl`, and never to the free endpoints.
 
 ## Privacy
 
 Translated text is sent to the provider you configure. No telemetry, no analytics, no
 network access other than the configured translation provider. The LLM key is read from
-Windows Credential Manager when available and is never logged.
+Windows Credential Manager (or the plaintext setting, if you choose that source) and is
+never logged or sent to the page.
 
 ## Development
 
