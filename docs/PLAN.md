@@ -92,8 +92,8 @@ and never sent to the page.
 
 | Phase | Scope | Done when |
 | --- | --- | --- |
-| P0 | hook chain, script injection, message bridge, logging | log shows hook + injection + `p0:ack` round trip |
-| P1 | bridge, settings, one provider (Edge) | hovering a block on the details page yields Chinese |
+| P0 ✅ | hook chain, script injection, message bridge, logging | log shows hook + injection + `p0:ack` round trip |
+| P1 ✅ | bridge, settings, one provider (Edge) | hovering a block on the details page yields Chinese |
 | P2 | scanner coverage: README, settings, list summaries, changelog | all four surfaces covered, code blocks untouched |
 | P3 | LLM provider, batching, cache, glossary | warm start makes zero requests |
 | P4 | interaction polish: in-place swap, hover-revert, tap toggle, shortcuts, theme | no React errors when switching tabs or mods |
