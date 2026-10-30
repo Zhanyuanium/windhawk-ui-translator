@@ -1,126 +1,122 @@
 # Windhawk UI Translator
 
-> **Status: working prototype.** Translation works on the mod details page, in the
-> settings panel and in the mod list. The mod is not published yet.
+A Windhawk mod that translates the content other mods write — mod names,
+one-line summaries, READMEs, changelogs, and everything on a mod's settings
+page — in place, inside the Windhawk 2.0 window.
 
-A Windhawk mod that translates Windhawk's *mod content* in place: mod descriptions and
-READMEs, settings names and descriptions, mod names and one-line summaries, and
-changelogs.
+Windhawk 2.0 localizes its own interface, but not what mod authors write.
+Names and summaries only have the narrow `@name:zh-CN` /
+`$description:zh-CN` / `$options:zh-CN` metadata channel, and READMEs and
+changelogs have no localization mechanism at all. This mod fills that gap.
+The existing community tools patch Windhawk 1.x (VSCodium/Electron) files on
+disk and cannot reach the Tauri-based 2.0 UI (`windhawk-ui.exe`, WebView2), so
+this one works from inside the UI process instead.
 
-Windhawk 2.0 already localizes its own interface, but content written by mod authors has
-only a narrow localization path (`@name:zh-CN`, `$description:zh-CN`, `$options:zh-CN`);
-READMEs and changelogs have none. This mod fills that gap for the Tauri-based Windhawk 2.0
-UI (`windhawk-ui.exe`, WebView2), which previous community tools do not support — they all
-patch the VSCodium-based Windhawk 1.x webview files on disk.
+![Details page with a translated README](docs/images/details.png)
 
 ## What gets translated
 
-Every surface has its own switch in the mod settings, all on by default:
+| Where | What | Scope switch |
+| --- | --- | --- |
+| Details page | README, changelog | `scopeReadme`, `scopeChangelog` |
+| Details page, explore grid, installed table | mod name and one-line summary | `scopeModName`, `scopeModSummary` |
+| Settings page | titles, descriptions, tooltips, dropdown values and options, reset labels | `scopeSettings` |
 
-| Setting | Surface |
-| --- | --- |
-| `scopeReadme` | The mod's README/description on the details page |
-| `scopeSettings` | Setting names, descriptions, option labels and nested list items |
-| `scopeModName` | Mod names in the tile grid, the table view and the details header |
-| `scopeModSummary` | The one-line mod summaries in the tile grid, the table view and the details header |
-| `scopeChangelog` | Changelog sections on the details page |
+The settings page is the densest surface — it works in both densities:
 
-Code blocks, editors, search inputs, URLs, identifiers, versions and text that is already
-in the target script are left alone.
+![Settings page, comfortable density](docs/images/settings-comfortable.png)
 
-## How it works
+![Settings page, compact density](docs/images/settings-compact.png)
 
-The mod is injected into `windhawk-ui.exe`, hooks `GetProcAddress` for the WebView2
-internal entry point that the statically linked loader resolves, wraps the environment and
-controller completion handlers, and finally calls
-`AddScriptToExecuteOnDocumentCreated` to install a translation engine before the app's own
-scripts run. Requests are relayed to the mod over the WebView2 web-message channel, so all
-network access happens in C++ — the page's CSP forbids cross-origin `fetch`, and the API
-key never reaches the page.
+![Explore tiles](docs/images/explore.png)
 
-See [docs/PLAN.md](docs/PLAN.md) for the verified technical facts, architecture, and
-phases.
+Two things are deliberately left alone: the Source tab (a CodeMirror
+virtualized view) and Windhawk's own interface strings, which are already
+localized by Windhawk itself.
 
 ## Behaviour
 
-* Translations replace the original text in place. There is no display-mode switch: the
-  page always shows the translation, and the original stays one hover or tap away.
-* Desktop: resting the pointer on a translated block shows the original after
-  `hoverDelayMs`; moving away restores the translation.
-* Touch: a tap toggles the original for that block. Tapping twice with two fingers turns
-  translation itself on or off, like the shortcut; `gestureToggle` disables the gesture.
-* `Alt+Q` toggles translation; the shortcut is configurable and an empty value disables it.
-* Default target language follows Windhawk's UI language, then the Windows display
-  language.
-* Translation backends: Microsoft's free Edge endpoint (no key), an OpenAI-compatible
-  LLM endpoint (needs a key, see below) and Google (not implemented yet). `auto` prefers
-  the LLM only when a key is configured and stays on Edge otherwise.
-* Results are cached in `localStorage` for `cacheTtlDays`; `clearCache` clears the cache
-  once on the next start.
+* The translation replaces the original text in place; nothing is added to
+  the layout.
+* Rest the pointer on a translated block to see the original; move away to
+  get the translation back. On a touch screen, tap once for the original and
+  tap again for the translation.
+* `Alt+Q` toggles translation on or off, as does a two-finger double-tap on
+  touch screens. Both are configurable, and the toggle works in both
+  directions.
+* Translations are cached in the page's `localStorage` for 30 days, LRU
+  trimmed at 3 MB. The cache key includes the provider and model, so
+  switching providers does not serve stale text.
+* The default target language follows Windhawk's UI language, then the
+  Windows display language.
 
-## Using an LLM
+## Providers and the API key
 
-Besides the free Edge endpoint, the mod can translate through any OpenAI-compatible
-chat-completions endpoint. The relevant settings:
+* **OpenAI-compatible LLM** — any `/chat/completions` endpoint. Batched JSON
+  requests with a glossary and placeholder preservation. Recommended.
+* **Microsoft Edge** — the free endpoint; no key needed, and the fallback
+  whenever the LLM is unavailable.
+* **Google** — listed in the settings but **not implemented yet**; selecting
+  it currently behaves like the Edge fallback.
+* `auto` prefers the LLM only when a key is configured; after one retry a
+  failing LLM batch falls back to Edge for the rest of the session.
 
-| Setting | Meaning |
-| --- | --- |
-| `provider` | `auto`, `edge`, `google` or `llm`. `auto` uses the LLM only when a key is configured; otherwise it stays on Edge. |
-| `llmBaseUrl` | API root, for example `https://api.openai.com/v1`; `/chat/completions` is appended. |
-| `llmModel` | Model name, for example `gpt-4o-mini`. |
-| `credentialTarget` | Windows Credential Manager target that holds the key (default `windhawk-ui-translator`). |
-| `llmKeySource` | `credential` (default), `setting` or `none`. |
-| `llmApiKey` | Plaintext fallback; used when `llmKeySource` is `setting` and when the credential is missing. |
-| `glossary` | `source=target` entries sent with every LLM request, one per line. |
-
-Store the key as a generic credential, in a normal shell:
+The page's CSP does not allow connections to translation APIs, so the page
+sends every request through the mod over a plain-text web-message protocol;
+the mod does the HTTP itself with WinHTTP. This is also what keeps the key
+safe: the mod reads it from Windows Credential Manager (a plaintext setting
+exists as fallback), and injects `Authorization` only for requests to the
+configured `llmBaseUrl` host, only over HTTPS, and never for the free
+endpoints. The key is never sent to the page and never logged.
 
 ```powershell
-cmdkey /generic:windhawk-ui-translator /user:translator /pass:<your-api-key>
+# store the key in Windows Credential Manager
+cmdkey /generic:windhawk-ui-translator /user:translator /pass:<your key>
 ```
 
-The mod reads the credential at start and after every settings change. The key never
-reaches the page and never appears in the log. When the credential is missing, the mod
-logs one line with the target name and the Win32 error, then uses `llmApiKey` if it is
-filled in; `llmKeySource` reports `credential` only when a key was actually read, so
-`auto` stays on Edge until one is available. The key is attached only to requests whose
-host matches `llmBaseUrl`, and never to the free endpoints.
+## Install
 
-## Privacy
+Requires Windhawk 2.0.0-alpha.8 (the Tauri UI). Enable the mod while the UI
+is closed, or restart Windhawk afterwards — in a running UI process the
+WebView2 environment already exists, and the mod can only hook its creation.
 
-Translated text is sent to the provider you configure. No telemetry, no analytics, no
-network access other than the configured translation provider. The LLM key is read from
-Windows Credential Manager (or the plaintext setting, if you choose that source) and is
-never logged or sent to the page.
+```powershell
+# compile and install from the repository source
+& "C:\Program Files\Windhawk\windhawk-cli.exe" mod install --file "mods\windhawk-ui-translator.wh.cpp"
+```
+
+If the UI fails to start afterwards:
+
+```powershell
+windhawk.exe -safe-mode
+# or
+& "C:\Program Files\Windhawk\windhawk-cli.exe" mod disable windhawk-ui-translator
+```
+
+Setting `WH_TRANSLATOR_DISABLE=1` disables the mod without touching its
+settings.
 
 ## Development
 
-`scripts/dev.ps1` is the only script; it keeps every path (Windhawk install, mod source,
-mod id, log directory) in one place.
-
-| Command | What it does | Elevation |
-| --- | --- | --- |
-| `pwsh -NoProfile -File scripts/dev.ps1 install [-Disabled]` | Compiles `mods\windhawk-ui-translator.wh.cpp` with `windhawk-cli mod install --file` and installs it; does not restart | administrator (none with `-AppRoot`) |
-| `pwsh -NoProfile -File scripts/dev.ps1 restart` | Restarts `windhawk-ui.exe` so the installed mod is loaded | none |
-| `pwsh -NoProfile -File scripts/dev.ps1 log -Tail 40 [-Follow]` | Prints (or follows) the mod's own `p0.log` | none |
-| `pwsh -NoProfile -File scripts/dev.ps1 debug on\|off` | Sets the `debug` setting; the mod pushes it to the running page | administrator |
-| `pwsh -NoProfile -File scripts/dev.ps1 trace [-Mod <id>]` | `debug on`, restart, open that mod's page, dump the log | administrator |
-
-`restart -Cdp` also opens the WebView2 DevTools port (9222) for DOM inspection.
-
-To compile without touching the real Windhawk installation, install into an isolated
-portable app root — a directory that contains `windhawk.ini`:
-
 ```powershell
-pwsh -NoProfile -File scripts/dev.ps1 install -AppRoot "$env:TEMP\wh-portable" -Disabled
+bun tools/build.ts          # inline src/js/engine.js into the mod source
+bun tools/test.mjs          # jsdom suites (340 checks)
+scripts\dev.ps1 install     # compile + install (admin, no restart)
+scripts\dev.ps1 restart     # restart windhawk-ui.exe
+scripts\dev.ps1 log -Tail 40
+scripts\dev.ps1 debug on    # debug tracing into p0.log
 ```
 
-The mod only takes effect in a freshly started UI process, because the WebView2
-environment already exists in a running one.
+`docs/PLAN.md` records the verified WebView2 facts the design depends on and
+the injection chain, `docs/PROTOCOL.md` the page↔mod message protocol,
+`docs/FINDINGS-p0.md` the runtime observations, and `docs/PUBLISHING.md` the
+release checklist.
 
-Recovery if the UI fails to start: `windhawk.exe -safe-mode`, or
-`windhawk-cli.exe mod disable windhawk-ui-translator`. Setting the environment variable
-`WH_TRANSLATOR_DISABLE=1` also disables the mod without touching its configuration.
+## Privacy
+
+Translated text is sent to the provider you configure. No telemetry, no
+analytics, no other network access. The API key is stored by Windows, not by
+this mod.
 
 ## License
 

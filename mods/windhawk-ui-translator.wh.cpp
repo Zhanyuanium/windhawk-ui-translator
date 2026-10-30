@@ -2,9 +2,9 @@
 // @id              windhawk-ui-translator
 // @name            Windhawk UI Translator
 // @name:zh-CN      Windhawk 界面翻译
-// @description     Translates Windhawk mod descriptions, settings and changelogs in place
-// @description:zh-CN 就地翻译 Windhawk 的模组说明、设置项与更新日志
-// @version         0.0.1
+// @description     Translates Windhawk mod content — names, summaries, READMEs, setting labels and changelogs — in place
+// @description:zh-CN 就地翻译 Windhawk 的模组内容：名称、简介、说明文档、设置项与更新日志
+// @version         0.1
 // @author          Zhanyuanium
 // @github          https://github.com/Zhanyuanium/windhawk-ui-translator
 // @include         windhawk-ui.exe
@@ -185,6 +185,64 @@
   $description:zh-CN: 允许页面通过日志通道把调试信息写入 p0.log。
 */
 // ==/WindhawkModSettings==
+
+// ==WindhawkModReadme==
+/*
+# Windhawk UI Translator
+
+Windhawk localizes its own interface, but not what mod authors write: names and
+summaries only have the narrow `@name:zh-CN` / `$description:zh-CN` /
+`$options:zh-CN` metadata channel, and READMEs and changelogs have no
+localization at all.
+
+This mod translates that content in place, inside the Windhawk 2.0 window.
+
+![](https://raw.githubusercontent.com/Zhanyuanium/windhawk-ui-translator/main/docs/images/details.png)
+
+## What it translates
+
+| Where | What |
+| --- | --- |
+| Details page | mod name, summary, README, changelog |
+| Settings page | titles, descriptions, tooltips, dropdown values and options, reset labels |
+| Explore and installed lists | mod names and one-line summaries |
+
+Each group has its own switch in the mod's settings. The Source tab and
+Windhawk's own interface strings are left alone.
+
+## How it reads
+
+The translation replaces the original text in place. Rest the pointer on a
+translated block to see the original; on a touch screen, tap once for the
+original and again for the translation. `Alt+Q` (configurable) or a two-finger
+double-tap toggles translation in both directions.
+
+## Providers
+
+Any OpenAI-compatible `/chat/completions` endpoint is recommended; a glossary
+and batching are built in. The API key is read from Windows Credential Manager
+(a plaintext setting is the fallback) and never reaches the page:
+
+    cmdkey /generic:windhawk-ui-translator /user:translator /pass:<your key>
+
+The free Microsoft Edge endpoint needs no key and is the fallback; `auto` uses
+the LLM only when a key is configured. The Google option is not implemented
+yet.
+
+## Notes
+
+* Enable the mod with the UI closed, or restart Windhawk afterwards — a
+  running UI process already has its WebView2 environment.
+* If the UI fails to start: `windhawk.exe -safe-mode`, or
+  `windhawk-cli.exe mod disable windhawk-ui-translator`, or set
+  `WH_TRANSLATOR_DISABLE=1`.
+
+## Privacy
+
+Translated text is sent to the provider you configure. No telemetry, no other
+network access. The key is stored by Windows, not by this mod.
+*/
+// ==/WindhawkModReadme==
 
 // Injects the page-side translator into Windhawk's WebView2 UI.
 //

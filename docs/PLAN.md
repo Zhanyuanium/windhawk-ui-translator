@@ -1,20 +1,21 @@
 # Implementation plan
 
-Status: P0–P2 complete (P2 now includes the OpenAI-compatible LLM provider); P3
-partially done (the Google provider is not implemented). This document is the agreed
-scope; update it when decisions change.
+Status: P0, P1, P2, P4 and P5 complete; P3 open (the Google provider is not
+implemented); P6 optional. This document is the agreed scope — update it when
+decisions change.
 
 ## Problem
 
-Windhawk 2.0 UI text is localized (`zh-CN` included), but mod-authored content is not:
-mod names/summaries only support the `@name:zh-CN` / `$options:zh-CN` metadata path, and
-READMEs and changelogs have no language dimension at all. Every mod is read in English.
+Windhawk 2.0's UI text is localized (`zh-CN` included), but mod-authored
+content is not. Mod names and summaries only have the `@name:zh-CN` /
+`$description:zh-CN` / `$options:zh-CN` metadata channel, and READMEs and
+changelogs have no language dimension at all: every mod is read in English.
 
 ## Target
 
-Windhawk 2.0.0-alpha.8, whose UI is `windhawk-ui.exe`: a Tauri 3 (alpha) shell around
-WebView2, front end built from React 19 + antd 6 and compiled into the exe (brotli).
-`windhawk.exe` is only the tray/launcher and hosts no webview.
+Windhawk 2.0.0-alpha.8. Its UI is `windhawk-ui.exe`: a Tauri 3 (alpha) shell
+around WebView2, with a React 19 + antd 6 front end compiled into the exe
+(brotli). `windhawk.exe` is only the tray/launcher and hosts no webview.
 
 ## Verified facts the design depends on
 
@@ -41,68 +42,76 @@ windhawk-ui.exe (Tauri/wry, STA UI thread)
   worker threads: WinHTTP requests; results marshalled back with PostMessage
 ```
 
-* The page cannot reach translation APIs: CSP `connect-src` blocks them. All HTTP happens
-  in the mod (WinHTTP), so the API key never reaches JavaScript.
-* The C++/JS protocol is a plain-text, `\x1f`-separated framing carried over
-  `PostWebMessageAsString` / `TryGetWebMessageAsString`. The mod needs no JSON parser;
-  request bodies, prompts, and response parsing live in JavaScript.
-* Fail-soft everywhere: a hook that does not match the expected shape logs and does
-  nothing. `WH_TRANSLATOR_DISABLE=1` short-circuits the mod; safe mode and
+* The page cannot reach translation APIs — its CSP `connect-src` blocks them —
+  so every HTTP request is made by the mod (WinHTTP) on the page's behalf.
+  The API key therefore never reaches JavaScript.
+* The C++/JS protocol is plain-text framing: fields separated by `\x1f`,
+  carried over `PostWebMessageAsString` / `TryGetWebMessageAsString`. The mod
+  parses no JSON; request bodies, prompts and response parsing all live in
+  JavaScript.
+* Fail-soft everywhere: a hook that does not match the expected shape logs and
+  does nothing. `WH_TRANSLATOR_DISABLE=1` short-circuits the mod; safe mode and
   `windhawk-cli mod disable` are documented recovery paths.
 
 ## Interaction
 
-* **There is no display-mode switch.** The page always shows the translation in place; the
-  earlier idea of a replace/bilingual mode selector was dropped. Original text is one
-  hover or tap away.
-* Desktop: pointer over a translated block shows the original; leaving restores the
-  translation.
-* Touch: a tap toggles the original for that block. Tapping twice with two fingers toggles
-  translation itself on or off, like `shortcutToggle`; `gestureToggle` disables the
-  gesture.
-* Covered surfaces, each with its own switch (`scopeReadme`, `scopeSettings`, `scopeModName`,
-  `scopeModSummary`, `scopeChangelog`): README/description and changelogs on the details
-  page, settings (names, descriptions, option labels, nested list items), and mod names
-  plus one-line summaries in the tile grid, the table view and the details header.
+* There is no display-mode switch: the page always shows the translation in
+  place (the earlier replace/bilingual selector was dropped). The original is
+  one hover or tap away.
+* Desktop: rest the pointer on a translated block to see the original; leaving
+  restores the translation.
+* Touch: a tap shows the original for that block, a second tap restores the
+  translation. Tapping twice with two fingers toggles translation itself, like
+  `shortcutToggle`; `gestureToggle` disables the gesture.
+* Covered surfaces, each with its own switch (`scopeReadme`, `scopeSettings`,
+  `scopeModName`, `scopeModSummary`, `scopeChangelog`): README and changelogs
+  on the details page; setting titles, descriptions, tooltips, dropdown
+  values/options and reset labels on the settings page; mod names and one-line
+  summaries in the tile grid, the table view and the details header. The Source
+  tab (a CodeMirror virtualized view) and Windhawk's own interface strings are
+  not translated.
 * Implementation, chosen so React re-renders cannot throw:
-  * prose blocks (README/changelog markdown) get `data-wh-orig="1"` plus a hidden CSS
-    rule, and a translated clone is inserted in their place; React keeps its own nodes.
-  * compact/interactive hosts (setting titles, descriptions, options, mod names and
-    summaries) use text-node value swapping, keeping every node in the DOM.
+  * prose blocks (README/changelog markdown) get `data-wh-orig="1"` plus a
+    hidden CSS rule, and a translated clone is inserted in their place; React
+    keeps its own nodes;
+  * compact/interactive hosts (setting titles, descriptions, options, mod
+    names and summaries) use text-node value swapping, keeping every node in
+    the DOM;
   * a `MutationObserver` re-applies both after React reconciles.
-* No floating button. Errors go to the mod log (`Wh_Log`). In-app notification is not
-  implemented: it would require fabricating an IPC reply and corrupting request
-  correlation.
+* No floating button. Errors go to the mod log (`Wh_Log`). In-app notification
+  is not implemented: it would require fabricating an IPC reply and corrupting
+  request correlation.
 
 ## Translation engine (JavaScript)
 
-* Scanning is restricted to known content containers, with a generic fallback for
-  English block hosts and a deny list (code, editors, our own nodes, URLs, identifiers,
-  versions, numbers, text that already contains CJK).
-* Inline markup is protected with the placeholder scheme ported from kiss-translator.
-* Batching: ≤20 segments / ≤10000 chars / 400 ms window, concurrency 4–6, retry 2× with
-  backoff on 429/5xx.
-* Providers: Microsoft Edge (free), Google (free, not implemented yet) and an
-  OpenAI-compatible chat-completions endpoint; see [Providers](#providers).
-* Default target language follows the app: `document.documentElement.lang`, falling back
-  to `navigator.language` (the Windows display language).
-* Cache: `localStorage` (`http://tauri.localhost` is a secure context), key
-  `provider|lang|sha1(text)`, 30-day TTL, LRU trim at 3 MB.
+* Scanning is restricted to known content containers, with a generic fallback
+  for English block hosts and a deny list (code, editors, our own nodes, URLs,
+  identifiers, versions, numbers, text that already contains CJK).
+* Inline markup is protected with the placeholder scheme ported from
+  kiss-translator.
+* Batching: ≤20 segments / ≤10000 chars / 400 ms window, concurrency 4–6,
+  retry 2× with backoff on 429/5xx.
+* Default target language follows the app: `document.documentElement.lang`,
+  falling back to `navigator.language` (the Windows display language).
+* Cache: `localStorage` (`http://tauri.localhost` is a secure context). The
+  key includes provider and model (v3 prefix), the target language and a text
+  hash; 30-day TTL, LRU trim at 3 MB.
 
 ## Providers
 
 The `provider` setting resolves as follows:
 
 * `edge` — Microsoft's free endpoint; never the LLM.
-* `google` — Google's free endpoint. Not implemented yet, so it currently resolves to
-  Edge like `auto` without a key.
-* `llm` — the OpenAI-compatible endpoint. A missing key is not a reason to switch:
-  the request goes out without `Authorization` and the endpoint decides.
-* `auto` — the LLM only when a key is configured and `llmBaseUrl` plus `llmModel` are
-  set; otherwise Edge. "A key is configured" means `llmKeySource` is `credential` (a
-  credential was actually read) or `setting` (the plaintext field is non-empty). A
-  missing credential with an empty plaintext field reports `none`, so `auto` stays on
-  Edge.
+* `google` — Google's free endpoint. **Not implemented yet**; it currently
+  resolves to Edge like `auto` without a key.
+* `llm` — the OpenAI-compatible endpoint. A missing key is not a reason to
+  switch: the request goes out without `Authorization` and the endpoint
+  decides.
+* `auto` — the LLM only when a key is configured and `llmBaseUrl` plus
+  `llmModel` are set; otherwise Edge. "A key is configured" means
+  `llmKeySource` is `credential` (a credential was actually read) or `setting`
+  (the plaintext field is non-empty). A missing credential with an empty
+  plaintext field reports `none`, so `auto` stays on Edge.
 
 ### LLM request shape
 
@@ -119,27 +128,31 @@ Authorization: Bearer <key>        <- added by the mod, never by the page
 ]}
 ```
 
-* The user message is the batch as a JSON string; `glossary` is present only when the
-  setting has entries.
-* The prompt asks for one raw JSON object `{"translations":[{"id": 1, "text": "..."}]}`.
-  Ids are 1-based positions in `segments`; the reply may be fenced or wrapped in prose,
-  so the page takes the first `{` through the last `}`.
-* At most 12 segments / 6000 characters per request, one retry on timeout/429/5xx; a
-  failed LLM session falls back to Edge until the page reloads.
+* The user message is the batch as a JSON string; `glossary` is present only
+  when the setting has entries.
+* The prompt asks for one raw JSON object
+  `{"translations":[{"id": 1, "text": "..."}]}`. Ids are 1-based positions in
+  `segments`; the reply may be fenced or wrapped in prose, so the page takes
+  the first `{` through the last `}`.
+* At most 12 segments / 6000 characters per request, one retry on
+  timeout/429/5xx; a failed LLM session falls back to Edge until the page
+  reloads.
 
 ## Secrets
 
-The LLM key is read in C++ from Windows Credential Manager (`CredReadW`, generic
-credential target named in the settings) with a plaintext settings field as fallback.
-Write the credential with `cmdkey /generic:<target> /user:translator /pass:<key>`; the mod
-reads it at start and whenever the settings change. A missing credential logs one line
-with the target name and the Win32 error, then falls back to the plaintext setting if it
-has a value; `llmKeySource` reports `credential` only when a key was actually read,
-`setting` when the plaintext field supplies it, `none` otherwise. The `Authorization`
-header is added only for requests whose host equals `llmBaseUrl`'s host
-(case-insensitive; port and path ignored, so `<llmBaseUrl>/chat/completions` matches) and
-never for `edge.microsoft.com` or `translate.googleapis.com`. The key is never logged and
-never sent to the page.
+The LLM key is read in C++ from Windows Credential Manager (`CredReadW`,
+generic credential target named in the settings) with a plaintext settings
+field as fallback. Write the credential with
+`cmdkey /generic:<target> /user:translator /pass:<key>`; the mod reads it at
+start and whenever the settings change. A missing credential logs one line
+with the target name and the Win32 error, then falls back to the plaintext
+setting if it has a value; `llmKeySource` reports `credential` only when a key
+was actually read, `setting` when the plaintext field supplies it, `none`
+otherwise. The `Authorization` header is added only for requests whose host
+equals `llmBaseUrl`'s host (case-insensitive; port and path ignored, so
+`<llmBaseUrl>/chat/completions` matches) and never for `edge.microsoft.com` or
+`translate.googleapis.com`. The key is never logged and never sent to the
+page.
 
 ## Phases
 
@@ -150,27 +163,27 @@ never sent to the page.
 | P2 ✅ | scanner coverage (README, settings, mod names, summaries, changelog) and the OpenAI-compatible LLM provider: chat completions, glossary, credential-backed key injection | all five surfaces covered, code blocks untouched; LLM translations work with a configured key |
 | P3 🚧 | Google provider and remaining polish | the Google backend is still idle |
 | P4 ✅ | interaction: in-place swap, hover-revert, tap toggle, two-finger double tap, shortcut | implemented; no React errors seen when switching tabs or mods |
-| P5 🚧 | unload safety, long documents, docs, build script | safe mode recovers; docs complete |
+| P5 ✅ | unload safety, long documents, docs, screenshots, release checklist | safe mode recovers; docs complete |
 | P6 (optional) | source-tab comments (CodeMirror decorations) | — |
 
 ## Development loop
 
 `scripts/dev.ps1` is the only script: `install` (administrator; compiles with
-`windhawk-cli mod install --file` and does not restart), `restart` (no elevation), `log`
-(no elevation), `debug on|off` and `trace` (administrator, because mod settings live in
-HKLM). `install -AppRoot <dir>` compiles into a portable app root instead of the real
-installation. README.md has the command table.
+`windhawk-cli mod install --file` and does not restart), `restart` and `log`
+(no elevation), `debug on|off` and `trace` (administrator, because mod
+settings live in HKLM). `install -AppRoot <dir>` compiles into a portable app
+root instead of the real installation. README.md has the command table.
 
 ## Risks
 
-1. `CreateWebViewEnvironmentWithOptionsInternal` is a private export; an Evergreen
-   WebView2 update can change it. Mitigation: validate the module and vtable slot
-   addresses at runtime, log the WebView2 version, fail soft.
-2. A crash in `windhawk-ui.exe` locks the user out of the UI that disables the mod.
-   Mitigation: kill switch, safe mode, CLI, fail-soft defaults.
-3. COM lifetime/threading mistakes. Mitigation: all WebView2 calls on the UI thread,
-   strict reference counting, cleanup in `Wh_ModBeforeUninit`.
-4. React reconciliation undoing the swap. Mitigation: never move React nodes; re-apply
-   from a MutationObserver.
-5. Privacy: page text leaves the machine. Mitigation: README disclosure, per-surface
-   toggles, no telemetry.
+1. `CreateWebViewEnvironmentWithOptionsInternal` is a private export; an
+   Evergreen WebView2 update can change it. Mitigation: validate the module
+   and vtable slot addresses at runtime, log the WebView2 version, fail soft.
+2. A crash in `windhawk-ui.exe` locks the user out of the UI that disables the
+   mod. Mitigation: kill switch, safe mode, CLI, fail-soft defaults.
+3. COM lifetime/threading mistakes. Mitigation: all WebView2 calls on the UI
+   thread, strict reference counting, cleanup in `Wh_ModBeforeUninit`.
+4. React reconciliation undoing the swap. Mitigation: never move React nodes;
+   re-apply from a MutationObserver.
+5. Privacy: page text leaves the machine. Mitigation: README disclosure,
+   per-surface toggles, no telemetry.
