@@ -9,7 +9,7 @@
 // @github          https://github.com/Zhanyuanium
 // @include         windhawk-ui.exe
 // @architecture    x86-64
-// @compilerOptions -lole32 -luuid -ladvapi32 -lshell32 -lwinhttp -fms-extensions
+// @compilerOptions -lole32 -luuid -ladvapi32 -lwinhttp -fms-extensions
 // @license         GPL-3.0
 // ==/WindhawkMod==
 
@@ -60,8 +60,8 @@
 - llmBaseUrl: https://api.openai.com/v1
   $name: LLM base URL
   $name:zh-CN: 大模型 API 地址
-  $description: OpenAI-compatible API base URL, for example https://api.openai.com/v1
-  $description:zh-CN: 兼容 OpenAI 的接口根地址，例如 https://api.openai.com/v1
+  $description: OpenAI-compatible API base URL, for example https://api.openai.com/v1. It must use https://; plain http:// endpoints, localhost included, are rejected.
+  $description:zh-CN: 兼容 OpenAI 的接口根地址，例如 https://api.openai.com/v1。必须使用 https://，纯 http:// 地址（包括 localhost）会被拒绝。
 - llmModel: ""
   $name: LLM model
   $name:zh-CN: 模型名称
@@ -172,10 +172,10 @@
   $description: How long a cached translation stays valid.
   $description:zh-CN: 缓存翻译结果的有效天数。
 - clearCache: false
-  $name: Clear the cache on the next page load
-  $name:zh-CN: 下次页面加载时清除缓存
-  $description: One-shot trigger for the first page load of each app start. The page receives clearCache=true once, then false forever. Turn this setting off again afterwards, otherwise the cache is cleared once on every start.
-  $description:zh-CN: 仅对每次启动后的第一次页面加载生效。页面只会收到一次 clearCache=true，之后一直是 false。生效后请手动关闭本项，否则每次启动都会清空一次缓存。
+  $name: Clear the cache when switched on
+  $name:zh-CN: 开启本项时清除缓存
+  $description: Clears the translation cache on every off-to-on change of this setting, including while the UI is running. Switch it off again to arm the next clear.
+  $description:zh-CN: 本项每次从关闭变为开启时都会清空翻译缓存，界面运行期间同样生效。清空后请再关闭本项，以便下次重新触发。
 */
 // ==/WindhawkModSettings==
 
@@ -224,12 +224,11 @@ name. Google Translate is not offered.
 
 ## Notes
 
-* If the mod is enabled while the UI is already running, it restarts the UI
-  process once by itself, at most once a minute. Close the UI before enabling
-  the mod to skip that restart.
+* If the mod is enabled while the UI is already running, it does nothing until
+  the UI process is restarted. Close and reopen Windhawk (`windhawk-ui.exe`);
+  restarting only the tray icon is not enough.
 * If the UI fails to start: `windhawk.exe -safe-mode`, or
-  `windhawk-cli.exe mod disable windhawk-ui-translator`, or set
-  `WH_TRANSLATOR_DISABLE=1`.
+  `windhawk-cli.exe mod disable windhawk-ui-translator`.
 
 ## Privacy
 
@@ -265,7 +264,6 @@ access. The key is stored by Windows, not by this mod.
 #include <windows.h>
 
 #include <objbase.h>
-#include <shlobj.h>
 #include <wincred.h>
 #include <winhttp.h>
 
@@ -279,7 +277,6 @@ access. The key is stored by Windows, not by this mod.
 #include <new>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -494,7 +491,7 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
       batchChars: 10000,
       batchIntervalMs: 400,
       concurrency: 4,
-      timeoutMs: 30000,
+      timeoutMs: 20000,
       cacheEnabled: true,
       cacheTtlDays: 30,
       clearCache: false
@@ -654,7 +651,7 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
         const body = String(opts && opts.body != null ? opts.body : '');
         const id = state.nextRequestId++;
 
-        const ms = clamp(state.settings.timeoutMs, 1000, 120000) || 30000;
+        const ms = clamp(state.settings.timeoutMs, 1000, 120000) || 20000;
         const timer = setTimeout(() => {
           if (!state.pending.has(id)) return;
           state.pending.delete(id);
@@ -933,11 +930,17 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
     'gi'
   );
 
+  // A CJK source is already in the target script only when the target itself is
+  // CJK; for en/de/fr/... a Chinese README or changelog must still be translated.
+  function cjkTarget() {
+    return /^(zh|ja|ko)\b/i.test(state.targetLang || '');
+  }
+
   function isTranslatable(src) {
     if (typeof src !== 'string') return false;
     const t = src.replace(/\s+/g, ' ').trim();
     if (t.length < 2) return false;
-    if (CJK_RE.test(t)) return false;
+    if (cjkTarget() && CJK_RE.test(t)) return false;
     if (!LETTER_RE.test(t)) return false;
     if (URL_RE.test(t)) return false;
     if (EMAIL_RE.test(t)) return false;
@@ -3928,14 +3931,6 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
 })();
 )WHTR_JS";
 
-// Prepended to kP0Js so the page can report which injection path reached it.
-// The script itself stays byte-identical after this marker and defaults to
-// 'immediate' when the marker is absent.
-static constexpr wchar_t kP0JsWhenAfterAddScript[] =
-    L"window.__WH_TRANSLATOR_P0_WHEN__='afteraddscript';";
-static constexpr wchar_t kP0JsWhenNavCompleted[] =
-    L"window.__WH_TRANSLATOR_P0_WHEN__='navcompleted';";
-
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -4132,6 +4127,11 @@ enum class P1Lifecycle : int {
 
 static std::atomic<P1Lifecycle> g_p1Lifecycle{P1Lifecycle::Init};
 
+// Thread id of the WebView2 UI thread that created the dispatch window and
+// owns every wrapper handed to WebView2. Set by P1NoteUiThread before the first
+// wrapper is handed over and never cleared; zero until then.
+static std::atomic<DWORD> g_p1UiThreadId{0};
+
 static bool P1IsRunning() {
     return g_p1Lifecycle.load(std::memory_order_acquire) ==
            P1Lifecycle::Running;
@@ -4140,38 +4140,94 @@ static bool P1IsRunning() {
 // Number of COM callback objects handed to WebView2 that have not reached
 // their final Release yet. Every wrapper passed to a WebView2 method is
 // counted before the call; P0WrapperRelease decrements it after the finalizer
-// ran. The UI-thread teardown pumps messages until it reaches zero before the
-// DLL may unload.
+// ran.
 //
 // Number of webview references held by AddScript completion handlers. The
 // reference keeps the webview alive until the completion arrives, so a late
-// completion can still remove the document-created script. The teardown pumps
-// for this counter as well; P0ReleaseScriptWebView transfers the reference to
-// the UI-thread release queue and decrements it.
+// completion can still remove the document-created script. P0ReleaseScriptWebView
+// transfers the reference to the UI-thread release queue and decrements it.
 //
-// Both counters and the thread id of the last decrement share one lock, so the
-// teardown reads them as one snapshot: a decrement that takes a counter to
-// zero records its thread id in the same critical section, and a zero counter
-// can therefore never be paired with the thread id of an older release.
+// Both counters share one lock. The engine thread waits for them to reach zero
+// after it asked the UI thread for the teardown: that is the point where no
+// wrapper and no held AddScript reference can call into this image any more.
+// WebView2 hands these objects back, and runs the completions that decrement
+// them, on the UI thread that created them; every decrement latches a release
+// seen on any other thread, and P1MaybeSignalTeardownLocked refuses to treat a
+// zero as the end of the teardown once that latch is set.
 static SRWLOCK g_p0OutstandingLock = SRWLOCK_INIT;
 static long g_p0OutstandingCallbacks = 0;      // g_p0OutstandingLock
 static long g_p0OutstandingAddScriptRefs = 0;  // g_p0OutstandingLock
-static DWORD g_p0LastReleaseThreadId = 0;      // g_p0OutstandingLock
 
-struct P0OutstandingSnapshot {
-    long callbacks;
-    long addScriptRefs;
-    DWORD lastReleaseThreadId;
-};
+// Manual-reset event, created in Wh_ModInit. Signalled once the teardown was
+// requested, the UI-thread handler completed, and both counters reached zero
+// on the UI thread; Wh_ModBeforeUninit waits on it before it asks the UI thread
+// to destroy the dispatch window.
+static HANDLE g_p1TeardownEvent = nullptr;
+static std::atomic<bool> g_p1TeardownRequested{false};
 
-static P0OutstandingSnapshot P0ReadOutstanding() {
-    P0OutstandingSnapshot snapshot{};
-    AcquireSRWLockExclusive(&g_p0OutstandingLock);
-    snapshot.callbacks = g_p0OutstandingCallbacks;
-    snapshot.addScriptRefs = g_p0OutstandingAddScriptRefs;
-    snapshot.lastReleaseThreadId = g_p0LastReleaseThreadId;
-    ReleaseSRWLockExclusive(&g_p0OutstandingLock);
-    return snapshot;
+// Re-entry guard for the UI-thread teardown handler. It is never cleared, so a
+// duplicate posted request cannot start a second teardown. It does not gate the
+// event; g_p1TeardownCompleted does.
+static std::atomic<bool> g_p1TeardownInProgress{false};
+
+// Set by P1RunTeardownOnUiThread only after the whole cleanup, including
+// P0RestoreEnvironment(true), returned inside its try block. A release that
+// empties the counters before that point cannot signal the event early, and an
+// exception leaves this false so the engine thread keeps waiting.
+static std::atomic<bool> g_p1TeardownCompleted{false};
+
+// Sticky: a wrapper was released on a thread that is not the WebView2 UI
+// thread. That frame cannot be proven to have returned, so the unload never
+// proceeds; the flag also makes the DEFECT log once. The engine thread then
+// waits, which is the accepted failure mode.
+static std::atomic<bool> g_p1ReleaseOffThread{false};
+
+// Must be called with g_p0OutstandingLock held.
+static void P1MaybeSignalTeardownLocked() {
+    // Only a zero reached after the unload asked for the teardown says
+    // anything about the teardown.
+    if (!g_p1TeardownRequested.load(std::memory_order_acquire)) {
+        return;
+    }
+    if (g_p0OutstandingCallbacks != 0 || g_p0OutstandingAddScriptRefs != 0) {
+        return;
+    }
+
+    // The mod's contract is that WebView2 releases these objects, and runs the
+    // completions that decrement them, on the UI thread that created them. A
+    // zero reached anywhere else does not prove that the releasing frame has
+    // returned, so it must not signal.
+    DWORD uiThread = g_p1UiThreadId.load(std::memory_order_acquire);
+    DWORD current = GetCurrentThreadId();
+    if (uiThread == 0 || current != uiThread) {
+        return;
+    }
+    if (g_p1ReleaseOffThread.load(std::memory_order_acquire)) {
+        return;
+    }
+
+    if (!g_p1TeardownCompleted.load(std::memory_order_acquire)) {
+        return;
+    }
+    SetEvent(g_p1TeardownEvent);
+}
+
+// Must be called with g_p0OutstandingLock held. Every decrement runs this: a
+// wrapper released on a thread that is not the WebView2 UI thread means that
+// frame cannot be proven to have returned, so the unload never proceeds.
+static void P1LatchReleaseOffThreadLocked() {
+    DWORD uiThread = g_p1UiThreadId.load(std::memory_order_acquire);
+    DWORD current = GetCurrentThreadId();
+    if (uiThread != 0 && current == uiThread) {
+        return;
+    }
+    if (!g_p1ReleaseOffThread.exchange(true, std::memory_order_acq_rel)) {
+        Wh_Log(L"[p1] DEFECT: a wrapper was released on thread %lu, not the "
+               L"known UI thread %lu; that frame cannot be proven to have "
+               L"returned, so the unload never proceeds",
+               static_cast<unsigned long>(current),
+               static_cast<unsigned long>(uiThread));
+    }
 }
 
 static void P0CountHandedOver() {
@@ -4183,12 +4239,8 @@ static void P0CountHandedOver() {
 static void P0CountCallbackReleased() {
     AcquireSRWLockExclusive(&g_p0OutstandingLock);
     --g_p0OutstandingCallbacks;
-    if (g_p0OutstandingCallbacks == 0) {
-        // The decrement that reaches zero is the last piece of module code
-        // that runs for this counter. The teardown compares this thread with
-        // the UI thread that owns the objects.
-        g_p0LastReleaseThreadId = GetCurrentThreadId();
-    }
+    P1LatchReleaseOffThreadLocked();
+    P1MaybeSignalTeardownLocked();
     ReleaseSRWLockExclusive(&g_p0OutstandingLock);
 }
 
@@ -4201,157 +4253,10 @@ static void P0CountAddScriptRefHeld() {
 static void P0CountAddScriptRefReleased() {
     AcquireSRWLockExclusive(&g_p0OutstandingLock);
     --g_p0OutstandingAddScriptRefs;
-    if (g_p0OutstandingAddScriptRefs == 0) {
-        g_p0LastReleaseThreadId = GetCurrentThreadId();
-    }
+    P1LatchReleaseOffThreadLocked();
+    P1MaybeSignalTeardownLocked();
     ReleaseSRWLockExclusive(&g_p0OutstandingLock);
 }
-
-// Nesting depth of this module's wrapper entry points on the current thread.
-// A positive value means our code is on that thread's stack right now: the
-// teardown reads it at entry to detect a teardown that was entered from inside
-// one of our own callbacks (for example an Invoke that pumped messages).
-//
-// The depth must not live in module thread_local storage: Windhawk's loader
-// does not register a mod's TLS directory, so a module thread_local access
-// reads TEB->ThreadLocalStoragePointer (gs:0x58) before it is populated and
-// faults at startup. It uses a Win32 TLS slot instead, allocated once in
-// Wh_ModInit before the GetProcAddress hook can admit a wrapper.
-//
-// TLS_OUT_OF_INDEXES (or a failed TlsSetValue) means the depth is unknown.
-// P0GetWrapperDepth then returns -1, which every teardown check treats as
-// "not zero" and pins the module instead of unloading it.
-static std::atomic<DWORD> g_p0DepthTlsIndex{TLS_OUT_OF_INDEXES};
-static std::atomic<bool> g_p0DepthTlsFailed{false};
-
-// Set by the unload decision whenever the module must not be freed: a module
-// reference is held, or the reference could not be taken at all. In both cases
-// the depth TLS slot is never freed, because module code may still run while
-// the image is mapped.
-static std::atomic<bool> g_p0StayResident{false};
-
-// True only once a real loader reference to this image was taken (see
-// P1HoldModuleReference). The reference is never released.
-static std::atomic<bool> g_p0ModuleReferenceHeld{false};
-
-// Sticky: at least one wrapper call was observed on a thread that is not the
-// WebView2 UI thread. This is an unconditional pin at teardown.
-//
-// A snapshot of g_p0ActiveWrapperCalls cannot prove that another thread's frame
-// is gone: the counter is decremented at the end of the scope's destructor,
-// before the rest of the destructor and the wrapper's return instructions run.
-// A non-UI thread can be preempted in exactly that window; a later UI-thread
-// release then takes the outstanding counter to zero, the snapshot looks quiet,
-// and the unload would resume into unmapped code. The flag is therefore
-// recorded for the lifetime of the process, not sampled.
-//
-// Consequence, accepted: when WebView2 releases a handler on one of its own
-// threads, the mod stays resident after a disable. That is a leak, and it is
-// always preferable to running code from an unmapped image.
-static std::atomic<bool> g_p0WrapperCallOutsideUiThread{false};
-
-// True while the thread id of the WebView2 UI thread is known and threadId is
-// that thread. Defined with the dispatcher state below.
-static bool P1IsWebView2UiThread(DWORD threadId);
-
-static long P0GetWrapperDepth() {
-    if (g_p0DepthTlsFailed.load(std::memory_order_acquire)) {
-        return -1;
-    }
-    DWORD index = g_p0DepthTlsIndex.load(std::memory_order_acquire);
-    if (index == TLS_OUT_OF_INDEXES) {
-        return -1;
-    }
-    return static_cast<long>(
-        reinterpret_cast<INT_PTR>(TlsGetValue(index)));
-}
-
-static bool P0SetWrapperDepth(long depth) {
-    DWORD index = g_p0DepthTlsIndex.load(std::memory_order_acquire);
-    if (index == TLS_OUT_OF_INDEXES) {
-        return false;
-    }
-    if (!TlsSetValue(index,
-                     reinterpret_cast<void*>(static_cast<INT_PTR>(depth)))) {
-        // A slot that cannot be written makes the depth unprovable forever.
-        // The teardown reads the flag and pins.
-        g_p0DepthTlsFailed.store(true, std::memory_order_release);
-        return false;
-    }
-    return true;
-}
-
-// Wrapper entry points executing on any thread. The teardown pump waits for
-// this to reach zero as well: a final release that is not the last decrement
-// can still leave another thread inside a callback's tail, and that thread
-// must have returned before the image may go away.
-static std::atomic<long> g_p0ActiveWrapperCalls{0};
-
-// Frees the depth slot only when this module is certain to unload: the unload
-// decision proved quiescence and took no reference. The index is retired first,
-// so any late reader sees "unknown" instead of a slot that has been recycled.
-//
-// A wrapper scope increments g_p0ActiveWrapperCalls before it reads the index
-// and decrements it only after the depth is restored (see below). If a call is
-// still active after the index was retired, it may have loaded the old index
-// and could be about to call TlsSetValue; the slot is then left allocated (one
-// leaked slot on an abnormal path) instead of being freed under that caller.
-static void P0FreeDepthTlsIfUnloadable() {
-    if (g_p0StayResident.load(std::memory_order_acquire)) {
-        return;
-    }
-    DWORD index = g_p0DepthTlsIndex.exchange(TLS_OUT_OF_INDEXES,
-                                             std::memory_order_acq_rel);
-    if (index == TLS_OUT_OF_INDEXES) {
-        return;
-    }
-    if (g_p0ActiveWrapperCalls.load(std::memory_order_acquire) != 0) {
-        return;
-    }
-    TlsFree(index);
-}
-
-struct P0WrapperCallScope {
-    // Depth to restore on exit, or -1 when the depth is unknown.
-    long previous = -1;
-
-    // webView2Callback selects whether this entry point can be called by
-    // WebView2 itself. Only those calls feed the sticky "outside the UI thread"
-    // pin. The GetProcAddress hook runs on every thread in the process by
-    // design, so counting it there would pin on essentially every unload and
-    // make the prove-or-pin decision useless; it is still counted in
-    // g_p0ActiveWrapperCalls for the whole call.
-    explicit P0WrapperCallScope(bool webView2Callback = true) {
-        // The counter is incremented before the index is read and decremented
-        // only after the depth is restored, so a zero counter proves that no
-        // thread is between loading the TLS index and writing the slot. The
-        // teardown relies on this when it decides whether TlsFree is safe.
-        g_p0ActiveWrapperCalls.fetch_add(1, std::memory_order_acq_rel);
-
-        // Recorded before any work and never cleared. A thread whose id is not
-        // the known UI thread -- including a call made before any UI thread was
-        // identified, when no thread can be attributed -- makes unload
-        // unprovable for the rest of the process.
-        if (webView2Callback &&
-            !P1IsWebView2UiThread(GetCurrentThreadId())) {
-            g_p0WrapperCallOutsideUiThread.store(true,
-                                                 std::memory_order_release);
-        }
-
-        previous = P0GetWrapperDepth();
-        if (previous >= 0 && !P0SetWrapperDepth(previous + 1)) {
-            previous = -1;
-        }
-    }
-    ~P0WrapperCallScope() {
-        if (previous >= 0) {
-            P0SetWrapperDepth(previous);
-        }
-        // Decremented last: the sticky flag above, not this counter, is what
-        // covers the instructions that follow this destructor.
-        g_p0ActiveWrapperCalls.fetch_sub(1, std::memory_order_acq_rel);
-    }
-};
 
 // ---------------------------------------------------------------------------
 // Ref-counted callback wrappers
@@ -4442,8 +4347,8 @@ static void P0ScriptHandlerFinalize(P0WrapperBase* self);
 static void P0NavigationStartingHandlerFinalize(P0WrapperBase* self);
 static void P0NavigationCompletedHandlerFinalize(P0WrapperBase* self);
 
-// Defined next to the release queue; the finalizer may run on any thread, so
-// it must never call Release on the held webview itself.
+// Defined next to the release queue; the finalizer hands the held webview
+// reference to the UI thread instead of calling Release itself.
 static void P0ReleaseScriptWebView(P0ScriptHandler* handler);
 
 static HRESULT STDMETHODCALLTYPE P0EnvHandlerInvoke(P0EnvHandler* self,
@@ -4526,7 +4431,6 @@ static const void* const kNavigationCompletedHandlerVtbl[4] = {
 static HRESULT STDMETHODCALLTYPE P0WrapperQueryInterface(P0WrapperBase* self,
                                                          const IID& riid,
                                                          void** ppv) {
-    P0WrapperCallScope scope;
     if (!ppv) {
         return E_POINTER;
     }
@@ -4543,7 +4447,6 @@ static HRESULT STDMETHODCALLTYPE P0WrapperQueryInterface(P0WrapperBase* self,
 }
 
 static ULONG STDMETHODCALLTYPE P0WrapperAddRef(P0WrapperBase* self) {
-    P0WrapperCallScope scope;
     if (!self) {
         return 0;
     }
@@ -4551,7 +4454,6 @@ static ULONG STDMETHODCALLTYPE P0WrapperAddRef(P0WrapperBase* self) {
 }
 
 static ULONG STDMETHODCALLTYPE P0WrapperRelease(P0WrapperBase* self) {
-    P0WrapperCallScope scope;
     if (!self) {
         return 0;
     }
@@ -4563,11 +4465,11 @@ static ULONG STDMETHODCALLTYPE P0WrapperRelease(P0WrapperBase* self) {
         if (finalize) {
             finalize(self);
         }
-        // Decrement only after the finalizer ran: the teardown pump must not
-        // observe zero while the object is still being destroyed. This is the
-        // whole notification: a release never signals anything, it only
-        // decrements its counter. The pump below is already on the UI thread,
-        // so the counter is observed without any cross-thread wake-up.
+        // Decrement only after the finalizer ran: the teardown wait must not
+        // observe zero while the object is still being destroyed. The
+        // decrement latches an off-UI-thread release, and when it empties the
+        // counters P1MaybeSignalTeardownLocked signals the event if the
+        // teardown completed on the UI thread.
         if (counted) {
             P0CountCallbackReleased();
         }
@@ -4576,7 +4478,8 @@ static ULONG STDMETHODCALLTYPE P0WrapperRelease(P0WrapperBase* self) {
 }
 
 // Counts a wrapper that is about to be passed to WebView2. Called on the UI
-// thread; the final Release may happen on any thread.
+// thread. Under the WebView2 contract the final Release also runs on that
+// thread; every decrement latches a release seen anywhere else.
 static void P0MarkHandedOver(P0WrapperBase* handler) {
     if (!handler) {
         return;
@@ -5180,15 +5083,18 @@ static constexpr wchar_t kP1Tag[] = L"whtr1";
 static constexpr wchar_t kP1DispatchClass[] = L"WindhawkUITranslator.P1Dispatch";
 static constexpr UINT kP1MsgDrainReplies = WM_APP + 0x51;
 static constexpr UINT kP1MsgSettingsChanged = WM_APP + 0x52;
-// Synchronous teardown request. Wh_ModBeforeUninit sends it with SendMessageW
-// and treats the return as the synchronisation point: the WndProc only returns
-// after the window is destroyed and the teardown recorded either proof of
-// quiescence or a failure for the unload decision.
-static constexpr UINT kP1MsgDestroyWindow = WM_APP + 0x53;
-// Deadline for the teardown pump. Reaching it is not permission to unload: only
-// a completion that never fires can reach it, and the only allowed outcome is
-// to record a failure, which keeps the module resident, and finish the cleanup.
-static constexpr ULONGLONG kP1TeardownPumpDeadlineMs = 60 * 1000;
+// Posted teardown request. Its handler runs on the UI thread, releases every
+// object this mod owns there and then signals g_p1TeardownEvent once the
+// cleanup completed and both outstanding counters are zero on the UI thread. It
+// is posted, not sent: the UI thread's own message loop keeps dispatching
+// WebView2 completions after the handler returns, and those completions are
+// what release the last wrappers.
+static constexpr UINT kP1MsgTeardown = WM_APP + 0x53;
+// Destroys the dispatch window. Wh_ModBeforeUninit sends it with SendMessageW
+// as the last step. The handler sets g_p1DestroyCompleted only when the window
+// and its class are gone; the sender checks that flag before it treats the
+// teardown as finished.
+static constexpr UINT kP1MsgDestroyWindow = WM_APP + 0x54;
 
 static constexpr size_t kP1MaxMessageChars = 4u * 1024u * 1024u;
 static constexpr size_t kP1MaxUrlChars = 4096;
@@ -5911,8 +5817,12 @@ static void P1ClearKeyCache() {
 // ---------------------------------------------------------------------------
 
 static std::atomic<HWND> g_p1DispatchWindow{nullptr};
-static std::atomic<DWORD> g_p1UiThreadId{0};
 static std::atomic<bool> g_p1DispatchClassRegistered{false};
+// Set only when kP1MsgDestroyWindow destroyed the window and unregistered its
+// class (or no class was registered). The engine thread checks it after the
+// SendMessageW returns; false means the teardown did not finish and the unload
+// must block.
+static std::atomic<bool> g_p1DestroyCompleted{false};
 static std::atomic<bool> g_p1PageReady{false};
 static std::atomic<bool> g_p1SettingsDirty{false};
 static std::atomic<bool> g_p1DispatchFailureLogged{false};
@@ -5942,57 +5852,9 @@ static CONDITION_VARIABLE g_p1DispatchCv = CONDITION_VARIABLE_INIT;
 static P1DispatchState g_p1DispatchState = P1DispatchState::None;  // lock
 static DWORD g_p1DispatchCreatorThreadId = 0;                      // lock
 
-// UI-thread only. True while the teardown runs inside the dispatch window's
-// WndProc. The teardown pump can dispatch a message that re-enters this path;
-// the nested call returns immediately instead of starting a second teardown.
-static bool g_p1TeardownInProgress = false;
-
 // Handle of the mod DLL itself, obtained from a function address so it is the
 // module that owns P1DispatchWndProc even when the host image differs.
 static HMODULE g_modModule = nullptr;
-
-// Verdict of the UI-thread teardown. This is evidence, not a decision: the
-// decision is made exactly once, by P1DecideUnload, after the sender of
-// kP1MsgDestroyWindow has resumed.
-//
-//   NotRun    - no teardown reached a conclusion (it never ran, or it threw
-//               before it could record one). Never proof of quiescence.
-//   Quiescent - the teardown ran to completion and proved that no callback,
-//               no wrapper call and no window of this module is left.
-//   Failed    - a DEFECT was observed. Sticky: a later successful path must
-//               not clear it.
-//
-// The reason is always a static string literal, so it can be stored in an
-// atomic and read after the SendMessageW returned.
-enum class P1TeardownVerdict : int {
-    NotRun = 0,
-    Quiescent,
-    Failed,
-};
-
-static std::atomic<P1TeardownVerdict> g_p1TeardownVerdict{
-    P1TeardownVerdict::NotRun};
-static std::atomic<const wchar_t*> g_p1TeardownReason{
-    L"the UI-thread teardown did not run"};
-
-// Records a DEFECT. Unconditional and sticky: a failure that was observed
-// (a DestroyWindow that failed, a window that changed under the teardown, an
-// exception, a deadline) must survive a later Quiescent record from another
-// path.
-static void P1RecordTeardownFailure(const wchar_t* reason) {
-    g_p1TeardownReason.store(reason, std::memory_order_release);
-    g_p1TeardownVerdict.store(P1TeardownVerdict::Failed,
-                              std::memory_order_release);
-}
-
-// Records proof of quiescence. Only the first record wins over NotRun; an
-// already recorded failure stays.
-static void P1RecordTeardownQuiescent() {
-    P1TeardownVerdict expected = P1TeardownVerdict::NotRun;
-    g_p1TeardownVerdict.compare_exchange_strong(
-        expected, P1TeardownVerdict::Quiescent, std::memory_order_acq_rel,
-        std::memory_order_acquire);
-}
 
 static void P1NoteUiThread() {
     DWORD current = GetCurrentThreadId();
@@ -6000,16 +5862,9 @@ static void P1NoteUiThread() {
     g_p1UiThreadId.compare_exchange_strong(expected, current);
 }
 
-// The wrapper scope calls this to decide whether a call is attributable to the
-// WebView2 UI thread. An unknown id (0) means no call can be attributed.
-static bool P1IsWebView2UiThread(DWORD threadId) {
-    DWORD uiThread = g_p1UiThreadId.load(std::memory_order_acquire);
-    return uiThread != 0 && threadId == uiThread;
-}
-
 static void P1DrainRepliesOnUiThread(bool postReplies);
 static void P1PushSettingsToAll(const wchar_t* reason);
-static void P1DestroyWindowOnUiThread(HWND hwnd);
+static void P1RunTeardownOnUiThread();
 
 static LRESULT CALLBACK P1DispatchWndProc(HWND hwnd,
                                           UINT message,
@@ -6041,16 +5896,64 @@ static LRESULT CALLBACK P1DispatchWndProc(HWND hwnd,
                     P1PushSettingsToAll(L"settings-changed");
                 }
                 return 0;
-            case kP1MsgDestroyWindow:
+            case kP1MsgTeardown:
                 if (g_p1Lifecycle.load(std::memory_order_acquire) !=
                     P1Lifecycle::Stopping) {
                     return 0;
                 }
-                // Runs the whole teardown synchronously. Wh_ModBeforeUninit's
-                // SendMessageW returns only after this WndProc returns to
-                // user32, so the sender resumes after everything is gone.
-                P1DestroyWindowOnUiThread(hwnd);
+                P1RunTeardownOnUiThread();
                 return 0;
+            case kP1MsgDestroyWindow: {
+                if (g_p1Lifecycle.load(std::memory_order_acquire) !=
+                    P1Lifecycle::Stopping) {
+                    return 0;
+                }
+                // A late AddScript completion or finalizer can queue a release
+                // and post kP1MsgDrainReplies; a sent message can overtake that
+                // posted one, so drain once before the window goes away.
+                P1DrainRepliesOnUiThread(false);
+
+                bool destroyed = DestroyWindow(hwnd) != FALSE;
+                if (!destroyed) {
+                    Wh_Log(L"[p1] DestroyWindow(dispatch window) failed (%lu)",
+                           GetLastError());
+                }
+
+                bool classGone = true;
+                if (g_p1DispatchClassRegistered.load(
+                        std::memory_order_acquire)) {
+                    if (!g_modModule) {
+                        Wh_Log(L"[p1] dispatch window class is registered but "
+                               L"the module handle is missing");
+                        classGone = false;
+                    } else if (!UnregisterClassW(kP1DispatchClass,
+                                                 g_modModule)) {
+                        Wh_Log(L"[p1] UnregisterClassW(dispatch window class) "
+                               L"failed (%lu)",
+                               GetLastError());
+                        classGone = false;
+                    } else {
+                        g_p1DispatchClassRegistered.store(
+                            false, std::memory_order_release);
+                    }
+                }
+
+                if (!destroyed || !classGone) {
+                    return 0;
+                }
+
+                g_p1DispatchWindow.store(nullptr, std::memory_order_release);
+                AcquireSRWLockExclusive(&g_p1DispatchLock);
+                g_p1DispatchState = P1DispatchState::None;
+                g_p1DispatchCreatorThreadId = 0;
+                WakeAllConditionVariable(&g_p1DispatchCv);
+                ReleaseSRWLockExclusive(&g_p1DispatchLock);
+                g_p1DestroyCompleted.store(true, std::memory_order_release);
+                g_p1Lifecycle.store(P1Lifecycle::Stopped,
+                                    std::memory_order_release);
+                Wh_Log(L"[p1] dispatch window destroyed");
+                return 0;
+            }
             default:
                 break;
         }
@@ -6140,11 +6043,19 @@ static bool P1EnsureDispatchWindow() {
         Wh_Log(L"[p1] CreateWindowExW failed (%lu)", error);
         // Do not leave a registered class pointing into this image when the
         // window could not be created: the caller must be able to fall back to
-        // the real export with nothing owned by the mod.
-        if (g_p1DispatchClassRegistered.exchange(false,
-                                                std::memory_order_acq_rel) &&
-            g_modModule) {
-            UnregisterClassW(kP1DispatchClass, g_modModule);
+        // the real export with nothing owned by the mod. The class stays
+        // registered if it cannot actually be unregistered; the no-window
+        // unload path then retries and blocks on failure.
+        if (g_p1DispatchClassRegistered.load(std::memory_order_acquire)) {
+            if (g_modModule &&
+                UnregisterClassW(kP1DispatchClass, g_modModule)) {
+                g_p1DispatchClassRegistered.store(false,
+                                                 std::memory_order_release);
+            } else {
+                Wh_Log(L"[p1] UnregisterClassW after a failed window creation "
+                       L"failed (%lu); keeping the class registered",
+                       GetLastError());
+            }
         }
         P1AbortDispatchCreation();
         return false;
@@ -6163,21 +6074,33 @@ static bool P1EnsureDispatchWindow() {
     ReleaseSRWLockExclusive(&g_p1DispatchLock);
 
     // Shutdown started while the window was being created. The creator owns
-    // this cleanup: the unloader only waited for the settled state and never
-    // saw the handle, so it must not touch it.
+    // this cleanup unless it cannot destroy the window: then the window is
+    // published instead, so the unloader can reach it and retry the destroy.
     Wh_Log(L"[p1] dispatch window creation cancelled: shutdown started");
     if (!DestroyWindow(window)) {
-        Wh_Log(L"[p1] DEFECT: DestroyWindow(cancelled window) failed (%lu)",
+        Wh_Log(L"[p1] DestroyWindow(cancelled window) failed (%lu); publishing "
+               L"it so the unload can retry the destroy",
                GetLastError());
-        // The window outlives the shutdown with a WndProc that points into
-        // this image, so the unload decision must stay unproven.
-        P1RecordTeardownFailure(
-            L"DestroyWindow(cancelled dispatch window) failed");
+        // Publishing keeps the window reachable: the unload posts the teardown
+        // to it and its destroy handler gets a second chance. If that destroy
+        // also fails, the engine blocks on g_p1DestroyCompleted.
+        AcquireSRWLockExclusive(&g_p1DispatchLock);
+        g_p1DispatchWindow.store(window, std::memory_order_release);
+        g_p1DispatchState = P1DispatchState::Ready;
+        g_p1DispatchCreatorThreadId = 0;
+        WakeAllConditionVariable(&g_p1DispatchCv);
+        ReleaseSRWLockExclusive(&g_p1DispatchLock);
+        return false;
     }
-    if (g_p1DispatchClassRegistered.exchange(false,
-                                            std::memory_order_acq_rel) &&
-        g_modModule) {
-        UnregisterClassW(kP1DispatchClass, g_modModule);
+    if (g_p1DispatchClassRegistered.load(std::memory_order_acquire)) {
+        if (g_modModule && UnregisterClassW(kP1DispatchClass, g_modModule)) {
+            g_p1DispatchClassRegistered.store(false,
+                                             std::memory_order_release);
+        } else {
+            Wh_Log(L"[p1] UnregisterClassW(cancelled window class) failed "
+                   L"(%lu); keeping the class registered",
+                   GetLastError());
+        }
     }
     P1AbortDispatchCreation();
     return false;
@@ -6211,100 +6134,22 @@ static void P1RequestSettingsPush() {
     }
 }
 
-// Takes a real loader reference to this image and never releases it. This is
-// the only mechanism that keeps the module resident when quiescence cannot be
-// proven. FreeLibrary then only decrements Windhawk's own reference, so the
-// image stays mapped for the life of the process: a deliberate leak, which is
-// always preferable to running code from an unmapped image.
-//
-// The reference is taken from a function address with FROM_ADDRESS and no PIN
-// flag. Unlike GET_MODULE_HANDLE_EX_FLAG_PIN, which is a loader-internal
-// state that cannot be queried, this is a normal loader reference, so its
-// presence is verifiable and Windhawk's FreeLibrary does not have to fail.
-// (dwFlags 0 would interpret lpModuleName as a module name, not an address.)
-//
-// Returns false when the reference could not be taken. The caller must treat
-// that as a DEFECT: the image will unload even though quiescence was not
-// proven, and nothing here can prevent it.
-static bool P1HoldModuleReference(const wchar_t* reason,
-                                  const P0OutstandingSnapshot& snapshot,
-                                  DWORD teardownThreadId,
-                                  long entryDepth) {
-    Wh_Log(L"[p1] DEFECT: %s (outstanding=%ld addScriptRefs=%ld "
-           L"lastReleaseThread=%lu teardownThread=%lu entryDepth=%ld); "
-           L"holding a module reference",
-           reason, snapshot.callbacks, snapshot.addScriptRefs,
-           static_cast<unsigned long>(snapshot.lastReleaseThreadId),
-           static_cast<unsigned long>(teardownThreadId), entryDepth);
-
-    if (g_p0ModuleReferenceHeld.load(std::memory_order_acquire)) {
-        return true;
-    }
-
-    HMODULE module = nullptr;
-    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
-                            reinterpret_cast<LPCWSTR>(&P1HoldModuleReference),
-                            &module)) {
-        Wh_Log(L"[p1] DEFECT: GetModuleHandleExW(FROM_ADDRESS) failed (%lu); "
-               L"no module reference could be taken, so this image will unload "
-               L"even though quiescence was not proven",
-               GetLastError());
-        return false;
-    }
-    g_p0ModuleReferenceHeld.store(true, std::memory_order_release);
-    Wh_Log(L"[p1] module reference held (%p); FreeLibrary cannot unload it",
-           module);
-    return true;
-}
-
-// Runs the whole teardown on the WebView2 UI thread, inside the dispatch
-// window's WndProc. The return of the SendMessageW that delivered
-// kP1MsgDestroyWindow is the synchronisation point with Wh_ModBeforeUninit:
-// the UI thread stays inside this function, and therefore inside this module,
-// until the teardown is complete; user32 does not resume the sender before the
-// WndProc returns.
-//
-// A counted release never signals anything: it only decrements its counter.
-// The pump below is what makes those decrements observable, because WebView2
-// delivers its completion callbacks (and the wrapper final releases) through
-// this thread's message queue.
-//
-// This function only records evidence. Unload is proven when the counters
-// reached zero, no wrapper entry point is executing on any thread, the
-// decrement that reached zero happened on this UI thread (so the pump runs
-// after that release returned and its frame is provably gone), this teardown
-// was not entered from inside one of our own callbacks, and no wrapper call
-// was ever observed outside this thread. Every other outcome records a
-// failure. P1DecideUnload turns the recorded verdict into the one unload/stay
-// decision.
-static void P1DestroyWindowOnUiThread(HWND hwnd) {
-    if (g_p1TeardownInProgress) {
-        // The pump below dispatched a message that re-entered this path. The
-        // outer call owns the teardown and keeps pumping until it finishes.
-        Wh_Log(L"[p1] nested destroy request ignored: teardown already in "
+// Runs steps 1-4 of the teardown on the WebView2 UI thread, inside the
+// dispatch window's WndProc. It sets g_p1TeardownCompleted only after
+// P0RestoreEnvironment(true) returned, then asks P1MaybeSignalTeardownLocked to
+// signal g_p1TeardownEvent if both counters are already zero. There is no
+// message pump and no window destroy here: the UI thread's own message loop
+// keeps dispatching WebView2 completions after this function returns, and those
+// completions release the last wrappers and held AddScript references.
+static void P1RunTeardownOnUiThread() {
+    if (g_p1TeardownInProgress.load(std::memory_order_acquire)) {
+        // A second teardown request is a no-op; the first one owns the work.
+        Wh_Log(L"[p1] duplicate teardown request ignored: teardown already in "
                L"progress");
         return;
     }
-    g_p1TeardownInProgress = true;
-
-    // Read before any work: a positive depth means this teardown was entered
-    // from inside one of our callbacks (a nested message loop in an Invoke),
-    // and that frame must not return into an unloaded image.
-    const DWORD teardownThreadId = GetCurrentThreadId();
-    const long entryDepth = P0GetWrapperDepth();
-    bool quiescent = false;
-    // Always a static literal: the verdict stores this pointer and the sender
-    // reads it after SendMessageW returned.
-    const wchar_t* reason = L"quiescence could not be proven";
-    bool teardownFailed = false;
-
-    P0OutstandingSnapshot snapshot = P0ReadOutstanding();
-    Wh_Log(L"[p1] UI-thread teardown started (outstanding=%ld "
-           L"addScriptRefs=%ld lastReleaseThread=%lu teardownThread=%lu "
-           L"entryDepth=%ld)",
-           snapshot.callbacks, snapshot.addScriptRefs,
-           static_cast<unsigned long>(snapshot.lastReleaseThreadId),
-           static_cast<unsigned long>(teardownThreadId), entryDepth);
+    g_p1TeardownInProgress.store(true, std::memory_order_release);
+    Wh_Log(L"[p1] UI-thread teardown started");
 
     try {
         // Queued worker references are released here, on the UI thread, before
@@ -6336,9 +6181,9 @@ static void P1DestroyWindowOnUiThread(HWND hwnd) {
 
             // 2) The document-created script is removed by the id its AddScript
             //    completion returned. If the completion has not arrived yet,
-            //    the pump below delivers it and the completion removes the
-            //    script itself; the AddScript reference counter is waited for,
-            //    so that completion cannot run after this function.
+            //    the completion itself removes the script when it runs; the
+            //    AddScript reference counter keeps the engine thread waiting
+            //    until that happened.
             P0RemoveRegisteredScript(webView);
         }
 
@@ -6350,157 +6195,20 @@ static void P1DestroyWindowOnUiThread(HWND hwnd) {
         //    into this image.
         P0RestoreEnvironment(true);
     } catch (...) {
-        // The cleanup is incomplete, so quiescence is no longer provable.
-        // Never continue as if the callbacks were gone: record the failure.
-        teardownFailed = true;
-        reason = L"an exception aborted the UI-thread teardown";
-        Wh_Log(L"[p1] DEFECT: exception during UI-thread teardown; quiescence "
-               L"cannot be proven");
+        // The cleanup is incomplete. No completion flag is set, so the engine
+        // thread keeps waiting; nothing here can pretend the callbacks are
+        // gone.
+        Wh_Log(L"[p1] exception during the UI-thread teardown");
+        return;
     }
 
-    // 5) Pump until both counters are zero. Draining first also releases the
-    //    webview references queued by workers and by finalizers on other
-    //    threads; those releases are what let WebView2 finish its own objects.
-    //
-    //    The deadline is not a licence to unload. A completion that never
-    //    fires would otherwise block the unload forever, so the teardown stops
-    //    pumping and records a failure: the module stays resident, and the
-    //    objects that still point into it keep working. A timeout is never a
-    //    proven unload.
-    bool quitSeen = false;
-    int quitCode = 0;
-    if (!teardownFailed) {
-        const ULONGLONG deadline =
-            GetTickCount64() + kP1TeardownPumpDeadlineMs;
-        try {
-            MSG msg;
-            for (;;) {
-                P1DrainRepliesOnUiThread(false);
+    g_p1TeardownCompleted.store(true, std::memory_order_release);
 
-                // One snapshot for the counters and the thread id, so a zero
-                // counter can never be read with an older release's thread.
-                // A release on any thread other than this UI thread is not
-                // provably done with this image (that thread has not returned
-                // yet from the frame that decremented), so it is not a proof.
-                // A nonzero entryDepth covers a teardown that was entered
-                // while one of our callbacks was still on this thread's stack.
-                snapshot = P0ReadOutstanding();
-                long active =
-                    g_p0ActiveWrapperCalls.load(std::memory_order_acquire);
-                if (snapshot.callbacks == 0 &&
-                    snapshot.addScriptRefs == 0 && active == 0) {
-                    bool lastReleaseOnUiThread =
-                        snapshot.lastReleaseThreadId == 0 ||
-                        snapshot.lastReleaseThreadId == teardownThreadId;
-                    if (lastReleaseOnUiThread && entryDepth == 0) {
-                        quiescent = true;
-                    } else {
-                        reason = L"the final release or the teardown entry is "
-                                 L"not attributable to this UI thread";
-                        Wh_Log(L"[p1] DEFECT: quiescence not provable: "
-                               L"lastReleaseThread=%lu teardownThread=%lu "
-                               L"entryDepth=%ld",
-                               static_cast<unsigned long>(
-                                   snapshot.lastReleaseThreadId),
-                               static_cast<unsigned long>(teardownThreadId),
-                               entryDepth);
-                    }
-                    break;
-                }
-                if (GetTickCount64() >= deadline) {
-                    reason = L"the teardown pump deadline passed";
-                    Wh_Log(L"[p1] DEFECT: teardown pump deadline passed after "
-                           L"%llu ms with %ld callbacks and %ld AddScript "
-                           L"references outstanding",
-                           static_cast<unsigned long long>(
-                               kP1TeardownPumpDeadlineMs),
-                           snapshot.callbacks, snapshot.addScriptRefs);
-                    break;
-                }
+    AcquireSRWLockExclusive(&g_p0OutstandingLock);
+    P1MaybeSignalTeardownLocked();
+    ReleaseSRWLockExclusive(&g_p0OutstandingLock);
 
-                // Wait for input, then dispatch it. DispatchMessageW runs
-                // WebView2's completion callbacks and our wrapper finalizers
-                // on this thread.
-                MsgWaitForMultipleObjectsEx(0, nullptr, 50, QS_ALLINPUT, 0);
-                while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
-                    if (msg.message == WM_QUIT) {
-                        // Do not swallow the app's quit request; restore it
-                        // after the pump, on every exit path.
-                        quitSeen = true;
-                        quitCode = static_cast<int>(msg.wParam);
-                        continue;
-                    }
-                    TranslateMessage(&msg);
-                    DispatchMessageW(&msg);
-                }
-            }
-        } catch (...) {
-            // An exception leaves the counters unproven. Record the failure;
-            // never finish as if the callbacks were gone.
-            reason = L"an exception aborted the teardown pump";
-            Wh_Log(L"[p1] DEFECT: exception during the teardown pump "
-                   L"(outstanding=%ld addScriptRefs=%ld); quiescence cannot be "
-                   L"proven",
-                   snapshot.callbacks, snapshot.addScriptRefs);
-        }
-    }
-
-    // Re-post on every exit path from the pump, including the exception path:
-    // the pump consumed WM_QUIT, so the app's quit request must not be lost.
-    if (quitSeen) {
-        PostQuitMessage(quitCode);
-    }
-
-    // 6) Cleanup is the same whether or not unload was proven: destroy the
-    //    window, unregister its class and mark the lifecycle Stopped before
-    //    returning to user32. A module that stays resident survives a later
-    //    enable, which loads a second copy.
-    HWND published = g_p1DispatchWindow.exchange(nullptr);
-    if (published && published != hwnd) {
-        Wh_Log(L"[p1] DEFECT: dispatch window changed during teardown "
-               L"(published=%p hwnd=%p)",
-               published, hwnd);
-        // A second window whose WndProc points into this image survives the
-        // teardown; unload is not provable.
-        P1RecordTeardownFailure(
-            L"the dispatch window changed during the teardown");
-    }
-    if (!DestroyWindow(hwnd)) {
-        Wh_Log(L"[p1] DEFECT: DestroyWindow(dispatch window) failed (%lu)",
-               GetLastError());
-        // The window, and with it a WndProc that points into this image,
-        // outlives the teardown. This must reach the decision, not just the
-        // log.
-        P1RecordTeardownFailure(L"DestroyWindow(dispatch window) failed");
-    }
-    if (g_p1DispatchClassRegistered.exchange(false) && g_modModule) {
-        UnregisterClassW(kP1DispatchClass, g_modModule);
-    }
-
-    AcquireSRWLockExclusive(&g_p1DispatchLock);
-    g_p1DispatchState = P1DispatchState::None;
-    g_p1DispatchCreatorThreadId = 0;
-    WakeAllConditionVariable(&g_p1DispatchCv);
-    ReleaseSRWLockExclusive(&g_p1DispatchLock);
-
-    // The verdict is recorded before the lifecycle becomes Stopped: the sender
-    // reads Stopped with acquire semantics and must observe it. A failure
-    // recorded by another path (or by DestroyWindow above) is sticky, so this
-    // call can never turn one into a proven unload.
-    if (quiescent) {
-        P1RecordTeardownQuiescent();
-    } else {
-        P1RecordTeardownFailure(reason);
-    }
-
-    g_p1Lifecycle.store(P1Lifecycle::Stopped, std::memory_order_release);
-    g_p1TeardownInProgress = false;
-    Wh_Log(L"[p1] UI-thread teardown complete (%s): %s",
-           g_p1TeardownVerdict.load(std::memory_order_acquire) ==
-                   P1TeardownVerdict::Quiescent
-               ? L"quiescence proven"
-               : L"quiescence not proven",
-           g_p1TeardownReason.load(std::memory_order_acquire));
+    Wh_Log(L"[p1] UI-thread teardown complete");
 }
 
 // Blocks until no dispatch-window creation is in flight. Wh_ModBeforeUninit
@@ -6526,188 +6234,124 @@ static void P1WaitForDispatchCreation() {
     ReleaseSRWLockExclusive(&g_p1DispatchLock);
 }
 
+// A cleanup step that must succeed before the image may unload failed. The
+// mod takes no loader reference and Windhawk frees the DLL as soon as uninit
+// returns, so the only outcome that cannot run code from an unmapped image is
+// to not return.
+static void P1BlockUnload(const wchar_t* reason) {
+    Wh_Log(L"[p1] DEFECT: %s; the unload cannot proceed, blocking", reason);
+    Sleep(INFINITE);
+}
+
 // Called from Wh_ModBeforeUninit (engine thread) after the state became
-// Stopping and P1WaitForDispatchCreation returned. It hands the teardown to the
-// UI thread with a blocking SendMessageW and waits on nothing else: the call
-// returns only after the WndProc returned to user32, which happens after the
-// teardown recorded either proof of quiescence or a failure, the window was
-// destroyed, its class was unregistered and the lifecycle became Stopped.
-// Returning early would let the DLL unload while WebView2 still holds code
-// pointers into it.
+// Stopping and P1WaitForDispatchCreation returned. It asks the UI thread for
+// the teardown, waits until no wrapper and no held AddScript reference is left,
+// and only then destroys the dispatch window with a blocking SendMessageW.
 //
-// Every path that cannot hand the teardown to the UI thread records a failure
-// instead of acting on it: P1DecideUnload is the one place that turns the
-// recorded evidence into a decision.
+// The send proves that the UI thread's own message loop dispatched the destroy
+// handler and came back to the sender after the teardown handler completed.
+// Because this module's entry points do not pump messages, the UI thread cannot
+// be inside one when it returns here. It does not prove that every outer stack
+// in this image has exited; the callback counters and the UI-thread check are
+// what cover the callback frames.
 static void P1TeardownUiThread() {
     if (g_p1Lifecycle.load(std::memory_order_acquire) == P1Lifecycle::Stopped) {
         return;
     }
 
-    P1DispatchState state;
-    HWND window;
+    HWND window = nullptr;
     AcquireSRWLockExclusive(&g_p1DispatchLock);
-    state = g_p1DispatchState;
     window = g_p1DispatchWindow.load(std::memory_order_acquire);
     ReleaseSRWLockExclusive(&g_p1DispatchLock);
 
-    if (state == P1DispatchState::Creating) {
-        // Wh_ModBeforeUninit already waited; this is only for a re-entrant
-        // unload on the creating thread.
-        P1WaitForDispatchCreation();
-        AcquireSRWLockExclusive(&g_p1DispatchLock);
-        state = g_p1DispatchState;
-        window = g_p1DispatchWindow.load(std::memory_order_acquire);
-        ReleaseSRWLockExclusive(&g_p1DispatchLock);
-        if (state == P1DispatchState::Creating) {
-            Wh_Log(L"[p1] DEFECT: unload reached teardown while this thread is "
-                   L"creating the dispatch window; the creator owns the "
-                   L"cleanup");
-            // The window's WndProc points into this image and the creator may
-            // still dispatch messages through it. Nothing here can prove
-            // quiescence.
-            P1RecordTeardownFailure(
-                L"the teardown re-entered dispatch-window creation");
-            return;
-        }
-    }
-
-    if (state == P1DispatchState::None && !window) {
-        // A missing window is legitimate here: the wait above guarantees no
-        // creation is in flight, so either none was ever admitted or the
-        // creator cancelled its own window when it saw Stopping. A wrapper is
-        // handed to WebView2 only after the window is Ready, so nothing can be
-        // outstanding and there is nothing to tear down.
+    if (!window) {
+        // No creation is in flight (Wh_ModBeforeUninit waited for it), so
+        // either none was ever admitted or the creator cancelled its own
+        // window when it saw Stopping. A wrapper is handed to WebView2 only
+        // after the window is Ready, so there is nothing to tear down.
         // P0RestoreEnvironment is defensive: it is a no-op when no environment
         // was patched.
         Wh_Log(L"[p1] no dispatch window is published at unload (no creation "
                L"in flight); nothing to tear down");
-        P0RestoreEnvironment(false);
-        P0OutstandingSnapshot snapshot = P0ReadOutstanding();
-        long active = g_p0ActiveWrapperCalls.load(std::memory_order_acquire);
-        // An unknown depth (no TLS slot) is not proof of zero, so it is not a
-        // proof of quiescence either.
-        long entryDepth = P0GetWrapperDepth();
-        if (snapshot.callbacks != 0 || snapshot.addScriptRefs != 0 ||
-            active != 0 || entryDepth != 0) {
-            // Contradicts the protocol; with no window there is no UI thread
-            // pump to prove quiescence.
-            P1RecordTeardownFailure(
-                L"no dispatch window but quiescence is not provable");
-        } else {
-            P1RecordTeardownQuiescent();
+        try {
+            P0RestoreEnvironment(false);
+        } catch (...) {
+            Wh_Log(L"[p1] exception while restoring the environment without a "
+                   L"dispatch window");
+            P1BlockUnload(
+                L"restoring the environment without a dispatch window failed");
+        }
+        // The creator may have destroyed its window but failed to unregister
+        // the class. Any thread may unregister a class, so retry here; a class
+        // still pointing into this image blocks the unload.
+        if (g_p1DispatchClassRegistered.load(std::memory_order_acquire)) {
+            bool unregistered = false;
+            if (g_modModule) {
+                unregistered =
+                    UnregisterClassW(kP1DispatchClass, g_modModule) != FALSE;
+            }
+            if (!unregistered) {
+                Wh_Log(L"[p1] UnregisterClassW(dispatch window class) without "
+                       L"a window failed (%lu)",
+                       GetLastError());
+                P1BlockUnload(
+                    L"the dispatch window class could not be unregistered");
+            }
+            g_p1DispatchClassRegistered.store(false,
+                                             std::memory_order_release);
         }
         g_p1Lifecycle.store(P1Lifecycle::Stopped, std::memory_order_release);
         return;
     }
 
-    if (!window) {
-        // Ready without a handle cannot happen under the protocol; do not
-        // pretend the teardown ran.
-        Wh_Log(L"[p1] DEFECT: dispatch window state is Ready but the handle "
-               L"is missing");
-        P0RestoreEnvironment(false);
-        P1RecordTeardownFailure(
-            L"the dispatch window state is Ready without a handle");
-        return;
+    if (!g_p1TeardownEvent) {
+        P1BlockUnload(L"the teardown event is missing");
     }
 
-    // Blocking send. SendMessageW on the UI thread itself dispatches directly;
-    // from the engine thread it delivers to the UI thread's queue and returns
-    // only after the WndProc has returned to user32. In both cases the sender
-    // resumes after P1DestroyWindowOnUiThread finished, so no event and no
-    // counter wait is needed here.
-    Wh_Log(L"[p1] sending destroy request to the UI thread (window=%p)", window);
+    long callbacks = 0;
+    long addScriptRefs = 0;
+    AcquireSRWLockExclusive(&g_p0OutstandingLock);
+    g_p1TeardownRequested.store(true, std::memory_order_release);
+    callbacks = g_p0OutstandingCallbacks;
+    addScriptRefs = g_p0OutstandingAddScriptRefs;
+    ReleaseSRWLockExclusive(&g_p0OutstandingLock);
+
+    Wh_Log(L"[p1] UI-thread teardown requested (window=%p outstanding=%ld "
+           L"addScriptRefs=%ld)",
+           window, callbacks, addScriptRefs);
+
+    if (!PostMessageW(window, kP1MsgTeardown, 0, 0)) {
+        // A posted message that never arrives would leave the wait below
+        // forever, so fall back to a blocking send. The handler runs on the UI
+        // thread either way.
+        Wh_Log(L"[p1] teardown message could not be posted (%lu); sending it "
+               L"instead",
+               GetLastError());
+        SendMessageW(window, kP1MsgTeardown, 0, 0);
+        if (!IsWindow(window)) {
+            P1BlockUnload(
+                L"the dispatch window is gone before the teardown ran");
+        }
+    }
+    DWORD wait = WaitForSingleObject(g_p1TeardownEvent, INFINITE);
+    if (wait != WAIT_OBJECT_0) {
+        Wh_Log(L"[p1] WaitForSingleObject(teardown event) returned %lu", wait);
+        P1BlockUnload(L"waiting for the teardown event failed");
+    }
+
+    AcquireSRWLockExclusive(&g_p0OutstandingLock);
+    callbacks = g_p0OutstandingCallbacks;
+    addScriptRefs = g_p0OutstandingAddScriptRefs;
+    ReleaseSRWLockExclusive(&g_p0OutstandingLock);
+    Wh_Log(L"[p1] teardown event signalled (outstanding=%ld addScriptRefs=%ld); "
+           L"destroying the dispatch window",
+           callbacks, addScriptRefs);
+
     SendMessageW(window, kP1MsgDestroyWindow, 0, 0);
-    if (g_p1Lifecycle.load(std::memory_order_acquire) != P1Lifecycle::Stopped) {
-        Wh_Log(L"[p1] DEFECT: SendMessageW(kP1MsgDestroyWindow) returned but "
-               L"the lifecycle is not Stopped");
-        // The WndProc did not complete the teardown (it was filtered, it
-        // threw, or the window died), so nothing proves quiescence. The
-        // recorded verdict may still be NotRun; make the failure explicit.
-        P1RecordTeardownFailure(
-            L"SendMessageW(kP1MsgDestroyWindow) returned without the lifecycle "
-            L"reaching Stopped");
+    if (!g_p1DestroyCompleted.load(std::memory_order_acquire)) {
+        P1BlockUnload(L"the dispatch window could not be destroyed");
     }
     Wh_Log(L"[p1] UI-thread teardown returned");
-}
-
-// Outcome of the single unload decision. See P1DecideUnload.
-enum class P1UnloadDecision : int {
-    // Quiescence proven: no reference was taken, the image may unload.
-    ProvenSafe = 0,
-    // Not proven, but a loader reference is held: the image stays resident.
-    Resident,
-    // Not proven and no reference could be taken: the image will unload
-    // anyway. DEFECT.
-    Unresolved,
-};
-
-// The one place that decides whether this image may unload.
-//
-// Every teardown path reaches this function with its evidence already recorded
-// by P1RecordTeardownQuiescent / P1RecordTeardownFailure, and the counters are
-// re-read here as the last observation. The decision is:
-//
-//   ProvenSafe - quiescence was proven and every counter is zero: no module
-//                reference is taken, so Windhawk's FreeLibrary unloads the
-//                image.
-//   Resident   - not proven, but a real loader reference was taken: the image
-//                stays mapped for the life of the process (a deliberate leak).
-//   Unresolved - not proven and no reference could be taken: the image will
-//                unload anyway. This is a DEFECT that is logged here and
-//                reported to the caller; nothing can prevent the unload.
-//
-// Nothing else calls P1HoldModuleReference, and no teardown path logs a DEFECT
-// and then proceeds as if quiescence had been proven.
-static P1UnloadDecision P1DecideUnload(bool threadsStopped) {
-    P0OutstandingSnapshot snapshot = P0ReadOutstanding();
-    const long active =
-        g_p0ActiveWrapperCalls.load(std::memory_order_acquire);
-    const long entryDepth = P0GetWrapperDepth();
-    const DWORD teardownThreadId = GetCurrentThreadId();
-    const P1TeardownVerdict verdict =
-        g_p1TeardownVerdict.load(std::memory_order_acquire);
-    const wchar_t* recordedReason =
-        g_p1TeardownReason.load(std::memory_order_acquire);
-
-    const wchar_t* defect = nullptr;
-    if (!threadsStopped) {
-        defect = L"the mod's worker threads could not be stopped";
-    } else if (verdict != P1TeardownVerdict::Quiescent) {
-        defect = recordedReason ? recordedReason
-                                : L"quiescence was not proven";
-    } else if (g_p0WrapperCallOutsideUiThread.load(
-                   std::memory_order_acquire)) {
-        // Sticky and unconditional: a snapshot cannot prove that another
-        // thread's wrapper frame already returned.
-        defect = L"a wrapper call was observed on a thread other than the "
-                 L"WebView2 UI thread";
-    } else if (snapshot.callbacks != 0 || snapshot.addScriptRefs != 0) {
-        defect = L"callback objects remain outstanding";
-    } else if (active != 0) {
-        defect = L"a wrapper entry point is still executing";
-    } else if (entryDepth != 0) {
-        defect = L"the decision ran inside a wrapper entry point";
-    }
-
-    if (!defect) {
-        Wh_Log(L"[p1] unload proven safe: no callback, wrapper call or window "
-               L"of this module is left");
-        return P1UnloadDecision::ProvenSafe;
-    }
-
-    // From here on the module must not be freed. The TLS slot is kept even if
-    // the reference cannot be taken: a late wrapper may still run while the
-    // image is mapped.
-    g_p0StayResident.store(true, std::memory_order_release);
-    if (!P1HoldModuleReference(defect, snapshot, teardownThreadId,
-                               entryDepth)) {
-        Wh_Log(L"[p1] DEFECT: unload is not proven and no module reference "
-               L"could be taken; this image will unload with callbacks that "
-               L"may still point into it");
-        return P1UnloadDecision::Unresolved;
-    }
-    return P1UnloadDecision::Resident;
 }
 
 // ---------------------------------------------------------------------------
@@ -6755,6 +6399,9 @@ static std::deque<P1HttpRequest*> g_p1HttpQueue;
 static HANDLE g_p1Workers[kP1HttpWorkers] = {};
 static size_t g_p1WorkerCount = 0;
 static P1PoolState g_p1PoolState = P1PoolState::NotStarted;
+// Sticky: a join failed, so a worker may still be running. Checked before the
+// pool state, because a later stop must not read "Stopped" as proof.
+static std::atomic<bool> g_p1WorkerStopFailed{false};
 
 static SRWLOCK g_p1ReplyLock = SRWLOCK_INIT;
 static std::deque<P1HttpReply*> g_p1ReplyQueue;
@@ -6806,8 +6453,9 @@ static void P1QueueWebViewRelease(void* webView) {
 }
 
 // Transfers the webview reference held by an AddScript completion handler to
-// the UI thread's release queue. Called from the completion (UI thread) and
-// from the handler finalizer (any thread); it never calls Release directly.
+// the UI thread's release queue. Called from the completion and from the
+// handler finalizer, both on the UI thread under the WebView2 contract; it
+// never calls Release directly.
 static void P0ReleaseScriptWebView(P0ScriptHandler* handler) {
     if (!handler || !handler->webView) {
         return;
@@ -6815,8 +6463,9 @@ static void P0ReleaseScriptWebView(P0ScriptHandler* handler) {
     void* webView = handler->webView;
     handler->webView = nullptr;
     P1QueueWebViewRelease(webView);
-    // This is the whole notification: the counter is decremented and nothing
-    // is signalled. The teardown pump runs on the UI thread and observes it.
+    // The decrement is the teardown notification: it latches an off-UI-thread
+    // release, and when it empties the counters P1MaybeSignalTeardownLocked
+    // signals the event if the teardown completed on the UI thread.
     P0CountAddScriptRefReleased();
 }
 
@@ -7163,7 +6812,8 @@ static DWORD WINAPI P1HttpWorkerProc(void*) {
         ReleaseSRWLockExclusive(&g_p1HttpLock);
 
         // Once Stopping was set no new request may be performed; a request
-        // that was already in flight is bounded by its timeout and completes.
+        // that was already in flight runs to completion. Its WinHTTP timeouts
+        // are per phase, not a total deadline.
         if (!request || !P1IsRunning()) {
             if (request) {
                 P1QueueWebViewRelease(request->webView);
@@ -7216,7 +6866,7 @@ static DWORD WINAPI P1HttpWorkerProc(void*) {
 }
 
 static bool P1EnsureCacheSaver();
-static void P1StopHttpWorkers();
+static bool P1StopHttpWorkers();
 
 // Starts the HTTP pool. The state transition, the handle storage and the
 // thread creation happen under g_p1HttpLock; a partial start is torn down by
@@ -7259,7 +6909,10 @@ static bool P1StartHttpWorkers() {
                L"partial pool",
                static_cast<unsigned long long>(started),
                static_cast<unsigned long long>(kP1HttpWorkers));
-        P1StopHttpWorkers();
+        if (!P1StopHttpWorkers()) {
+            Wh_Log(L"[p1] the partial http pool could not be joined; the "
+                   L"unload will refuse to proceed");
+        }
         return false;
     }
 
@@ -7297,7 +6950,17 @@ static bool P1EnqueueHttpRequest(P1HttpRequest* request) {
     return queued;
 }
 
-static void P1StopHttpWorkers() {
+static bool P1StopHttpWorkers() {
+    // Sticky: a previous join failed, so a worker may still be running. The
+    // pool state alone cannot carry that (the partial-start path stops the
+    // pool and may never retry the join), and the unload must not treat the
+    // pool as stopped.
+    if (g_p1WorkerStopFailed.load(std::memory_order_acquire)) {
+        Wh_Log(L"[p1] DEFECT: a previous http worker join failed; the pool is "
+               L"not proven stopped");
+        return false;
+    }
+
     std::deque<P1HttpRequest*> pending;
     HANDLE workers[kP1HttpWorkers] = {};
     size_t count = 0;
@@ -7306,14 +6969,24 @@ static void P1StopHttpWorkers() {
     if (g_p1PoolState == P1PoolState::NotStarted ||
         g_p1PoolState == P1PoolState::Stopped) {
         g_p1PoolState = P1PoolState::Stopped;
+        // The check before the lock is only a fast path: a join that failed
+        // while this caller was between that check and this lock must still be
+        // reported.
+        bool stopped = !g_p1WorkerStopFailed.load(std::memory_order_acquire);
         ReleaseSRWLockExclusive(&g_p1HttpLock);
-        return;
+        return stopped;
     }
     if (g_p1PoolState == P1PoolState::Stopping) {
-        // Another caller already owns the join. It is idempotent: this caller
-        // must not wait on, close or clear the same handles again.
+        // Another caller already owns the join. Wait for its result: returning
+        // success here would let an unload proceed before the join proved
+        // anything. The owner publishes Stopped and wakes this condition
+        // variable on every path.
+        while (g_p1PoolState == P1PoolState::Stopping) {
+            SleepConditionVariableSRW(&g_p1HttpCv, &g_p1HttpLock, INFINITE, 0);
+        }
+        bool stopped = !g_p1WorkerStopFailed.load(std::memory_order_acquire);
         ReleaseSRWLockExclusive(&g_p1HttpLock);
-        return;
+        return stopped;
     }
     g_p1PoolState = P1PoolState::Stopping;
     count = g_p1WorkerCount;
@@ -7335,25 +7008,40 @@ static void P1StopHttpWorkers() {
         }
     }
 
+    bool stopped = true;
     if (count) {
-        // Every request is bounded by timeoutMs, so this wait ends. INFINITE
-        // on purpose: Wh_ModBeforeUninit must not return while a worker could
+        // WinHttpSetTimeouts bounds each phase, not the whole request, so a
+        // slow server can extend this wait. The join has no deadline on
+        // purpose: Wh_ModBeforeUninit must not return while a worker could
         // still run code from this image.
-        WaitForMultipleObjects(static_cast<DWORD>(count), workers, TRUE,
-                               INFINITE);
+        DWORD wait = WaitForMultipleObjects(static_cast<DWORD>(count), workers,
+                                            TRUE, INFINITE);
+        if (wait == WAIT_FAILED || wait == WAIT_TIMEOUT) {
+            Wh_Log(L"[p1] WaitForMultipleObjects(http workers) returned %lu "
+                   L"(error %lu)",
+                   static_cast<unsigned long>(wait),
+                   static_cast<unsigned long>(GetLastError()));
+            g_p1WorkerStopFailed.store(true, std::memory_order_release);
+            stopped = false;
+        }
         for (size_t i = 0; i < count; ++i) {
             CloseHandle(workers[i]);
         }
     }
 
     AcquireSRWLockExclusive(&g_p1HttpLock);
+    // Publish the outcome and wake a waiter in the Stopping branch. A failed
+    // join also sets the sticky flag above, so every later caller returns
+    // false.
     g_p1PoolState = P1PoolState::Stopped;
+    WakeAllConditionVariable(&g_p1HttpCv);
     ReleaseSRWLockExclusive(&g_p1HttpLock);
 
     // The reply queue is drained by the UI thread, which releases the webview
     // references there. If it is never drained those references leak, which is
     // still safer than releasing them here.
     P1WakeUi();
+    return stopped;
 }
 
 // ---------------------------------------------------------------------------
@@ -7889,13 +7577,13 @@ static void P1SignalCacheSave() {
 
 // Stops the saver and flushes any last dirty state on this thread. The UI
 // thread never serializes the map.
-static void P1StopCacheSaver() {
+static bool P1StopCacheSaver() {
     HANDLE thread = nullptr;
     {
         std::lock_guard<std::mutex> lock(g_p1CacheSaverMutex);
         if (!g_p1CacheSaverStarted) {
             P1CacheSaveIfNeeded();
-            return;
+            return true;
         }
         g_p1CacheSaverStarted = false;
         thread = g_p1CacheSaverThread;
@@ -7905,8 +7593,16 @@ static void P1StopCacheSaver() {
         }
     }
 
+    bool stopped = true;
     if (thread) {
-        WaitForSingleObject(thread, INFINITE);
+        DWORD wait = WaitForSingleObject(thread, INFINITE);
+        if (wait != WAIT_OBJECT_0) {
+            Wh_Log(L"[p1] WaitForSingleObject(cache saver) returned %lu "
+                   L"(error %lu)",
+                   static_cast<unsigned long>(wait),
+                   static_cast<unsigned long>(GetLastError()));
+            stopped = false;
+        }
         CloseHandle(thread);
     }
 
@@ -7917,6 +7613,7 @@ static void P1StopCacheSaver() {
             event = nullptr;
         }
     }
+    return stopped;
 }
 
 static void P1CacheClear() {
@@ -8349,8 +8046,7 @@ static void P1HandleMessage(void* sender, const std::wstring& text) {
 
 // Runs the P0 script in the webview's current document. `label` must be a
 // string literal: the completion handler stores the pointer and runs later.
-// `when`, when not null, marks the first hello so the log shows which injection
-// path reached the document.
+// `when`, when not null, labels the log line with the injection path.
 static HRESULT P0ExecuteScript(void* webView,
                                const wchar_t* label,
                                const wchar_t* when) {
@@ -8374,27 +8070,9 @@ static HRESULT P0ExecuteScript(void* webView,
     P0HandlerRef handlerRef;
     handlerRef.handler = handler;
 
-    // The prefix only sets a window flag; the P0 script after it is unchanged
-    // and idempotent through its window.__WH_TRANSLATOR_P0__ guard.
-    std::wstring markedScript;
-    const wchar_t* script = kP0Js;
-    try {
-        if (when) {
-            markedScript = L"window.__WH_TRANSLATOR_P0_WHEN__='";
-            markedScript += when;
-            markedScript += L"';";
-            markedScript += kP0Js;
-            script = markedScript.c_str();
-        }
-    } catch (...) {
-        Wh_Log(L"[p0] ExecuteScript(%s): exception while building the script; "
-               L"using the plain P0 script", label);
-        script = kP0Js;
-    }
-
     P0MarkHandedOver(handler);
     HRESULT hr = reinterpret_cast<FnExecuteScript>(executeScriptFn)(
-        webView, script, handler);
+        webView, kP0Js, handler);
     handler->immediateHr = hr;
 
     Wh_Log(L"[p0] %s (when=%s) -> %08X", label, when ? when : L"immediate",
@@ -8413,8 +8091,8 @@ static void P0OnControllerReady(void* controller) {
 
     // This callback runs on the WebView2 UI thread. The dispatcher window is a
     // prerequisite for injection: without it replies could not reach this
-    // thread and the unloader could not request the synchronous teardown, so
-    // nothing is injected at all.
+    // thread and the unloader could not request the teardown, so nothing is
+    // injected at all.
     P1NoteUiThread();
     if (!P1IsRunning()) {
         Wh_Log(L"[p0] controller completed after shutdown; not injecting");
@@ -8684,7 +8362,6 @@ static void P0OnControllerReady(void* controller) {
 static HRESULT STDMETHODCALLTYPE P0EnvHandlerInvoke(P0EnvHandler* self,
                                                     HRESULT hr,
                                                     void* env) {
-    P0WrapperCallScope scope;
     try {
         Wh_Log(L"[p0] environment completed: hr=%08X env=%p",
                static_cast<unsigned>(hr), env);
@@ -8710,7 +8387,6 @@ static HRESULT STDMETHODCALLTYPE P0ControllerHandlerInvoke(
     P0ControllerHandler* self,
     HRESULT hr,
     void* controller) {
-    P0WrapperCallScope scope;
     try {
         Wh_Log(L"[p0] controller completed: hr=%08X controller=%p",
                static_cast<unsigned>(hr), controller);
@@ -8731,7 +8407,6 @@ static HRESULT STDMETHODCALLTYPE P0MessageHandlerInvoke(
     P0MessageHandler* self,
     void* sender,
     void* args) {
-    P0WrapperCallScope scope;
     (void)self;
 
     try {
@@ -8797,7 +8472,6 @@ static HRESULT STDMETHODCALLTYPE P0ScriptHandlerInvoke(
     P0ScriptHandler* self,
     HRESULT hr,
     LPCWSTR text) {
-    P0WrapperCallScope scope;
     const wchar_t* label = self && self->label ? self->label : L"?";
     try {
         if (self && wcscmp(label, L"AddScript") == 0) {
@@ -8880,7 +8554,6 @@ static HRESULT STDMETHODCALLTYPE P0NavigationStartingInvoke(
     P0NavigationStartingHandler* self,
     void* sender,
     void* args) {
-    P0WrapperCallScope scope;
     (void)self;
     (void)sender;
 
@@ -8937,7 +8610,6 @@ static HRESULT STDMETHODCALLTYPE P0NavigationCompletedInvoke(
     P0NavigationCompletedHandler* self,
     void* sender,
     void* args) {
-    P0WrapperCallScope scope;
     (void)self;
 
     if (!P1IsRunning()) {
@@ -9032,7 +8704,6 @@ static HRESULT STDMETHODCALLTYPE P0NavigationCompletedInvoke(
 static HRESULT STDMETHODCALLTYPE P0EnvCreateControllerThunk(void* self,
                                                             HWND parent,
                                                             void* handler) {
-    P0WrapperCallScope scope;
     try {
         Wh_Log(L"[p0] env->CreateCoreWebView2Controller(parent=%p handler=%p)",
                reinterpret_cast<void*>(parent), handler);
@@ -9071,7 +8742,6 @@ static HRESULT STDMETHODCALLTYPE P0EnvCreateControllerWithOptionsThunk(
     HWND parent,
     void* options,
     void* handler) {
-    P0WrapperCallScope scope;
     try {
         Wh_Log(L"[p0] env->CreateCoreWebView2ControllerWithOptions(parent=%p "
                L"options=%p handler=%p)",
@@ -9117,14 +8787,6 @@ static std::atomic<FnCreateEnv> g_realCreateEnv{nullptr};
 static std::atomic<bool> g_createExportLogged{false};
 static std::atomic<bool> g_sharedExportLogged{false};
 
-// Set once the environment path runs after this mod instance was loaded: the
-// GetProcAddress hook intercepts the create export, or the shim performs the
-// creation. Reset in every Wh_ModInit, so a mod that was toggled off and on in
-// the same process again waits for a fresh environment. A process whose
-// WebView2 environment predates the current instance never sets it, which is
-// the condition the late-load watchdog keys on.
-static std::atomic<bool> g_p0EnvCreationSeen{false};
-
 static HRESULT STDMETHODCALLTYPE P0CreateEnvShim(BOOL fromClientDll,
                                                  int runtimeType,
                                                  PCWSTR userDataFolder,
@@ -9132,17 +8794,8 @@ static HRESULT STDMETHODCALLTYPE P0CreateEnvShim(BOOL fromClientDll,
                                                  void* handler);
 
 static FARPROC WINAPI P0GetProcAddressHook(HMODULE module, LPCSTR procName) {
-    // The scope is constructed before the lifecycle check so that a hook call
-    // that races the teardown is still counted in g_p0ActiveWrapperCalls; the
-    // teardown then pins instead of unloading under it. Once Stopping was set
-    // there is no wrapper work left to do, so the original export is returned
-    // untouched.
-    //
-    // false: this hook runs on every thread in the process, not only on the
-    // WebView2 UI thread. Feeding the sticky "outside the UI thread" pin from
-    // here would pin on essentially every unload; the active counter still
-    // covers the whole call.
-    P0WrapperCallScope scope(/*webView2Callback=*/false);
+    // Once Stopping was set there is no wrapper work left to do, so the
+    // original export is returned untouched.
     if (!g_originalGetProcAddress) {
         return nullptr;
     }
@@ -9166,8 +8819,6 @@ static FARPROC WINAPI P0GetProcAddressHook(HMODULE module, LPCSTR procName) {
             if ((isCreate || isCreateShared) &&
                 module == P0GetEmbeddedBrowserModule()) {
                 if (isCreate) {
-                    g_p0EnvCreationSeen.store(true,
-                                              std::memory_order_release);
                     // Resolve the real export once, through the unhooked
                     // trampoline. Returning the shim is cheap and does not
                     // recurse into this hook.
@@ -9239,8 +8890,6 @@ static HRESULT STDMETHODCALLTYPE P0CreateEnvShim(
     PCWSTR userDataFolder,
     IUnknown* environmentOptions,
     void* handler) {
-    P0WrapperCallScope scope;
-    g_p0EnvCreationSeen.store(true, std::memory_order_release);
     try {
         Wh_Log(L"[p0] CreateWebViewEnvironmentWithOptionsInternal: "
                L"fromClientDll=%d runtimeType=%d userDataFolder=%.200s handler=%p",
@@ -9298,454 +8947,18 @@ static HRESULT STDMETHODCALLTYPE P0CreateEnvShim(
 }
 
 // ---------------------------------------------------------------------------
-// Late-load watchdog
-//
-// The GetProcAddress hook only sees WebView2 environments created after this
-// mod was loaded. When the mod is enabled while windhawk-ui.exe is already
-// running, the existing environment is never wrapped and nothing translates.
-// One short-lived thread waits a grace period after init and, when the
-// environment was already there, restarts the UI process itself:
-// windhawk.exe -restart only re-executes the tray app and leaves
-// windhawk-ui.exe (and therefore its WebView2 environment) running.
-//
-// A detached cmd.exe helper waits a few seconds and starts the UI executable
-// again. The watchdog then posts WM_CLOSE to the UI's main top-level window
-// so the old process can shut down gracefully, and terminates it if it is
-// still alive after three seconds.
-//
-// A timestamp file under Wh_GetModStoragePath() suppresses a second restart
-// within 60 seconds, and a process-wide flag allows one attempt per process
-// instance, so a restart that does not fix the condition cannot loop.
-//
-// The thread is joined by Wh_ModBeforeUninit after the lifecycle became
-// Stopping; the stop event shortens the wait so unload never blocks for the
-// full grace period.
-// ---------------------------------------------------------------------------
-
-static constexpr DWORD kP1LateLoadDelayMs = 5000;
-static constexpr DWORD kP1UiCloseWaitMs = 3000;
-static constexpr unsigned long long kP1RestartGuardMs = 60000;
-static constexpr wchar_t kP1RestartGuardFileName[] = L"ui-restart-guard.txt";
-static constexpr wchar_t kP1UiExecutableName[] = L"windhawk-ui.exe";
-
-static std::mutex g_p1WatchdogMutex;
-static HANDLE g_p1WatchdogThread = nullptr;
-static DWORD g_p1WatchdogThreadId = 0;
-static HANDLE g_p1WatchdogStopEvent = nullptr;
-// Set once on the init thread before the watchdog starts; read-only afterwards.
-static std::wstring g_p1RestartGuardPath;
-static std::atomic<bool> g_p1RestartAttempted{false};
-
-static bool P1KillSwitchOn() {
-    wchar_t value[8]{};
-    DWORD length = GetEnvironmentVariableW(L"WH_TRANSLATOR_DISABLE", value,
-                                           ARRAYSIZE(value));
-    return length > 0 && wcscmp(value, L"1") == 0;
-}
-
-// True only for the host this mod is meant for. A manual load into another
-// process must never restart anything.
-static bool P1ResolveUiExecutablePath(std::wstring& uiPath) {
-    wchar_t buffer[MAX_PATH]{};
-    DWORD length = GetModuleFileNameW(nullptr, buffer, ARRAYSIZE(buffer));
-    if (length == 0 || length >= ARRAYSIZE(buffer)) {
-        return false;
-    }
-
-    std::wstring exePath;
-    try {
-        exePath.assign(buffer, length);
-    } catch (...) {
-        return false;
-    }
-
-    size_t slash = exePath.find_last_of(L"\\/");
-    if (slash == std::wstring::npos) {
-        return false;
-    }
-    if (CompareStringOrdinal(exePath.c_str() + slash + 1, -1,
-                             kP1UiExecutableName, -1, TRUE) != CSTR_EQUAL) {
-        return false;
-    }
-
-    uiPath = std::move(exePath);
-    return true;
-}
-
-// Starts the detached helper that relaunches the UI:
-//
-//   cmd.exe /c "ping -n 4 127.0.0.1 >nul & start "" "<ui path>""
-//
-// ping supplies the delay (about three seconds, one per echo request) so the
-// old process is gone before the new one starts; start launches the
-// executable with an empty window title. The helper inherits no handles, has
-// no console window, and is not tied to this process, so it survives the
-// close below.
-static bool P1SpawnUiRelaunch(const std::wstring& uiPath) {
-    wchar_t systemDirectory[MAX_PATH]{};
-    UINT systemLength =
-        GetSystemDirectoryW(systemDirectory, ARRAYSIZE(systemDirectory));
-    if (systemLength == 0 || systemLength >= ARRAYSIZE(systemDirectory)) {
-        return false;
-    }
-
-    std::wstring cmdPath;
-    std::wstring commandLine;
-    std::wstring workingDirectory;
-    try {
-        cmdPath.assign(systemDirectory, systemLength);
-        if (cmdPath.empty() || cmdPath.back() != L'\\') {
-            cmdPath.push_back(L'\\');
-        }
-        cmdPath += L"cmd.exe";
-
-        commandLine = L"\"";
-        commandLine += cmdPath;
-        commandLine += L"\" /c \"ping -n 4 127.0.0.1 >nul & start \"\" \"";
-        commandLine += uiPath;
-        commandLine += L"\"\"";
-
-        size_t slash = uiPath.find_last_of(L"\\/");
-        if (slash != std::wstring::npos) {
-            // Keep the trailing slash for a root directory ("C:\"), where the
-            // part before it ("C:") would be a drive-relative path.
-            workingDirectory.assign(uiPath, 0,
-                                    slash == 2 && uiPath[1] == L':' ? 3 : slash);
-        }
-    } catch (...) {
-        return false;
-    }
-
-    STARTUPINFOW startup{};
-    startup.cb = sizeof(startup);
-    PROCESS_INFORMATION process{};
-    // bInheritHandles=FALSE: the helper owns no handle of ours.
-    // CREATE_NO_WINDOW: no console flashes up. The child outlives this
-    // process, which is what lets it start the UI after the close below.
-    if (!CreateProcessW(cmdPath.c_str(), &commandLine[0], nullptr, nullptr,
-                        FALSE, CREATE_NO_WINDOW, nullptr,
-                        workingDirectory.empty() ? nullptr
-                                                 : workingDirectory.c_str(),
-                        &startup, &process)) {
-        return false;
-    }
-    CloseHandle(process.hThread);
-    CloseHandle(process.hProcess);
-    return true;
-}
-
-struct P1MainWindowSearch {
-    DWORD processId;
-    HWND visibleTitled;
-    HWND titled;
-    HWND visible;
-};
-
-static BOOL CALLBACK P1MainWindowProc(HWND window, LPARAM parameter) {
-    auto* search = reinterpret_cast<P1MainWindowSearch*>(parameter);
-    DWORD processId = 0;
-    GetWindowThreadProcessId(window, &processId);
-    if (processId != search->processId) {
-        return TRUE;
-    }
-    if (GetWindowTextLengthW(window) > 0) {
-        if (IsWindowVisible(window)) {
-            search->visibleTitled = window;
-            return FALSE;
-        }
-        if (!search->titled) {
-            search->titled = window;
-        }
-        return TRUE;
-    }
-    if (IsWindowVisible(window) && !search->visible) {
-        search->visible = window;
-    }
-    return TRUE;
-}
-
-// The UI's main top-level window: the visible one that carries a title.
-// GetConsoleWindow is not it (windhawk-ui.exe is a GUI process), and the
-// mod's own dispatch window is message-only, so EnumWindows never returns it.
-static HWND P1FindMainWindow() {
-    P1MainWindowSearch search{};
-    search.processId = GetCurrentProcessId();
-    EnumWindows(&P1MainWindowProc, reinterpret_cast<LPARAM>(&search));
-    if (search.visibleTitled) {
-        return search.visibleTitled;
-    }
-    if (search.titled) {
-        return search.titled;
-    }
-    return search.visible;
-}
-
-// Posts WM_CLOSE to the UI's main window and gives the process a bounded
-// amount of time to finish its own shutdown. Waiting on this process object
-// can only end when the process exits (this thread then dies with it), so the
-// wait is the grace period and ExitProcess is the fallback.
-static void P1CloseUiProcess() {
-    HWND window = P1FindMainWindow();
-    if (window) {
-        if (!PostMessageW(window, WM_CLOSE, 0, 0)) {
-            Wh_Log(L"[p1] late-load restart: WM_CLOSE to %p failed (%lu)",
-                   reinterpret_cast<void*>(window), GetLastError());
-        }
-    } else {
-        Wh_Log(L"[p1] late-load restart: no main window found; terminating "
-               L"the process");
-    }
-
-    WaitForSingleObject(GetCurrentProcess(), kP1UiCloseWaitMs);
-    Wh_Log(L"[p1] late-load restart: windhawk-ui.exe is still running after "
-           L"%lu ms; terminating the process",
-           static_cast<unsigned long>(kP1UiCloseWaitMs));
-    ExitProcess(0);
-}
-
-static bool P1ReadRestartGuard(unsigned long long& lastMs) {
-    lastMs = 0;
-    if (g_p1RestartGuardPath.empty()) {
-        return false;
-    }
-
-    HANDLE file = CreateFileW(g_p1RestartGuardPath.c_str(), GENERIC_READ,
-                              FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) {
-        return false;
-    }
-
-    char text[64]{};
-    DWORD read = 0;
-    BOOL ok = ReadFile(file, text, sizeof(text) - 1, &read, nullptr);
-    CloseHandle(file);
-    if (!ok || read == 0) {
-        return false;
-    }
-
-    char* end = nullptr;
-    unsigned long long value = std::strtoull(text, &end, 10);
-    if (!end || end == text) {
-        return false;
-    }
-    lastMs = value;
-    return true;
-}
-
-// Returns false when the guard cannot be recorded: the restart is then
-// suppressed rather than risk a loop that cannot be bounded.
-static bool P1WriteRestartGuard(unsigned long long nowMs) {
-    if (g_p1RestartGuardPath.empty()) {
-        Wh_Log(L"[p1] late-load guard: no storage path; restart suppressed");
-        return false;
-    }
-
-    std::string text = std::to_string(nowMs);
-    text.push_back('\n');
-    HANDLE file = CreateFileW(g_p1RestartGuardPath.c_str(), GENERIC_WRITE, 0,
-                              nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL,
-                              nullptr);
-    if (file == INVALID_HANDLE_VALUE) {
-        Wh_Log(L"[p1] late-load guard: cannot open %s (%lu); restart suppressed",
-               g_p1RestartGuardPath.c_str(), GetLastError());
-        return false;
-    }
-
-    DWORD written = 0;
-    BOOL ok = WriteFile(file, text.data(), static_cast<DWORD>(text.size()),
-                        &written, nullptr);
-    CloseHandle(file);
-    if (!ok || written != text.size()) {
-        Wh_Log(L"[p1] late-load guard: write failed (%lu); restart suppressed",
-               GetLastError());
-        return false;
-    }
-    return true;
-}
-
-// Runs on the watchdog thread once, after the grace period.
-static void P1CheckLateLoad() {
-    // The environment path ran after this mod loaded: nothing to recover.
-    if (g_p0EnvCreationSeen.load(std::memory_order_acquire)) {
-        return;
-    }
-    if (!P1IsRunning()) {
-        return;
-    }
-    // The DLL is loaded only once a WebView2 environment exists. Without it
-    // the environment has simply not been created yet and the hook will see
-    // it.
-    if (!P0GetEmbeddedBrowserModule()) {
-        return;
-    }
-    if (P1KillSwitchOn()) {
-        Wh_Log(L"[p1] late load detected but WH_TRANSLATOR_DISABLE=1; not "
-               L"restarting");
-        return;
-    }
-
-    std::wstring uiPath;
-    if (!P1ResolveUiExecutablePath(uiPath)) {
-        return;
-    }
-
-    unsigned long long now = P1CacheNowMs();
-    unsigned long long last = 0;
-    if (P1ReadRestartGuard(last) && last != 0 &&
-        (now < last || now - last < kP1RestartGuardMs)) {
-        unsigned long long elapsed = now >= last ? now - last : 0;
-        Wh_Log(L"[p1] late-load guard: a restart was triggered %llu ms ago; "
-               L"not restarting again",
-               static_cast<unsigned long long>(elapsed));
-        return;
-    }
-
-    if (g_p1RestartAttempted.exchange(true, std::memory_order_acq_rel)) {
-        return;
-    }
-
-    // The teardown sets Stopping before it joins this thread, so a watchdog
-    // that races an unload stops here instead of restarting the UI.
-    if (!P1IsRunning()) {
-        return;
-    }
-
-    if (!P1WriteRestartGuard(now)) {
-        return;
-    }
-
-    Wh_Log(L"[p1] late load: windhawk-ui.exe already had its WebView2 "
-           L"environment before this mod was loaded; restarting the UI "
-           L"process %s",
-           uiPath.c_str());
-
-    if (!P1SpawnUiRelaunch(uiPath)) {
-        // The guard was written before the spawn, so a failure here is not
-        // retried by this process and not by a second watchdog within a
-        // minute: the restart cannot loop.
-        Wh_Log(L"[p1] late-load restart: cannot start the relaunch helper "
-               L"(%lu); leaving the UI running",
-               GetLastError());
-        return;
-    }
-
-    P1CloseUiProcess();
-}
-
-static DWORD WINAPI P1LateLoadWatchdogProc(void* parameter) {
-    HANDLE stop = static_cast<HANDLE>(parameter);
-    if (WaitForSingleObject(stop, kP1LateLoadDelayMs) != WAIT_TIMEOUT) {
-        return 0;
-    }
-    try {
-        P1CheckLateLoad();
-    } catch (...) {
-        Wh_Log(L"[p1] exception in the late-load watchdog");
-    }
-    return 0;
-}
-
-static bool P1StartLateLoadWatchdog() {
-    if (!P1IsRunning()) {
-        return false;
-    }
-
-    if (!P1ResolveStorageFile(kP1RestartGuardFileName,
-                              g_p1RestartGuardPath)) {
-        Wh_Log(L"[p1] late-load watchdog: no storage path; the restart guard "
-               L"is unavailable");
-    }
-
-    HANDLE stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    if (!stop) {
-        Wh_Log(L"[p1] late-load watchdog: event creation failed (%lu)",
-               GetLastError());
-        return false;
-    }
-
-    HANDLE thread =
-        CreateThread(nullptr, 0, &P1LateLoadWatchdogProc, stop, 0, nullptr);
-    if (!thread) {
-        Wh_Log(L"[p1] late-load watchdog: thread creation failed (%lu)",
-               GetLastError());
-        CloseHandle(stop);
-        return false;
-    }
-
-    {
-        std::lock_guard<std::mutex> lock(g_p1WatchdogMutex);
-        g_p1WatchdogThread = thread;
-        g_p1WatchdogThreadId = GetThreadId(thread);
-        g_p1WatchdogStopEvent = stop;
-    }
-    Wh_Log(L"[p1] late-load watchdog started (delay=%lu ms)",
-           static_cast<unsigned long>(kP1LateLoadDelayMs));
-    return true;
-}
-
-// Signals the watchdog and joins it. Idempotent; Wh_ModBeforeUninit is the
-// only caller. The join is INFINITE on purpose: the thread must not outlive
-// this image. It is bounded because the thread is either waiting on the stop
-// event, starting the relaunch helper, or inside the three-second close wait,
-// which ends in ExitProcess (the join then dies with the process).
-static void P1StopWatchdog() {
-    HANDLE thread = nullptr;
-    DWORD threadId = 0;
-    HANDLE stop = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(g_p1WatchdogMutex);
-        thread = g_p1WatchdogThread;
-        g_p1WatchdogThread = nullptr;
-        threadId = g_p1WatchdogThreadId;
-        g_p1WatchdogThreadId = 0;
-        stop = g_p1WatchdogStopEvent;
-        g_p1WatchdogStopEvent = nullptr;
-        if (stop) {
-            SetEvent(stop);
-        }
-    }
-
-    if (thread) {
-        // ExitProcess runs the detach notifications on the calling thread. If
-        // that thread is this watchdog (the close path below), waiting on its
-        // own handle would deadlock the process it is trying to end.
-        if (threadId == GetCurrentThreadId()) {
-            Wh_Log(L"[p1] late-load watchdog: uninit on the watchdog thread; "
-                   L"not joining itself");
-        } else {
-            WaitForSingleObject(thread, INFINITE);
-        }
-        CloseHandle(thread);
-    }
-    if (stop) {
-        CloseHandle(stop);
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Mod entry points
 // ---------------------------------------------------------------------------
 
 BOOL Wh_ModInit() {
-    // The wrapper depth uses a Win32 TLS slot. Module thread_local storage is
-    // unusable here: Windhawk's loader does not register a mod's TLS directory,
-    // so the first module TLS access reads TEB->ThreadLocalStoragePointer
-    // (gs:0x58) before it is populated and faults. Allocate the slot before
-    // the GetProcAddress hook below can admit a wrapper. On failure the depth
-    // stays unknown, so the unload decision can never be proven.
-    DWORD depthIndex = TlsAlloc();
-    if (depthIndex == TLS_OUT_OF_INDEXES) {
-        Wh_Log(L"[p0] TlsAlloc failed (%lu); wrapper depth is unknown and the "
-               L"unload decision will not be provable",
-               GetLastError());
-    } else {
-        g_p0DepthTlsIndex.store(depthIndex, std::memory_order_release);
-        // A recycled TLS index can carry a stale value on this thread. Start
-        // the init/unload thread at depth zero; a failure here sets the
-        // "unknown" flag and the teardown pins.
-        P0SetWrapperDepth(0);
-        Wh_Log(L"[p0] wrapper depth TLS slot=%lu", depthIndex);
+    // Created before the GetProcAddress hook can admit a wrapper: the engine
+    // thread uses it to learn when the UI thread released every wrapper. If it
+    // cannot be created, the mod does not load.
+    g_p1TeardownEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!g_p1TeardownEvent) {
+        Wh_Log(L"[p1] CreateEventW failed (%lu); not loading", GetLastError());
+        g_p1Lifecycle.store(P1Lifecycle::Stopped, std::memory_order_release);
+        return FALSE;
     }
 
     wchar_t exePath[MAX_PATH]{};
@@ -9763,18 +8976,9 @@ BOOL Wh_ModInit() {
                GetLastError());
     }
 
-    bool disabled = P1KillSwitchOn();
-
-    Wh_Log(L"mod init: pid=%lu exe=%.200s kill-switch=%s",
-           static_cast<unsigned long>(GetCurrentProcessId()), exePath,
-           disabled ? L"on (WH_TRANSLATOR_DISABLE=1)" : L"off");
+    Wh_Log(L"mod init: pid=%lu exe=%.200s",
+           static_cast<unsigned long>(GetCurrentProcessId()), exePath);
     Wh_Log(L"[p0] Wh_ModInit (P0 injection proof + P1 bridge)");
-
-    if (disabled) {
-        Wh_Log(L"[p0] WH_TRANSLATOR_DISABLE=1; not hooking anything");
-        g_p1Lifecycle.store(P1Lifecycle::Stopped, std::memory_order_release);
-        return TRUE;
-    }
 
     P1CacheLoad();
 
@@ -9802,9 +9006,6 @@ BOOL Wh_ModInit() {
     if (!kernel32) {
         Wh_Log(L"[p0] kernel32.dll not found; aborting");
         g_p1Lifecycle.store(P1Lifecycle::Stopped, std::memory_order_release);
-        // Init failed, so the loader will unload this image; no hook exists
-        // that could call a wrapper after the slot is freed.
-        P0FreeDepthTlsIfUnloadable();
         return FALSE;
     }
 
@@ -9812,15 +9013,8 @@ BOOL Wh_ModInit() {
     if (!getProcAddress) {
         Wh_Log(L"[p0] GetProcAddress not found; aborting");
         g_p1Lifecycle.store(P1Lifecycle::Stopped, std::memory_order_release);
-        P0FreeDepthTlsIfUnloadable();
         return FALSE;
     }
-
-    // A new mod instance: only an environment created from here on counts as
-    // "the hook fired". Without this reset, toggling the mod off and on in the
-    // same process would leave the existing WebView2 unwrapped and the
-    // watchdog would never recover it.
-    g_p0EnvCreationSeen.store(false, std::memory_order_release);
 
     // Running is set before the hook is installed: an environment creation
     // that races Wh_ModInit must see the mod as live.
@@ -9831,17 +9025,15 @@ BOOL Wh_ModInit() {
                                 &g_originalGetProcAddress))) {
         Wh_Log(L"[p0] failed to hook GetProcAddress; aborting");
         g_p1Lifecycle.store(P1Lifecycle::Stopped, std::memory_order_release);
-        P0FreeDepthTlsIfUnloadable();
         return FALSE;
     }
 
     Wh_Log(L"[p0] GetProcAddress hooked; waiting for WebView2 environment "
            L"creation");
 
-    // The hook only catches environments created from here on. If the UI
-    // already had one, restart the UI process once after a short grace
-    // period; see the late-load watchdog above.
-    P1StartLateLoadWatchdog();
+    // The hook only sees environments created from here on. When the UI
+    // already had one, this instance does nothing; the next UI start loads the
+    // mod into a fresh process and catches its environment.
     return TRUE;
 }
 
@@ -9869,64 +9061,63 @@ void Wh_ModBeforeUninit() {
     P1Lifecycle previous =
         g_p1Lifecycle.exchange(P1Lifecycle::Stopping,
                                std::memory_order_acq_rel);
-
-    // 0) Join the late-load watchdog before anything else. The lifecycle is
-    //    already Stopping, so a watchdog that wakes up now cannot restart the
-    //    UI; the stop event shortens its five-second wait.
-    P1StopWatchdog();
-
-    if (previous == P1Lifecycle::Stopped) {
-        Wh_Log(L"[p0] already stopped; nothing to do");
-        // This is the only early return that does not reach the decision below.
-        // It is reachable only when the lifecycle never became Running: init
-        // was disabled, or it failed before Wh_SetFunctionHook installed the
-        // GetProcAddress hook. No wrapper entry point can exist without that
-        // hook, so quiescence holds by construction and no reference is needed.
-        // A second Wh_ModBeforeUninit call lands here too, after the first one
-        // already ran the decision.
-        P0FreeDepthTlsIfUnloadable();
+    if (previous != P1Lifecycle::Running) {
+        if (previous == P1Lifecycle::Stopped) {
+            Wh_Log(L"[p0] already stopped; nothing to do");
+            // Init may have failed after the event was created, in which case
+            // this is the only place that closes it.
+            HANDLE teardownEvent = g_p1TeardownEvent;
+            g_p1TeardownEvent = nullptr;
+            if (teardownEvent) {
+                CloseHandle(teardownEvent);
+            }
+            g_p1Lifecycle.store(P1Lifecycle::Stopped,
+                                std::memory_order_release);
+            return;
+        }
+        // previous == Stopping: another call owns the teardown.
+        Wh_Log(L"[p0] concurrent uninit ignored; the first call owns the "
+               L"teardown");
         return;
     }
 
-    // 1) If a dispatch-window creation is in flight, wait for it to settle
-    //    before deciding what to tear down. The creator either publishes the
-    //    window (Ready) or sees Stopping, destroys its own window and reports
-    //    None. This is what keeps the unloader from setting Stopped while a
-    //    window whose WndProc points into this image is still being created.
+    // Wait for an in-flight dispatch-window creation to settle: the creator
+    // either publishes the window or sees Stopping and destroys its own.
     P1WaitForDispatchCreation();
 
-    // 2) Stop the worker pool and the cache saver, both joined with INFINITE.
-    //    A request is bounded by timeoutMs, so the wait ends; after it, no
-    //    worker can return into this image. A failure here is a DEFECT and is
-    //    passed to the decision below: a worker may still be running.
-    bool threadsStopped = false;
+    // Stop the worker pool and the cache saver, both joined with INFINITE.
+    // Each is attempted even if the other throws: after the joins no worker can
+    // return into this image, and a failure means the unload must not proceed.
+    bool threadsStopped = true;
     try {
-        P1StopHttpWorkers();
-        P1StopCacheSaver();
-        threadsStopped = true;
+        if (!P1StopHttpWorkers()) {
+            threadsStopped = false;
+        }
     } catch (...) {
-        Wh_Log(L"[p0] DEFECT: exception while stopping the mod's threads; "
-               L"quiescence cannot be proven");
+        Wh_Log(L"[p0] exception while stopping the http workers");
+        threadsStopped = false;
+    }
+    try {
+        if (!P1StopCacheSaver()) {
+            threadsStopped = false;
+        }
+    } catch (...) {
+        Wh_Log(L"[p0] exception while stopping the cache saver");
+        threadsStopped = false;
+    }
+    if (!threadsStopped) {
+        P1BlockUnload(L"the mod's threads could not be stopped");
     }
 
-    // 3) The WebView2 teardown runs on the UI thread that owns the objects.
-    //    SendMessageW returns only after that thread left our WndProc with
-    //    every callback object released and the window gone, or with a
-    //    recorded failure. Every failure path inside it records a verdict; an
-    //    exception here leaves the verdict NotRun.
+    // Ask the UI thread for the teardown, wait for every wrapper and held
+    // AddScript reference to be released, then destroy the dispatch window.
     try {
         P1TeardownUiThread();
     } catch (...) {
-        Wh_Log(L"[p0] DEFECT: exception in the UI-thread teardown");
+        Wh_Log(L"[p0] exception in the UI-thread teardown");
+        P1BlockUnload(L"the UI-thread teardown threw");
     }
 
-    // 4) The single unload decision. It re-reads the counters, combines them
-    //    with the recorded teardown verdict, the sticky non-UI wrapper call
-    //    flag and the thread-stop result, and either proves the unload or takes
-    //    a loader reference that keeps this image resident.
-    P1UnloadDecision decision = P1DecideUnload(threadsStopped);
-
-    // 5) Drop the key material.
     try {
         P1ClearKeyCache();
     } catch (...) {
@@ -9934,25 +9125,10 @@ void Wh_ModBeforeUninit() {
     }
 
     g_p1Lifecycle.store(P1Lifecycle::Stopped, std::memory_order_release);
-
-    // Only a proven unload is allowed to free the depth slot. In the Resident
-    // and Unresolved cases the image stays mapped (or is about to unmap with
-    // callers possibly still inside it), so the slot is kept: g_p0StayResident
-    // makes P0FreeDepthTlsIfUnloadable a no-op.
-    P0FreeDepthTlsIfUnloadable();
-
-    switch (decision) {
-        case P1UnloadDecision::ProvenSafe:
-            Wh_Log(L"[p0] cleanup done; unload proven safe");
-            break;
-        case P1UnloadDecision::Resident:
-            Wh_Log(L"[p0] cleanup done; a module reference is held, so this "
-                   L"image stays resident (deliberate leak)");
-            break;
-        case P1UnloadDecision::Unresolved:
-            Wh_Log(L"[p0] cleanup done; DEFECT: unload was not proven and no "
-                   L"module reference could be taken, so this image unloads "
-                   L"with callers that may still point into it");
-            break;
+    HANDLE teardownEvent = g_p1TeardownEvent;
+    g_p1TeardownEvent = nullptr;
+    if (teardownEvent) {
+        CloseHandle(teardownEvent);
     }
+    Wh_Log(L"[p0] cleanup done");
 }
