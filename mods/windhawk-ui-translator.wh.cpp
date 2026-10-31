@@ -2,11 +2,11 @@
 // @id              windhawk-ui-translator
 // @name            Windhawk UI Translator
 // @name:zh-CN      Windhawk 界面翻译
-// @description     Translates Windhawk mod content — names, summaries, READMEs, setting labels and changelogs — in place
-// @description:zh-CN 就地翻译 Windhawk 的模组内容：名称、简介、说明文档、设置项与更新日志
+// @description     Translates Windhawk mod content — names, summaries, READMEs, setting labels and changelogs — in place, sending page text to Microsoft's translation service by default
+// @description:zh-CN 就地翻译 Windhawk 的模组内容（名称、简介、说明文档、设置项与更新日志），默认会把页面文本发送到微软翻译服务
 // @version         0.1
 // @author          Zhanyuanium
-// @github          https://github.com/Zhanyuanium/windhawk-ui-translator
+// @github          https://github.com/Zhanyuanium
 // @include         windhawk-ui.exe
 // @architecture    x86-64
 // @compilerOptions -lole32 -luuid -ladvapi32 -lshell32 -lwinhttp -fms-extensions
@@ -52,12 +52,10 @@
   $options:
   - auto: Automatic
   - edge: Microsoft Edge (free, no key)
-  - google: Google Translate (free, no key)
   - llm: OpenAI-compatible LLM
   $options:zh-CN:
   - auto: 自动
   - edge: 微软 Edge（免费，无需密钥）
-  - google: 谷歌翻译（免费，无需密钥）
   - llm: 兼容 OpenAI 的大模型
 - llmBaseUrl: https://api.openai.com/v1
   $name: LLM base URL
@@ -67,8 +65,8 @@
 - llmModel: ""
   $name: LLM model
   $name:zh-CN: 模型名称
-  $description: Model name sent to the LLM endpoint. Leave empty to use the provider default.
-  $description:zh-CN: 发送给大模型接口的模型名称。留空则使用服务端默认模型。
+  $description: Model name sent to the LLM endpoint. Leave empty to leave the field out of the request, so the server uses its default model.
+  $description:zh-CN: 发送给大模型接口的模型名称。留空则请求中不包含该字段，由服务端使用默认模型。
 - credentialTarget: windhawk-ui-translator
   $name: Credential target
   $name:zh-CN: 凭据名称
@@ -178,11 +176,6 @@
   $name:zh-CN: 下次页面加载时清除缓存
   $description: One-shot trigger for the first page load of each app start. The page receives clearCache=true once, then false forever. Turn this setting off again afterwards, otherwise the cache is cleared once on every start.
   $description:zh-CN: 仅对每次启动后的第一次页面加载生效。页面只会收到一次 clearCache=true，之后一直是 false。生效后请手动关闭本项，否则每次启动都会清空一次缓存。
-- debug: false
-  $name: Verbose logging
-  $name:zh-CN: 详细日志
-  $description: Let the page write its debug lines to p0.log through the log channel.
-  $description:zh-CN: 允许页面通过日志通道把调试信息写入 p0.log。
 */
 // ==/WindhawkModSettings==
 
@@ -226,8 +219,8 @@ and batching are built in. The API key is read from Windows Credential Manager
     cmdkey /generic:windhawk-ui-translator /user:translator /pass:<your key>
 
 The free Microsoft Edge endpoint needs no key and is the fallback; `auto` uses
-the LLM only when a key is configured. The Google option is not implemented
-yet.
+the LLM as soon as a base URL and a key are configured, and needs no model
+name. Google Translate is not offered.
 
 ## Notes
 
@@ -239,8 +232,9 @@ yet.
 
 ## Privacy
 
-Translated text is sent to the provider you configure. No telemetry, no other
-network access. The key is stored by Windows, not by this mod.
+Page text is sent to Microsoft's translation service by default; with an LLM
+configured it goes to that endpoint instead. No telemetry, no other network
+access. The key is stored by Windows, not by this mod.
 */
 // ==/WindhawkModReadme==
 
@@ -255,16 +249,16 @@ network access. The key is stored by Windows, not by this mod.
 // Everything here is best-effort and fail-soft: every unexpected condition is
 // logged and then ignored. The mod must never take down Windhawk's own UI.
 //
-// Wh_Log only reaches Windhawk's log pane, so every line is mirrored to
-// <mod storage>\p0.log as UTF-8. A heartbeat thread keeps writing while the mod
-// is loaded, so "mod not loaded", "loaded but the hook never fired" and "hook
-// fired but the page never answered" can be told apart from outside the app.
+// Logging goes to Wh_Log only (Windhawk's log pane). To watch it outside the
+// app, run scripts/dbwin-log.ps1, which captures OutputDebugString from the
+// windhawk-ui.exe process.
 //
 // Vtable slots are 0-based COM indices taken from the official WebView2.h
 // (1.0.3719.77 and 1.0.992.28 declare the interfaces in the same order, so the
-// navigation slots 7/8/15/16 line up with AddScript = 27 and ExecuteScript =
-// 29). The named constants below are the reference; every slot is still
-// range-validated against EmbeddedBrowserWebView.dll before it is called.
+// navigation slots 7/8/15/16 line up with AddScript = 27,
+// RemoveScriptToExecuteOnDocumentCreated = 28 and ExecuteScript = 29). The
+// named constants below are the reference; every slot is still range-validated
+// against EmbeddedBrowserWebView.dll before it is called.
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -276,213 +270,34 @@ network access. The key is stored by Windows, not by this mod.
 
 #include <algorithm>
 #include <atomic>
-#include <cstdarg>
 #include <cstring>
 #include <cwchar>
 #include <deque>
 #include <mutex>
 #include <new>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include <windhawk_api.h>
 
 // ---------------------------------------------------------------------------
-// File logger
+// Logging helpers
 //
-// p0.log lives in the mod's storage directory (Wh_GetModStoragePath, which
-// Windhawk maps to ...\Engine\ModsWritable\mod-storage\<mod id>). Every line is
-// written with its own open/close, so the file can be read while Windhawk runs;
-// it rotates to p0.old.log once it grows past 1 MB. Line format:
-// YYYY-MM-DD HH:MM:SS.mmm [pid:tid] [seq] message
+// Every line goes to Wh_Log (Windhawk's own log pane). A string that comes
+// from the app or from the page is bounded in the format string itself
+// (L"%.200s"): the MSVC/llvm-mingw CRT applies the precision of a wide %s as a
+// character count, and a bounded conversion needs no intermediate storage.
 //
-// Nothing here may throw or take the app down: every failure is swallowed.
+// There is deliberately no shared scratch buffer. A static ring would hand out
+// a pointer that another thread can overwrite while the caller is still
+// formatting or logging from it, and module thread_local storage is unusable:
+// Windhawk's loader does not register a mod's TLS directory, so the first
+// module TLS access reads TEB->ThreadLocalStoragePointer (gs:0x58) before it is
+// populated and faults.
 // ---------------------------------------------------------------------------
-
-static constexpr wchar_t kP0LogName[] = L"p0.log";
-static constexpr wchar_t kP0LogOldName[] = L"p0.old.log";
-static constexpr unsigned long long kP0LogRotateSize = 1024ull * 1024ull;
-static constexpr size_t kP0LogBodyChars = 2048;
-static constexpr size_t kP0LogTruncateChars = 200;
-
-struct P0LogState {
-    std::mutex mtx;
-    std::wstring path;
-    std::wstring oldPath;
-    unsigned long long seq = 0;
-    bool ready = false;
-};
-
-static P0LogState& P0LogGlobal() {
-    static P0LogState state;
-    return state;
-}
-
-static wchar_t g_p0LogPathDisplay[600] = L"(not resolved)";
-
-// Thread-local truncated copy of a long string (or the original pointer when it
-// already fits), so a log line can never become huge.
-static const wchar_t* P0Trunc(const wchar_t* text,
-                              size_t maxChars = kP0LogTruncateChars) {
-    static thread_local wchar_t buffer[kP0LogTruncateChars + 16];
-    if (!text) {
-        return L"(null)";
-    }
-    if (maxChars > kP0LogTruncateChars) {
-        maxChars = kP0LogTruncateChars;
-    }
-    size_t length = 0;
-    while (length < maxChars && text[length] != L'\0') {
-        ++length;
-    }
-    if (text[length] == L'\0') {
-        return text;
-    }
-    for (size_t i = 0; i < maxChars; ++i) {
-        buffer[i] = text[i];
-    }
-    buffer[maxChars] = L'.';
-    buffer[maxChars + 1] = L'.';
-    buffer[maxChars + 2] = L'.';
-    buffer[maxChars + 3] = L'\0';
-    return buffer;
-}
-
-static bool P0ResolveLogDirectory(std::wstring& dir) {
-    wchar_t storage[MAX_PATH]{};
-    size_t storageLength = Wh_GetModStoragePath(storage, ARRAYSIZE(storage));
-    if (storageLength > 0 && storageLength < ARRAYSIZE(storage)) {
-        dir.assign(storage, storageLength);
-    } else {
-        // No Wh_GetModStoragePath answer; use the documented on-disk location.
-        wchar_t commonAppData[MAX_PATH]{};
-        DWORD commonLength =
-            GetEnvironmentVariableW(L"ProgramData", commonAppData,
-                                    ARRAYSIZE(commonAppData));
-        if (commonLength == 0 ||
-            commonLength >= ARRAYSIZE(commonAppData) ||
-            commonAppData[0] == L'\0') {
-            if (FAILED(SHGetFolderPathW(nullptr, CSIDL_COMMON_APPDATA, nullptr,
-                                        SHGFP_TYPE_CURRENT, commonAppData))) {
-                return false;
-            }
-        }
-        dir = commonAppData;
-        dir += L"\\Windhawk\\Engine\\ModsWritable\\mod-storage\\"
-               L"windhawk-ui-translator";
-    }
-
-    int createResult = SHCreateDirectoryExW(nullptr, dir.c_str(), nullptr);
-    if (createResult != ERROR_SUCCESS &&
-        createResult != ERROR_ALREADY_EXISTS &&
-        createResult != ERROR_FILE_EXISTS) {
-        // Keep going: the directory may exist but not be creatable/queryable.
-        Wh_Log(L"[p0] cannot create log directory %s (%d)", dir.c_str(),
-               createResult);
-    }
-    return true;
-}
-
-static void P0RotateLogIfNeeded(const std::wstring& path,
-                                const std::wstring& oldPath) {
-    WIN32_FILE_ATTRIBUTE_DATA data{};
-    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data)) {
-        return;
-    }
-    unsigned long long size =
-        (static_cast<unsigned long long>(data.nFileSizeHigh) << 32) |
-        static_cast<unsigned long long>(data.nFileSizeLow);
-    if (size <= kP0LogRotateSize) {
-        return;
-    }
-    MoveFileExW(path.c_str(), oldPath.c_str(), MOVEFILE_REPLACE_EXISTING);
-}
-
-static void P0LogInit() {
-    try {
-        P0LogState& state = P0LogGlobal();
-        std::lock_guard<std::mutex> lock(state.mtx);
-
-        std::wstring dir;
-        if (!P0ResolveLogDirectory(dir)) {
-            Wh_Log(L"[p0] no usable storage directory; file logging disabled");
-            return;
-        }
-        if (dir.empty() || dir.back() != L'\\') {
-            dir.push_back(L'\\');
-        }
-
-        state.path = dir + kP0LogName;
-        state.oldPath = dir + kP0LogOldName;
-        P0RotateLogIfNeeded(state.path, state.oldPath);
-        state.ready = true;
-
-        wcsncpy_s(g_p0LogPathDisplay, ARRAYSIZE(g_p0LogPathDisplay),
-                  state.path.c_str(), _TRUNCATE);
-    } catch (...) {
-    }
-}
-
-static void P0WriteFileLog(const wchar_t* fmt, ...) {
-    try {
-        P0LogState& state = P0LogGlobal();
-        std::lock_guard<std::mutex> lock(state.mtx);
-        if (!state.ready) {
-            return;
-        }
-
-        wchar_t body[kP0LogBodyChars] = {};
-        va_list args;
-        va_start(args, fmt);
-        vswprintf_s(body, ARRAYSIZE(body), fmt ? fmt : L"", args);
-        va_end(args);
-        body[ARRAYSIZE(body) - 1] = L'\0';
-
-        SYSTEMTIME now{};
-        GetLocalTime(&now);
-        unsigned long long seq = ++state.seq;
-
-        wchar_t line[kP0LogBodyChars + 96] = {};
-        swprintf_s(line, ARRAYSIZE(line),
-                   L"%04u-%02u-%02u %02u:%02u:%02u.%03u [%lu:%lu] [%llu] %s\r\n",
-                   now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute,
-                   now.wSecond, now.wMilliseconds,
-                   static_cast<unsigned long>(GetCurrentProcessId()),
-                   static_cast<unsigned long>(GetCurrentThreadId()), seq, body);
-        line[ARRAYSIZE(line) - 1] = L'\0';
-
-        char utf8[(kP0LogBodyChars + 128) * 3] = {};
-        int utf8Length =
-            WideCharToMultiByte(CP_UTF8, 0, line, -1, utf8,
-                                static_cast<int>(sizeof(utf8)), nullptr,
-                                nullptr);
-        if (utf8Length <= 1) {
-            return;
-        }
-        --utf8Length;
-
-        HANDLE file = CreateFileW(state.path.c_str(), FILE_APPEND_DATA,
-                                  FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-                                  OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (file == INVALID_HANDLE_VALUE) {
-            return;
-        }
-
-        DWORD written = 0;
-        WriteFile(file, utf8, static_cast<DWORD>(utf8Length), &written, nullptr);
-        CloseHandle(file);
-    } catch (...) {
-    }
-}
-
-// Mirrors every P0_LOG call to p0.log with the same text. The arguments are
-// evaluated twice; every call site passes side-effect-free values.
-#define P0_LOG(...)                  \
-    do {                             \
-        Wh_Log(__VA_ARGS__);         \
-        P0WriteFileLog(__VA_ARGS__); \
-    } while (0)
 
 // ---------------------------------------------------------------------------
 // Slot numbers
@@ -501,6 +316,7 @@ static constexpr size_t kWebViewSlotRemoveNavigationStarting = 8;
 static constexpr size_t kWebViewSlotAddNavigationCompleted = 15;
 static constexpr size_t kWebViewSlotRemoveNavigationCompleted = 16;
 static constexpr size_t kWebViewSlotAddScript = 27;
+static constexpr size_t kWebViewSlotRemoveScript = 28;
 static constexpr size_t kWebViewSlotExecuteScript = 29;
 static constexpr size_t kWebViewSlotPostWebMessageAsString = 33;
 static constexpr size_t kWebViewSlotAddWebMessageReceived = 34;
@@ -595,8 +411,27 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
   // form; the DOM keeps its own whitespace for restoring the original.
   const normalizeSource = (s) => String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
 
+  // Protocol fields: every field but the last is separator-free, so split the
+  // leading fields with indexOf and leave the remainder (which may contain
+  // separators) as the last field.
+  const splitFields = (s, count) => {
+    const out = [];
+    let at = 0;
+    for (let i = 0; i < count - 1; i++) {
+      const next = s.indexOf(SEP, at);
+      if (next === -1) {
+        if (at < s.length || out.length) out.push(s.slice(at));
+        return out;
+      }
+      out.push(s.slice(at, next));
+      at = next + 1;
+    }
+    out.push(s.slice(at));
+    return out;
+  };
+
   const hash32 = (s) => {
-    // FNV-1a, 32 bit; the cache key also carries the length against collisions.
+    // FNV-1a, 32 bit; used for in-session source identity.
     let h = 0x811c9dc5;
     for (let i = 0; i < s.length; i++) {
       h ^= s.charCodeAt(i);
@@ -605,6 +440,18 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
     h ^= s.length;
     return (h >>> 0).toString(16).padStart(8, '0');
   };
+
+  const hash32b = (s) => {
+    // djb2-xor, 32 bit; independent of hash32, so the pair is 64 bits.
+    let h = 5381;
+    for (let i = 0; i < s.length; i++) {
+      h = Math.imul(h, 33) ^ s.charCodeAt(i);
+    }
+    h ^= s.length;
+    return (h >>> 0).toString(16).padStart(8, '0');
+  };
+
+  const hash64 = (s) => hash32(s) + hash32b(s);
 
   const idle = (fn) => {
     if (typeof window.requestIdleCallback === 'function') {
@@ -648,8 +495,7 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
       timeoutMs: 30000,
       cacheEnabled: true,
       cacheTtlDays: 30,
-      clearCache: false,
-      debug: false
+      clearCache: false
     };
   }
 
@@ -659,6 +505,8 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
     settingsCount: 0,
     connected: false,
     enabled: true,
+    // Set by `teardown`: the mod is unloading, so nothing may be sent to it.
+    dead: false,
     targetLang: '',
     provider: 'edge',
     // Set once an LLM batch failed: the rest of the session stays on Edge.
@@ -674,6 +522,16 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
     nextUnitId: 1,
     nextRequestId: 1,
     pending: new Map(),
+    // Request id -> { id, key, entry, timer } whose `cache-get` reply is still
+    // outstanding. Matching on the id as well as the key keeps a late reply
+    // from resolving a newer lookup for the same string. The deadline turns a
+    // silent mod into a normal miss.
+    cacheLookups: new Map(),
+    // Keys with an outstanding lookup; a second string with the same key is
+    // translated normally instead of sharing an ambiguous request.
+    cacheLookupKeys: new Set(),
+    // One warning per session when the cache stops answering.
+    cacheWarned: false,
     // Normalised source -> shared translation entry, so a distinct string is
     // requested once per epoch.
     textEntries: new Map(),
@@ -681,7 +539,9 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
     inflight: 0,
     flushTimer: 0,
     scanTimer: 0,
+    settingsTimer: 0,
     observer: null,
+    messageListener: null,
     renderQueue: new Set(),
     renderScheduled: false,
     scanQueue: null,
@@ -702,17 +562,20 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
     }
   };
 
+  // The object exposed as window.__WHTR__; teardown deletes it so a later
+  // injection in the same document can build a fresh engine.
+  let publicApi = null;
+
   function log(msg) {
-    if (!state.settings.debug) return;
     send(TAG + SEP + 'log' + SEP + clean(msg).slice(0, 500));
   }
 
   function problem(msg) {
-    // Errors go to p0.log even when verbose logging is off.
-    send(TAG + SEP + 'log' + SEP + ('whtr: ' + clean(msg)).slice(0, 500));
+    log('whtr: ' + clean(msg));
   }
 
   function send(text) {
+    if (state.dead) return false;
     const wv = CHANNEL();
     if (!wv) return false;
     try {
@@ -767,6 +630,10 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
         resolve(v);
       };
       try {
+        if (state.dead) {
+          done({ status: 0, body: '', error: -1 });
+          return;
+        }
         const wv = CHANNEL();
         if (!wv) {
           done({ status: 0, body: '', error: -1 });
@@ -778,28 +645,8 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
           done({ status: 0, body: '', error: -1 });
           return;
         }
-        const headers = [];
-        const raw = opts && opts.headers;
-        if (Array.isArray(raw)) {
-          for (const pair of raw) {
-            if (Array.isArray(pair) && pair.length >= 2) headers.push([pair[0], pair[1]]);
-          }
-        } else if (raw && typeof raw === 'object') {
-          for (const name of Object.keys(raw)) headers.push([name, raw[name]]);
-        }
-        const cleanHeaders = [];
-        for (const [name, value] of headers) {
-          const n = String(name);
-          const v = String(value == null ? '' : value);
-          if (!n || n.indexOf(SEP) !== -1 || v.indexOf(SEP) !== -1) continue;
-          if (cleanHeaders.length >= 32) break;
-          cleanHeaders.push([n, v]);
-        }
         const body = String(opts && opts.body != null ? opts.body : '');
         const id = state.nextRequestId++;
-        const fields = [TAG, 'http', String(id), method, url, String(cleanHeaders.length)];
-        for (const pair of cleanHeaders) fields.push(pair[0], pair[1]);
-        fields.push(body);
 
         const ms = clamp(state.settings.timeoutMs, 1000, 120000) || 30000;
         const timer = setTimeout(() => {
@@ -811,7 +658,9 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
 
         state.pending.set(id, { resolve: done, timer: timer });
         state.stats.requests++;
-        wv.postMessage(fields.join(SEP));
+        // Protocol v2: no headers. The mod sets Content-Type and, for the LLM
+        // host only, Authorization (docs/PROTOCOL.md).
+        wv.postMessage([TAG, 'http', String(id), method, url, body].join(SEP));
       } catch (e) {
         state.stats.errors++;
         done({ status: 0, body: '', error: -3 });
@@ -979,7 +828,6 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
     '.ant-select-selection-item',
     '.ant-select-selection-placeholder'
   ];
-  const SELECT_HOST_SET = new Set(SELECT_HOST_SELECTORS);
   // A setting description. Inside the compact title row it belongs to the
   // tooltip, not the title unit; the visible portal copy translates normally.
   const DESC_TEXT_SEL = '[data-testid="mod-setting-description-text"]';
@@ -1124,109 +972,6 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
       return (el.textContent || '').trim().length >= 2;
     } catch (_) {
       return false;
-    }
-  }
-
-  // Debug-only trail for skipped select hosts, capped per scan.
-  let debugSelectBudget = 0;
-
-  function debugSelectReject(el, sel, reason) {
-    if (!state.settings.debug || debugSelectBudget <= 0) return;
-    debugSelectBudget--;
-    let name = '?';
-    let text = '';
-    try {
-      name = String(el.tagName || '?').toLowerCase();
-      const cls = String(el.className || '').trim().split(/\s+/).slice(0, 2).join('.');
-      if (cls) name += '.' + cls;
-      text = String(el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40);
-    } catch (_) {
-      /* ignore */
-    }
-    log('select host rejected (' + reason + '): ' + sel + ' <' + name + '> "' + text + '"');
-  }
-
-  // Debug-only diagnosis for an untranslated setting title: one line per row,
-  // six rows per scan, tag/class skeleton only, never text.
-  const DEBUG_ROW_BUDGET = 6;
-
-  function elementSignature(el) {
-    if (!el || el.nodeType !== 1) return '?';
-    let out = String(el.tagName || '?').toLowerCase();
-    try {
-      const cls = String(el.className || '').trim();
-      if (cls) out += '.' + cls.split(/\s+/).filter(Boolean).slice(0, 4).join('.');
-      const testid = el.getAttribute('data-testid');
-      if (testid) out += '[data-testid=' + testid + ']';
-    } catch (_) {
-      /* ignore */
-    }
-    return out;
-  }
-
-  function shallowSkeleton(el, depth) {
-    if (!el || el.nodeType !== 1 || depth < 0) return '';
-    let out = elementSignature(el);
-    const kids = [];
-    try {
-      for (let c = el.firstElementChild; c; c = c.nextElementSibling) {
-        const s = shallowSkeleton(c, depth - 1);
-        if (s) kids.push(s);
-      }
-    } catch (_) {
-      /* ignore */
-    }
-    if (kids.length) out += '>' + kids.join(',');
-    return out;
-  }
-
-  function debugSettingsRows(claimed) {
-    if (!state.settings.debug) return;
-    let rows = [];
-    try {
-      rows = Array.from(document.querySelectorAll('[data-testid="mod-setting"]'));
-      if (!rows.length) rows = Array.from(document.querySelectorAll('.windhawk-row'));
-    } catch (_) {
-      rows = [];
-    }
-    let lines = 0;
-    for (const row of rows) {
-      if (lines >= DEBUG_ROW_BUDGET) break;
-      let testid = '';
-      let key = '';
-      try {
-        testid = row.getAttribute('data-testid') || '';
-        key = row.getAttribute('data-setting-key') || '';
-      } catch (_) {
-        testid = '';
-        key = '';
-      }
-      let title = null;
-      try {
-        title = row.querySelector('.windhawk-row-meta-title') || row.querySelector('h4');
-      } catch (_) {
-        title = null;
-      }
-      const index = title ? claimed.indexOf(title) : -1;
-      let claimedBy = '';
-      if (title && index === -1) {
-        for (const host of claimed) {
-          if (host !== title && title.contains(host)) {
-            claimedBy = elementSignature(host);
-            break;
-          }
-        }
-      }
-      log(
-        'row ' + lines +
-        ' testid=' + (testid || '-') +
-        ' key=' + (key || '-') +
-        ' title=' + (title ? elementSignature(title) : '-') +
-        ' claimed=' + (index !== -1 ? 'true' : 'false') +
-        (claimedBy ? ' claimedBy=' + claimedBy : '') +
-        ' skeleton=' + (title ? shallowSkeleton(title, 2).slice(0, 220) : '-')
-      );
-      lines++;
     }
   }
 
@@ -1458,6 +1203,7 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
   }
 
   function scanAll() {
+    if (state.dead) return;
     // The document-created injection may run before <head> exists.
     installCss();
     if (!state.enabled || !state.settingsSeen) return;
@@ -1554,7 +1300,6 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
 
     // Settings surfaces: text-node swap, never a clone.
     if (state.settings.scopeSettings) {
-      debugSelectBudget = state.settings.debug ? 5 : 0;
       for (const sel of SETTINGS_SELECTORS) {
         let list = [];
         try {
@@ -1562,23 +1307,16 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
         } catch (_) {
           list = [];
         }
-        const selectHost = SELECT_HOST_SET.has(sel);
         for (const el of list) {
           // A hidden copy nested in a title is never its own unit; the visible
           // tooltip portal outside the title is claimed like any description.
           if (sel === DESC_TEXT_SEL && el.closest(TITLE_SEL)) continue;
           const reason = settingsRejectReason(el);
-          if (reason) {
-            if (selectHost) debugSelectReject(el, sel, reason);
-            continue;
-          }
+          if (reason) continue;
           // A title with no text but the excluded copy gets no unit.
           if (isTitleHost(el) && !isTranslatable(normalizeSource(titleHostText(el, claimed)))) continue;
           const atomic = claimSwap(el);
-          if (!atomic) {
-            if (selectHost) debugSelectReject(el, sel, 'already claimed');
-            continue;
-          }
+          if (!atomic) continue;
           candidates.push({ el: el, mode: 'swap', surface: 'settings', atomic: atomic });
         }
       }
@@ -1629,15 +1367,13 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
       }
     }
 
-    if (state.settings.debug) safe(() => debugSettingsRows(claimed), 'debug-rows');
-
     state.stats.scannedHosts += candidates.length;
     state.scanQueue = { items: candidates, at: 0, epoch: state.epoch };
     scheduleScanChunk();
   }
 
   function scheduleScanChunk() {
-    if (state.scanScheduled) return;
+    if (state.scanScheduled || state.dead) return;
     state.scanScheduled = true;
     idle((deadline) => {
       state.scanScheduled = false;
@@ -1671,6 +1407,7 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
   }
 
   function scheduleScan(delay) {
+    if (state.dead) return;
     if (state.scanTimer) clearTimeout(state.scanTimer);
     state.scanTimer = setTimeout(() => {
       state.scanTimer = 0;
@@ -2216,6 +1953,7 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
     state.queue.length = 0;
     // The dedupe map is keyed by language/provider, so a rebuild must not reuse it.
     state.textEntries.clear();
+    clearCacheLookups();
     state.renderQueue.clear();
     if (state.flushTimer) {
       clearTimeout(state.flushTimer);
@@ -2235,7 +1973,8 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
 
   function llmConfigured() {
     const s = state.settings;
-    return !!(String(s.llmBaseUrl || '').trim() && String(s.llmModel || '').trim());
+    // The model is optional: the endpoint's default applies when it is empty.
+    return !!String(s.llmBaseUrl || '').trim();
   }
 
   // Settings JSON has no glossary key yet; read it when a build adds one.
@@ -2311,14 +2050,17 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
       segments: entries.map((entry, index) => ({ id: index + 1, text: entry.text }))
     };
     if (glossary.length) user.glossary = glossaryObject(glossary);
-    return JSON.stringify({
-      model: String(state.settings.llmModel || '').trim(),
+    const body = {
       temperature: 0,
       messages: [
         { role: 'system', content: buildLlmSystemPrompt(glossary) },
         { role: 'user', content: JSON.stringify(user) }
       ]
-    });
+    };
+    // An empty model omits the key entirely so the endpoint's default applies.
+    const model = String(state.settings.llmModel || '').trim();
+    if (model) body.model = model;
+    return JSON.stringify(body);
   }
 
   function warnLlmOnce(why) {
@@ -2348,12 +2090,13 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
     return (u.leadTokens || '') + u.parts.map((p) => partOutput(p) || '').join('') + (u.trailTokens || '');
   }
 
-  // A string already known this session (completed entry, then the persistent
-  // cache); used so a reset label never disagrees with the option label.
+  // A string already known this session; used so a reset label never disagrees
+  // with the option label. The mod's store is only reachable asynchronously, so
+  // a reset label composes from this session's completed entries.
   function lookupTranslation(text) {
     const entry = state.textEntries.get(text);
     if (entry && entry.state === 3 && typeof entry.translated === 'string') return entry.translated;
-    return cacheGet(text);
+    return undefined;
   }
 
   function attachPart(entry, u, part) {
@@ -2362,7 +2105,6 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
       // Already translated: fan the result out, no request and no bookkeeping.
       part.translated = entry.translated;
       part.state = 3;
-      state.stats.cacheHits++;
       maybeFinishUnit(u);
       return;
     }
@@ -2371,11 +2113,11 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
       return;
     }
     entry.parts.push(part);
-    part.state = 1;
+    part.state = entry.state === 0 ? 0 : 1;
   }
 
   function enqueuePart(u, part) {
-    if (!state.enabled) return;
+    if (!state.enabled || state.dead) return;
     if (!state.targetLang) {
       part.state = 4;
       return;
@@ -2388,23 +2130,24 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
       attachPart(existing, u, part);
       return;
     }
-    const cached = cacheGet(text, provider);
-    if (cached !== undefined) {
-      const hit = { text: text, state: 3, translated: cached, parts: [], provider: provider };
-      state.textEntries.set(text, hit);
-      attachPart(hit, u, part);
-      return;
-    }
-    state.stats.cacheMisses++;
-    const entry = { text: text, state: 1, translated: null, parts: [], provider: provider };
+    // state 0: waiting for the mod's cache reply; 1: queued/in flight.
+    const entry = { text: text, state: 0, translated: null, parts: [], provider: provider };
     state.textEntries.set(text, entry);
     attachPart(entry, u, part);
+    if (state.settings.cacheEnabled) requestCached(entry);
+    else queueEntry(entry);
+  }
+
+  function queueEntry(entry) {
+    if (state.dead || entry.state !== 0) return;
+    entry.state = 1;
+    for (const p of entry.parts) p.state = 1;
     state.queue.push(entry);
     scheduleFlush();
   }
 
   function scheduleFlush() {
-    if (state.flushTimer) return;
+    if (state.flushTimer || state.dead) return;
     const ms = clamp(state.settings.batchIntervalMs, 0, 10000);
     state.flushTimer = setTimeout(() => {
       state.flushTimer = 0;
@@ -2413,7 +2156,7 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
   }
 
   function flushQueue() {
-    if (!state.enabled || !state.targetLang) return;
+    if (state.dead || !state.enabled || !state.targetLang) return;
     const s = state.settings;
     // The LLM protocol is capped harder than Edge: 12 segments / 6000 chars.
     const llm = activeProvider() === 'llm';
@@ -2444,12 +2187,12 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
     if (state.queue.length) scheduleFlush();
   }
 
-  function finishEntry(entry, translated, provider) {
+  // Fan a finished translation out to every part that still belongs to a live
+  // unit. Used for both a cache hit and a provider reply.
+  function completeEntry(entry, translated, provider) {
     entry.translated = translated;
     entry.state = 3;
     entry.provider = provider || activeProvider();
-    cacheSet(entry.text, translated, entry.provider);
-    state.stats.translations++;
     const units = new Set();
     const live = [];
     for (const p of entry.parts) {
@@ -2463,6 +2206,15 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
     }
     entry.parts = live;
     for (const u of units) maybeFinishUnit(u);
+  }
+
+  function finishEntry(entry, translated, provider) {
+    const produced = provider || activeProvider();
+    completeEntry(entry, translated, produced);
+    // Store under the provider that actually produced the text: an Edge result
+    // from an LLM fallback is an Edge cache entry, never an LLM one.
+    cacheSet(entry.text, translated, produced);
+    state.stats.translations++;
   }
 
   function failEntry(entry) {
@@ -2539,7 +2291,6 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
       const res = await httpRequest({
         method: 'POST',
         url: url,
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(texts)
       });
       if (!state.enabled || state.epoch !== epoch) return null;
@@ -2564,22 +2315,16 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
     const url = llmUrl();
     if (!url) return { why: 'no LLM endpoint configured', texts: null };
     const body = buildLlmBody(entries);
-    if (state.settings.debug) {
-      // Debug only, truncated; the API key never exists on this side. Strip a
-      // query string so a key embedded in the base URL cannot leak either.
-      const logUrl = url.replace(/[?#].*$/, '');
-      log('llm POST ' + logUrl + ' body=' + body.slice(0, 240) + (body.length > 240 ? '...' : ''));
-    }
     let why = '';
     for (let attempt = 0; attempt <= 1; attempt++) {
       if (!state.enabled || state.epoch !== epoch) return null;
       if (state.llmFallback) return { why: 'fallback active', texts: null };
-      // No Authorization header here: the page never sees the key; the mod
-      // injects it for the llmBaseUrl host (docs/PROTOCOL.md).
+      // No headers here: the page never sees the key; the mod sets
+      // Content-Type and Authorization for the llmBaseUrl host
+      // (docs/PROTOCOL.md).
       const res = await httpRequest({
         method: 'POST',
         url: url,
-        headers: { 'Content-Type': 'application/json' },
         body: body
       });
       if (!state.enabled || state.epoch !== epoch) return null;
@@ -2599,7 +2344,6 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
         res.error === -2 || res.error === 12002 ||
         res.status === 429 || (res.status >= 500 && res.status <= 599);
       if (!retryable || attempt >= 1) break;
-      log('llm retry after ' + why);
       await sleep(400 + Math.random() * 200);
     }
     return { why: why, texts: null };
@@ -2686,253 +2430,154 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
   }
 
   // ---------------------------------------------------------------------------
-  // Cache (localStorage, keyed by provider|model|lang|hash, 3 MB LRU)
+  // Cache (the mod owns the store; the page only looks keys up and stores)
+  //
+  // Key format:
+  //   whtr1|v4|<provider>|<model>|<lang>|<baseUrl>|<glossaryHash>|<hash64>|<length>
+  // The endpoint and the effective glossary are part of the identity, so
+  // changing either cannot serve a translation produced under the old config.
+  // A lookup is one `cache-get` carrying a per-page request id and resolves on
+  // a `cache-hit` / `cache-miss` that echoes both that id and the key; a store
+  // is one `cache-put` that is never awaited.
   // ---------------------------------------------------------------------------
 
-  // v1 keys were keyed by raw whitespace and may hold a different wording, so
-  // they are purged rather than read. v3 adds provider and model to every key.
-  const CACHE_ROOT = 'whtr1|';
-  const CACHE_VERSION = 'v3';
-  const CACHE_PREFIX = CACHE_ROOT + CACHE_VERSION + '|';
-  const CACHE_LIMIT = 3 * 1024 * 1024;
-  const CACHE_TARGET = Math.floor(CACHE_LIMIT * 0.8);
-  let cacheIndex = null;
-  let cacheTotal = 0;
-  let cacheWarned = false;
+  const CACHE_VERSION = 'v4';
+  const CACHE_PREFIX = 'whtr1|' + CACHE_VERSION + '|';
+  const CACHE_LOOKUP_TIMEOUT_MS = 5000;
 
-  function storage() {
-    try {
-      return window.localStorage || null;
-    } catch (_) {
-      return null;
-    }
+  // The endpoint is part of the key: two LLM hosts may answer differently.
+  function cacheBaseUrl() {
+    return String(state.settings.llmBaseUrl || '').trim().replace(/\/+$/, '');
+  }
+
+  // A stable fingerprint of the effective glossary, normalised and deduped the
+  // same way the prompt builds it.
+  function cacheGlossaryHash() {
+    const entries = glossaryEntries();
+    if (!entries.length) return '';
+    return hash32(entries.map(([src, dst]) => src + '=' + dst).join('\n'));
   }
 
   function cacheKey(text, provider) {
     const p = provider || activeProvider();
     return (
       CACHE_PREFIX + p + '|' + String(state.settings.llmModel || '').trim() + '|' + state.targetLang + '|' +
-      hash32(text) + '|' + text.length
+      cacheBaseUrl() + '|' + cacheGlossaryHash() + '|' + hash64(text) + '|' + text.length
     );
   }
 
-  function cacheTtlMs() {
-    const days = clamp(state.settings.cacheTtlDays, 0, 3650);
-    return days > 0 ? days * 86400000 : 0;
+  // Fire-and-forget: the mod owns the store, the page keeps only this session's
+  // registry. No reply is expected.
+  function cacheSet(text, translated, provider) {
+    if (!state.settings.cacheEnabled || state.dead) return;
+    if (typeof translated !== 'string') return;
+    send(TAG + SEP + 'cache-put' + SEP + cacheKey(text, provider) + SEP + translated);
   }
 
-  function cacheEnsureIndex() {
-    if (cacheIndex) return;
-    cacheIndex = new Map();
-    cacheTotal = 0;
-    const ls = storage();
-    if (!ls) return;
-    const keys = [];
-    const stale = [];
+  function warnCacheOnce() {
+    if (state.cacheWarned) return;
+    state.cacheWarned = true;
+    log(
+      'cache: no reply within ' + CACHE_LOOKUP_TIMEOUT_MS / 1000 +
+      ' s; the cache is not answering, translating without it'
+    );
+  }
+
+  // Remove one pending lookup and stop its deadline. Both the id and the key
+  // must match: a reply for an id nobody is waiting for, or one whose key
+  // disagrees with the record, returns null and is ignored.
+  function forgetLookup(id, key) {
+    const pending = state.cacheLookups.get(id);
+    if (!pending || pending.key !== key) return null;
+    state.cacheLookups.delete(id);
+    state.cacheLookupKeys.delete(pending.key);
     try {
-      for (let i = 0; i < ls.length; i++) {
-        const key = ls.key(i);
-        if (!key || key.indexOf(CACHE_ROOT) !== 0) continue;
-        if (key.indexOf(CACHE_PREFIX) === 0) keys.push(key);
-        else stale.push(key);
-      }
+      clearTimeout(pending.timer);
     } catch (_) {
+      /* ignore */
+    }
+    return pending.entry;
+  }
+
+  // Drop every outstanding lookup. With `retry`, entries still waiting are
+  // counted as misses and translated normally (a cache clear invalidated the
+  // store); otherwise their units are being torn down and nothing is queued.
+  function clearCacheLookups(retry) {
+    const pendingList = Array.from(state.cacheLookups.values());
+    state.cacheLookups.clear();
+    state.cacheLookupKeys.clear();
+    for (const pending of pendingList) {
+      try {
+        clearTimeout(pending.timer);
+      } catch (_) {
+        /* ignore */
+      }
+      if (retry && !state.dead && pending.entry.state === 0) {
+        state.stats.cacheMisses++;
+        queueEntry(pending.entry);
+      }
+    }
+  }
+
+  function requestCached(entry) {
+    // No channel (or a dead engine): skip the cache and translate normally.
+    if (state.dead || !CHANNEL()) {
+      queueEntry(entry);
       return;
     }
-    for (const key of stale) {
-      try {
-        ls.removeItem(key);
-      } catch (_) {
-        /* ignore */
-      }
+    const key = cacheKey(entry.text, entry.provider);
+    if (state.cacheLookupKeys.has(key)) {
+      // A hash collision on a key that is already being looked up: do not
+      // overwrite the pending record, just translate this string normally.
+      queueEntry(entry);
+      return;
     }
-    for (const key of keys) {
-      let value = null;
-      try {
-        value = ls.getItem(key);
-      } catch (_) {
-        value = null;
-      }
-      if (value == null) continue;
-      let rec = null;
-      try {
-        rec = JSON.parse(value);
-      } catch (_) {
-        rec = null;
-      }
-      if (!rec || typeof rec.t !== 'string' || typeof rec.at !== 'number') {
-        try {
-          ls.removeItem(key);
-        } catch (_) {
-          /* ignore */
-        }
-        continue;
-      }
-      const bytes = (key.length + value.length) * 2;
-      cacheIndex.set(key, { bytes: bytes, at: rec.at, used: rec.used || rec.at });
-      cacheTotal += bytes;
+    // The id is monotonic for the page and shared with http requests, so no
+    // reply can ever be mistaken for a later lookup.
+    const id = state.nextRequestId++;
+    const timer = setTimeout(() => {
+      const pending = state.cacheLookups.get(id);
+      if (!pending || pending.entry !== entry) return;
+      forgetLookup(id, key);
+      if (state.dead || entry.state !== 0) return;
+      warnCacheOnce();
+      state.stats.cacheMisses++;
+      queueEntry(entry);
+    }, CACHE_LOOKUP_TIMEOUT_MS);
+    state.cacheLookups.set(id, { id: id, key: key, entry: entry, timer: timer });
+    state.cacheLookupKeys.add(key);
+    if (!send(TAG + SEP + 'cache-get' + SEP + String(id) + SEP + key)) {
+      // The channel vanished between the check and the send: no reply will
+      // ever come, so translate now.
+      forgetLookup(id, key);
+      queueEntry(entry);
     }
   }
 
-  function cacheGet(text, provider) {
-    if (!state.settings.cacheEnabled) return undefined;
-    const ls = storage();
-    if (!ls) return undefined;
-    cacheEnsureIndex();
-    const key = cacheKey(text, provider);
-    let raw = null;
-    try {
-      raw = ls.getItem(key);
-    } catch (_) {
-      return undefined;
-    }
-    if (raw == null) return undefined;
-    let rec = null;
-    try {
-      rec = JSON.parse(raw);
-    } catch (_) {
-      rec = null;
-    }
-    if (!rec || typeof rec.t !== 'string' || typeof rec.at !== 'number') {
-      try {
-        ls.removeItem(key);
-      } catch (_) {
-        /* ignore */
-      }
-      const old = cacheIndex.get(key);
-      if (old) {
-        cacheTotal -= old.bytes;
-        cacheIndex.delete(key);
-      }
-      return undefined;
-    }
-    const ttl = cacheTtlMs();
-    if (ttl > 0 && Date.now() - rec.at > ttl) {
-      try {
-        ls.removeItem(key);
-      } catch (_) {
-        /* ignore */
-      }
-      const old = cacheIndex.get(key);
-      if (old) {
-        cacheTotal -= old.bytes;
-        cacheIndex.delete(key);
-      }
-      return undefined;
-    }
-    // LRU touch at most once an hour to keep writes rare.
-    const used = rec.used || rec.at;
-    if (Date.now() - used > 3600000) {
-      rec.used = Date.now();
-      try {
-        ls.setItem(key, JSON.stringify(rec));
-      } catch (_) {
-        /* ignore */
-      }
-    }
-    const info = cacheIndex.get(key);
-    if (info) info.used = Date.now();
-    return rec.t;
+  function onCacheHit(parts) {
+    // parts: [tag, 'cache-hit', requestId, key, text]
+    const entry = forgetLookup(Number(parts[2]), parts[3]);
+    if (!entry || entry.state !== 0) return;
+    state.stats.cacheHits++;
+    completeEntry(entry, parts[4] == null ? '' : parts[4], entry.provider);
   }
 
-  function cacheSet(text, translated, provider) {
-    if (!state.settings.cacheEnabled) return;
-    if (typeof translated !== 'string') return;
-    const ls = storage();
-    if (!ls) return;
-    cacheEnsureIndex();
-    const key = cacheKey(text, provider);
-    const value = JSON.stringify({ t: translated, at: Date.now(), used: Date.now() });
-    try {
-      ls.setItem(key, value);
-    } catch (e) {
-      if (!cacheWarned) {
-        cacheWarned = true;
-        log('cache write failed: ' + (e && e.message ? e.message : e));
-      }
-      cacheTrimHard();
-      try {
-        ls.setItem(key, value);
-      } catch (_) {
-        return;
-      }
-    }
-    const old = cacheIndex.get(key);
-    if (old) cacheTotal -= old.bytes;
-    const bytes = (key.length + value.length) * 2;
-    cacheIndex.set(key, { bytes: bytes, at: Date.now(), used: Date.now() });
-    cacheTotal += bytes;
-    if (cacheTotal > CACHE_LIMIT) cacheTrim(CACHE_TARGET);
+  function onCacheMiss(parts) {
+    // parts: [tag, 'cache-miss', requestId, key]
+    const entry = forgetLookup(Number(parts[2]), parts[3]);
+    if (!entry || entry.state !== 0) return;
+    state.stats.cacheMisses++;
+    queueEntry(entry);
   }
 
-  function cacheTrim(limit) {
-    if (!cacheIndex) return;
-    const ls = storage();
-    if (!ls) return;
-    const ttl = cacheTtlMs();
-    const now = Date.now();
-    const entries = Array.from(cacheIndex.entries()).sort((a, b) => {
-      return (a[1].used || a[1].at) - (b[1].used || b[1].at);
-    });
-    for (const [key, info] of entries) {
-      const expired = ttl > 0 && now - info.at > ttl;
-      if (!expired && cacheTotal <= limit) break;
-      try {
-        ls.removeItem(key);
-      } catch (_) {
-        /* ignore */
-      }
-      cacheIndex.delete(key);
-      cacheTotal -= info.bytes;
-    }
-  }
-
-  function cacheTrimHard() {
-    if (!cacheIndex) return;
-    const ls = storage();
-    if (!ls) return;
-    const entries = Array.from(cacheIndex.entries()).sort((a, b) => {
-      return (a[1].used || a[1].at) - (b[1].used || b[1].at);
-    });
-    const target = Math.floor(cacheTotal / 2);
-    for (const [key, info] of entries) {
-      if (cacheTotal <= target) break;
-      try {
-        ls.removeItem(key);
-      } catch (_) {
-        /* ignore */
-      }
-      cacheIndex.delete(key);
-      cacheTotal -= info.bytes;
-    }
-  }
-
+  // The engine forgets its in-session map; the mod clears its own store when it
+  // applies the clearCache setting. Outstanding lookups were answered from the
+  // old store, so they are dropped and their strings translated normally.
   function cacheClear() {
-    const ls = storage();
-    cacheIndex = new Map();
-    cacheTotal = 0;
-    // Completed in-session entries are part of the cache; in-flight ones stay.
+    clearCacheLookups(true);
     for (const [text, entry] of Array.from(state.textEntries)) {
       if (entry.state === 3) state.textEntries.delete(text);
     }
-    if (!ls) return;
-    const keys = [];
-    try {
-      for (let i = 0; i < ls.length; i++) {
-        const key = ls.key(i);
-        if (key && key.indexOf(CACHE_ROOT) === 0) keys.push(key);
-      }
-    } catch (_) {
-      return;
-    }
-    for (const key of keys) {
-      try {
-        ls.removeItem(key);
-      } catch (_) {
-        /* ignore */
-      }
-    }
-    log('cache cleared');
   }
 
   // ---------------------------------------------------------------------------
@@ -3189,7 +2834,7 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
   // ---------------------------------------------------------------------------
 
   function scheduleRender(u) {
-    if (!u) return;
+    if (!u || state.dead) return;
     state.renderQueue.add(u);
     if (state.renderScheduled) return;
     state.renderScheduled = true;
@@ -3212,7 +2857,7 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
   }
 
   function scheduleRenderIdle() {
-    if (state.renderScheduled) return;
+    if (state.renderScheduled || state.dead) return;
     state.renderScheduled = true;
     idle(() => {
       state.renderScheduled = false;
@@ -3619,7 +3264,7 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
       observer.observe(target, { childList: true, subtree: true, characterData: true });
       state.observer = observer;
     } catch (e) {
-      log('observer unavailable: ' + (e && e.message ? e.message : e));
+      problem('observer unavailable: ' + (e && e.message ? e.message : e));
     }
   }
 
@@ -3715,7 +3360,6 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
     next.cacheTtlDays = clamp(next.cacheTtlDays, 0, 3650);
     next.gestureToggle = next.gestureToggle !== false;
     if (!next.gestureToggle) lastTwoFingerTapAt = 0;
-    next.debug = !!next.debug;
 
     state.settings = next;
     state.settingsSeen = true;
@@ -3734,20 +3378,14 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
     state.shortcuts.toggle = parseShortcut(next.shortcutToggle);
 
     if (next.clearCache) {
+      // The mod clears its own store; the page forgets this session's map.
       cacheClear();
       next.clearCache = false;
     }
-    if (next.cacheEnabled) cacheEnsureIndex();
 
     const isFirst = state.settingsCount === 0;
     state.settingsCount++;
     const changed = isFirst || prevProvider !== provider || rebuildKeysChanged(prev, next);
-
-    log(
-      'settings: lang=' + state.targetLang + ' provider=' + state.provider +
-      ' scopes=' + [next.scopeReadme, next.scopeSettings, next.scopeModName, next.scopeModSummary, next.scopeChangelog].join('') +
-      ' debug=' + next.debug
-    );
 
     if (!state.targetLang) problem('no target language resolved; idle');
 
@@ -3762,6 +3400,7 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
   }
 
   function setEnabled(on) {
+    if (state.dead) return;
     on = !!on;
     resetPointerState();
     if (state.enabled === on) {
@@ -3775,7 +3414,6 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
     state.epoch++;
     teardownAll();
     if (on) {
-      log('enabled');
       // Recovery from any state: without settings there is nothing to scan.
       if (!state.settingsSeen) {
         if (!state.connected) connect();
@@ -3783,22 +3421,24 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
       } else {
         scheduleScan(0);
       }
-    } else {
-      log('disabled');
     }
   }
 
   function onMessage(e) {
+    if (state.dead) return;
     try {
       const data = e && e.data;
       if (typeof data !== 'string' || data.indexOf(TAG + SEP) !== 0) return;
+      if (data === TAG + SEP + 'teardown') {
+        teardown();
+        return;
+      }
       if (data.indexOf(TAG + SEP + 'http' + SEP) === 0) {
-        const parts = data.split(SEP, 6);
-        onHttpReply(parts);
+        onHttpReply(splitFields(data, 6));
         return;
       }
       if (data.indexOf(TAG + SEP + 'settings' + SEP) === 0) {
-        const parts = data.split(SEP, 3);
+        const parts = splitFields(data, 3);
         let json = null;
         try {
           json = JSON.parse(parts[2]);
@@ -3806,6 +3446,14 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
           json = null;
         }
         if (json && typeof json === 'object') applySettings(json);
+        return;
+      }
+      if (data.indexOf(TAG + SEP + 'cache-hit' + SEP) === 0) {
+        onCacheHit(splitFields(data, 5));
+        return;
+      }
+      if (data.indexOf(TAG + SEP + 'cache-miss' + SEP) === 0) {
+        onCacheMiss(splitFields(data, 4));
       }
     } catch (err) {
       problem('message: ' + (err && err.message ? err.message : err));
@@ -3813,27 +3461,31 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
   }
 
   function requestSettings() {
+    if (state.dead) return;
     state.settingsAttempts++;
     send(TAG + SEP + 'settings?');
     if (!state.settingsSeen && state.settingsAttempts < 3) {
-      setTimeout(() => {
+      state.settingsTimer = setTimeout(() => {
+        state.settingsTimer = 0;
         if (!state.settingsSeen) safe(requestSettings, 'settings-retry');
       }, 1500 * state.settingsAttempts);
     }
   }
 
   function connect() {
+    if (state.dead) return false;
     const wv = CHANNEL();
     if (!wv) return false;
     if (!state.connected) {
       try {
-        wv.addEventListener('message', (e) => safe(() => onMessage(e), 'message'));
+        const listener = (e) => safe(() => onMessage(e), 'message');
+        wv.addEventListener('message', listener);
+        state.messageListener = listener;
         state.connected = true;
       } catch (e) {
         problem('message listener: ' + (e && e.message ? e.message : e));
         return false;
       }
-      log('engine ' + VERSION + ' connected; href=' + location.href);
       requestSettings();
       scheduleScan(250);
     }
@@ -3855,26 +3507,116 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
     }
   }
 
-  function installInputHandlers() {
+  const inputHandlers = [];
+
+  function listen(target, type, fn, options) {
+    const wrapped = (e) => safe(() => fn(e), type);
     try {
-      document.addEventListener('pointerover', (e) => safe(() => onPointerOver(e), 'pointerover'), true);
-      document.addEventListener('pointerout', (e) => safe(() => onPointerOut(e), 'pointerout'), true);
-      document.addEventListener('pointerdown', (e) => safe(() => onPointerDown(e), 'pointerdown'), true);
-      document.addEventListener('pointermove', (e) => safe(() => onPointerMove(e), 'pointermove'), true);
-      document.addEventListener('pointerup', (e) => safe(() => onPointerUp(e), 'pointerup'), true);
-      document.addEventListener('pointercancel', (e) => safe(() => onPointerCancel(e), 'pointercancel'), true);
-      window.addEventListener('keydown', (e) => safe(() => onKeyDown(e), 'keydown'));
-      window.addEventListener('load', () => {
-        safe(() => {
-          if (state.settingsSeen) scheduleScan(200);
-        }, 'load');
-      });
+      target.addEventListener(type, wrapped, options);
+      inputHandlers.push([target, type, wrapped, options]);
     } catch (e) {
       problem('listeners: ' + (e && e.message ? e.message : e));
     }
   }
 
+  function removeInputHandlers() {
+    for (const [target, type, fn, options] of inputHandlers) {
+      try {
+        target.removeEventListener(type, fn, options);
+      } catch (_) {
+        /* ignore */
+      }
+    }
+    inputHandlers.length = 0;
+  }
+
+  function installInputHandlers() {
+    listen(document, 'pointerover', onPointerOver, true);
+    listen(document, 'pointerout', onPointerOut, true);
+    listen(document, 'pointerdown', onPointerDown, true);
+    listen(document, 'pointermove', onPointerMove, true);
+    listen(document, 'pointerup', onPointerUp, true);
+    listen(document, 'pointercancel', onPointerCancel, true);
+    listen(window, 'keydown', onKeyDown, false);
+    listen(window, 'load', () => {
+      if (state.settingsSeen) scheduleScan(200);
+    }, false);
+  }
+
+  function detachChannel() {
+    const wv = CHANNEL();
+    if (!wv || !state.messageListener) return;
+    try {
+      wv.removeEventListener('message', state.messageListener);
+    } catch (_) {
+      /* ignore */
+    }
+    state.messageListener = null;
+  }
+
+  // `teardown`: the mod is unloading. Run the disable path synchronously and
+  // never talk to the mod again. No reply.
+  function teardown() {
+    if (state.dead) return;
+    state.dead = true;
+    state.enabled = false;
+    state.epoch++;
+    try {
+      if (state.observer) state.observer.disconnect();
+    } catch (_) {
+      /* ignore */
+    }
+    state.observer = null;
+    detachChannel();
+    removeInputHandlers();
+    resetPointerState();
+    state.scanQueue = null;
+    state.scanScheduled = false;
+    state.renderScheduled = false;
+    if (state.scanTimer) {
+      clearTimeout(state.scanTimer);
+      state.scanTimer = 0;
+    }
+    if (state.settingsTimer) {
+      clearTimeout(state.settingsTimer);
+      state.settingsTimer = 0;
+    }
+    for (const entry of Array.from(state.pending.values())) {
+      try {
+        clearTimeout(entry.timer);
+      } catch (_) {
+        /* ignore */
+      }
+      try {
+        entry.resolve({ status: 0, body: '', error: -1 });
+      } catch (_) {
+        /* ignore */
+      }
+    }
+    state.pending.clear();
+    clearCacheLookups();
+    teardownAll();
+    try {
+      const style = document.getElementById('whtr-style');
+      if (style && style.parentNode) style.parentNode.removeChild(style);
+    } catch (_) {
+      /* ignore */
+    }
+    // A later injection in the same document must build a fresh engine, not
+    // revive this dead one.
+    try {
+      if (window.__WHTR__ === publicApi) delete window.__WHTR__;
+    } catch (_) {
+      try {
+        window.__WHTR__ = undefined;
+      } catch (_) {
+        /* ignore */
+      }
+    }
+  }
+
   function revivify() {
+    if (state.dead) return;
     if (!state.connected) connect();
     if (!state.settingsSeen) requestSettings();
     if (state.enabled && state.settingsSeen) scheduleScan(0);
@@ -3885,14 +3627,27 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
   // ---------------------------------------------------------------------------
 
   try {
-    if (window.__WHTR__ && window.__WHTR__.__engine) {
-      // The navigation-completed injection must not build a second engine.
-      try {
-        window.__WHTR__.__engine.revive();
-      } catch (_) {
-        /* ignore */
+    const prev = window.__WHTR__;
+    const engine = prev && prev.__engine;
+    if (engine && typeof engine.revive === 'function') {
+      // A leftover handle from a dead engine is replaced; only a live engine
+      // makes this the navigation-completed re-injection.
+      let alive = true;
+      if (typeof engine.alive === 'function') {
+        try {
+          alive = !!engine.alive();
+        } catch (_) {
+          alive = false;
+        }
       }
-      return;
+      if (alive) {
+        try {
+          engine.revive();
+        } catch (_) {
+          /* ignore */
+        }
+        return;
+      }
     }
   } catch (_) {
     /* ignore */
@@ -3905,20 +3660,21 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
 
     const deadline = Date.now() + 5000;
     const boot = () => {
+      if (state.dead) return;
       if (connect()) return;
       if (Date.now() < deadline) setTimeout(() => safe(boot, 'boot'), 50);
     };
     boot();
 
-    window.__WHTR__ = {
-      __engine: { revive: revivify },
+    publicApi = {
+      __engine: { revive: revivify, alive: () => !state.dead },
       version: VERSION,
       enable: () => safe(() => setEnabled(true), 'api.enable'),
       disable: () => safe(() => setEnabled(false), 'api.disable'),
       stats: () => safe(snapshot, 'api.stats') || {},
       rescan: () => safe(() => scheduleScan(0), 'api.rescan')
     };
-    log('engine armed ' + VERSION);
+    window.__WHTR__ = publicApi;
   } catch (e) {
     try {
       problem('boot: ' + (e && e.message ? e.message : e));
@@ -3968,6 +3724,8 @@ using FnGetBool = HRESULT(STDMETHODCALLTYPE*)(void*, BOOL*);
 using FnPutBool = HRESULT(STDMETHODCALLTYPE*)(void*, BOOL);
 using FnAddScript =
     HRESULT(STDMETHODCALLTYPE*)(void*, LPCWSTR, void*);
+using FnRemoveScript =
+    HRESULT(STDMETHODCALLTYPE*)(void*, LPCWSTR);
 using FnExecuteScript =
     HRESULT(STDMETHODCALLTYPE*)(void*, LPCWSTR, void*);
 using FnPostWebMessageAsString =
@@ -4112,16 +3870,295 @@ static HRESULT P0SafeForwardControllerHandler(void* app,
 }
 
 // ---------------------------------------------------------------------------
+// Mod lifecycle
+//
+// One atomic state drives every entry point: Init -> Running -> Stopping ->
+// Stopped. No entry point does any work unless the state is Running (the
+// teardown path itself is the only exception, and it is driven by the UI
+// thread). The state is set to Stopping as the very first thing
+// Wh_ModBeforeUninit does, so no new work can be admitted while the pool, the
+// cache saver and the WebView2 objects are being torn down.
+// ---------------------------------------------------------------------------
+
+enum class P1Lifecycle : int {
+    Init = 0,
+    Running,
+    Stopping,
+    Stopped,
+};
+
+static std::atomic<P1Lifecycle> g_p1Lifecycle{P1Lifecycle::Init};
+
+static bool P1IsRunning() {
+    return g_p1Lifecycle.load(std::memory_order_acquire) ==
+           P1Lifecycle::Running;
+}
+
+// Number of COM callback objects handed to WebView2 that have not reached
+// their final Release yet. Every wrapper passed to a WebView2 method is
+// counted before the call; P0WrapperRelease decrements it after the finalizer
+// ran. The UI-thread teardown pumps messages until it reaches zero before the
+// DLL may unload.
+//
+// Number of webview references held by AddScript completion handlers. The
+// reference keeps the webview alive until the completion arrives, so a late
+// completion can still remove the document-created script. The teardown pumps
+// for this counter as well; P0ReleaseScriptWebView transfers the reference to
+// the UI-thread release queue and decrements it.
+//
+// Both counters and the thread id of the last decrement share one lock, so the
+// teardown reads them as one snapshot: a decrement that takes a counter to
+// zero records its thread id in the same critical section, and a zero counter
+// can therefore never be paired with the thread id of an older release.
+static SRWLOCK g_p0OutstandingLock = SRWLOCK_INIT;
+static long g_p0OutstandingCallbacks = 0;      // g_p0OutstandingLock
+static long g_p0OutstandingAddScriptRefs = 0;  // g_p0OutstandingLock
+static DWORD g_p0LastReleaseThreadId = 0;      // g_p0OutstandingLock
+
+struct P0OutstandingSnapshot {
+    long callbacks;
+    long addScriptRefs;
+    DWORD lastReleaseThreadId;
+};
+
+static P0OutstandingSnapshot P0ReadOutstanding() {
+    P0OutstandingSnapshot snapshot{};
+    AcquireSRWLockExclusive(&g_p0OutstandingLock);
+    snapshot.callbacks = g_p0OutstandingCallbacks;
+    snapshot.addScriptRefs = g_p0OutstandingAddScriptRefs;
+    snapshot.lastReleaseThreadId = g_p0LastReleaseThreadId;
+    ReleaseSRWLockExclusive(&g_p0OutstandingLock);
+    return snapshot;
+}
+
+static void P0CountHandedOver() {
+    AcquireSRWLockExclusive(&g_p0OutstandingLock);
+    ++g_p0OutstandingCallbacks;
+    ReleaseSRWLockExclusive(&g_p0OutstandingLock);
+}
+
+static void P0CountCallbackReleased() {
+    AcquireSRWLockExclusive(&g_p0OutstandingLock);
+    --g_p0OutstandingCallbacks;
+    if (g_p0OutstandingCallbacks == 0) {
+        // The decrement that reaches zero is the last piece of module code
+        // that runs for this counter. The teardown compares this thread with
+        // the UI thread that owns the objects.
+        g_p0LastReleaseThreadId = GetCurrentThreadId();
+    }
+    ReleaseSRWLockExclusive(&g_p0OutstandingLock);
+}
+
+static void P0CountAddScriptRefHeld() {
+    AcquireSRWLockExclusive(&g_p0OutstandingLock);
+    ++g_p0OutstandingAddScriptRefs;
+    ReleaseSRWLockExclusive(&g_p0OutstandingLock);
+}
+
+static void P0CountAddScriptRefReleased() {
+    AcquireSRWLockExclusive(&g_p0OutstandingLock);
+    --g_p0OutstandingAddScriptRefs;
+    if (g_p0OutstandingAddScriptRefs == 0) {
+        g_p0LastReleaseThreadId = GetCurrentThreadId();
+    }
+    ReleaseSRWLockExclusive(&g_p0OutstandingLock);
+}
+
+// Nesting depth of this module's wrapper entry points on the current thread.
+// A positive value means our code is on that thread's stack right now: the
+// teardown reads it at entry to detect a teardown that was entered from inside
+// one of our own callbacks (for example an Invoke that pumped messages).
+//
+// The depth must not live in module thread_local storage: Windhawk's loader
+// does not register a mod's TLS directory, so a module thread_local access
+// reads TEB->ThreadLocalStoragePointer (gs:0x58) before it is populated and
+// faults at startup. It uses a Win32 TLS slot instead, allocated once in
+// Wh_ModInit before the GetProcAddress hook can admit a wrapper.
+//
+// TLS_OUT_OF_INDEXES (or a failed TlsSetValue) means the depth is unknown.
+// P0GetWrapperDepth then returns -1, which every teardown check treats as
+// "not zero" and pins the module instead of unloading it.
+static std::atomic<DWORD> g_p0DepthTlsIndex{TLS_OUT_OF_INDEXES};
+static std::atomic<bool> g_p0DepthTlsFailed{false};
+
+// Set by the unload decision whenever the module must not be freed: a module
+// reference is held, or the reference could not be taken at all. In both cases
+// the depth TLS slot is never freed, because module code may still run while
+// the image is mapped.
+static std::atomic<bool> g_p0StayResident{false};
+
+// True only once a real loader reference to this image was taken (see
+// P1HoldModuleReference). The reference is never released.
+static std::atomic<bool> g_p0ModuleReferenceHeld{false};
+
+// Sticky: at least one wrapper call was observed on a thread that is not the
+// WebView2 UI thread. This is an unconditional pin at teardown.
+//
+// A snapshot of g_p0ActiveWrapperCalls cannot prove that another thread's frame
+// is gone: the counter is decremented at the end of the scope's destructor,
+// before the rest of the destructor and the wrapper's return instructions run.
+// A non-UI thread can be preempted in exactly that window; a later UI-thread
+// release then takes the outstanding counter to zero, the snapshot looks quiet,
+// and the unload would resume into unmapped code. The flag is therefore
+// recorded for the lifetime of the process, not sampled.
+//
+// Consequence, accepted: when WebView2 releases a handler on one of its own
+// threads, the mod stays resident after a disable. That is a leak, and it is
+// always preferable to running code from an unmapped image.
+static std::atomic<bool> g_p0WrapperCallOutsideUiThread{false};
+
+// True while the thread id of the WebView2 UI thread is known and threadId is
+// that thread. Defined with the dispatcher state below.
+static bool P1IsWebView2UiThread(DWORD threadId);
+
+static long P0GetWrapperDepth() {
+    if (g_p0DepthTlsFailed.load(std::memory_order_acquire)) {
+        return -1;
+    }
+    DWORD index = g_p0DepthTlsIndex.load(std::memory_order_acquire);
+    if (index == TLS_OUT_OF_INDEXES) {
+        return -1;
+    }
+    return static_cast<long>(
+        reinterpret_cast<INT_PTR>(TlsGetValue(index)));
+}
+
+static bool P0SetWrapperDepth(long depth) {
+    DWORD index = g_p0DepthTlsIndex.load(std::memory_order_acquire);
+    if (index == TLS_OUT_OF_INDEXES) {
+        return false;
+    }
+    if (!TlsSetValue(index,
+                     reinterpret_cast<void*>(static_cast<INT_PTR>(depth)))) {
+        // A slot that cannot be written makes the depth unprovable forever.
+        // The teardown reads the flag and pins.
+        g_p0DepthTlsFailed.store(true, std::memory_order_release);
+        return false;
+    }
+    return true;
+}
+
+// Wrapper entry points executing on any thread. The teardown pump waits for
+// this to reach zero as well: a final release that is not the last decrement
+// can still leave another thread inside a callback's tail, and that thread
+// must have returned before the image may go away.
+static std::atomic<long> g_p0ActiveWrapperCalls{0};
+
+// Frees the depth slot only when this module is certain to unload: the unload
+// decision proved quiescence and took no reference. The index is retired first,
+// so any late reader sees "unknown" instead of a slot that has been recycled.
+//
+// A wrapper scope increments g_p0ActiveWrapperCalls before it reads the index
+// and decrements it only after the depth is restored (see below). If a call is
+// still active after the index was retired, it may have loaded the old index
+// and could be about to call TlsSetValue; the slot is then left allocated (one
+// leaked slot on an abnormal path) instead of being freed under that caller.
+static void P0FreeDepthTlsIfUnloadable() {
+    if (g_p0StayResident.load(std::memory_order_acquire)) {
+        return;
+    }
+    DWORD index = g_p0DepthTlsIndex.exchange(TLS_OUT_OF_INDEXES,
+                                             std::memory_order_acq_rel);
+    if (index == TLS_OUT_OF_INDEXES) {
+        return;
+    }
+    if (g_p0ActiveWrapperCalls.load(std::memory_order_acquire) != 0) {
+        return;
+    }
+    TlsFree(index);
+}
+
+struct P0WrapperCallScope {
+    // Depth to restore on exit, or -1 when the depth is unknown.
+    long previous = -1;
+
+    // webView2Callback selects whether this entry point can be called by
+    // WebView2 itself. Only those calls feed the sticky "outside the UI thread"
+    // pin. The GetProcAddress hook runs on every thread in the process by
+    // design, so counting it there would pin on essentially every unload and
+    // make the prove-or-pin decision useless; it is still counted in
+    // g_p0ActiveWrapperCalls for the whole call.
+    explicit P0WrapperCallScope(bool webView2Callback = true) {
+        // The counter is incremented before the index is read and decremented
+        // only after the depth is restored, so a zero counter proves that no
+        // thread is between loading the TLS index and writing the slot. The
+        // teardown relies on this when it decides whether TlsFree is safe.
+        g_p0ActiveWrapperCalls.fetch_add(1, std::memory_order_acq_rel);
+
+        // Recorded before any work and never cleared. A thread whose id is not
+        // the known UI thread -- including a call made before any UI thread was
+        // identified, when no thread can be attributed -- makes unload
+        // unprovable for the rest of the process.
+        if (webView2Callback &&
+            !P1IsWebView2UiThread(GetCurrentThreadId())) {
+            g_p0WrapperCallOutsideUiThread.store(true,
+                                                 std::memory_order_release);
+        }
+
+        previous = P0GetWrapperDepth();
+        if (previous >= 0 && !P0SetWrapperDepth(previous + 1)) {
+            previous = -1;
+        }
+    }
+    ~P0WrapperCallScope() {
+        if (previous >= 0) {
+            P0SetWrapperDepth(previous);
+        }
+        // Decremented last: the sticky flag above, not this counter, is what
+        // covers the instructions that follow this destructor.
+        g_p0ActiveWrapperCalls.fetch_sub(1, std::memory_order_acq_rel);
+    }
+};
+
+// ---------------------------------------------------------------------------
 // Ref-counted callback wrappers
 //
 // The wrappers are plain structs whose first bytes are the COM vptr. The
 // vtable is built by hand: QueryInterface, AddRef, Release, Invoke.
+//
+// Each wrapper answers QueryInterface for IID_IUnknown and for exactly the
+// handler interface it implements; every other IID gets E_NOINTERFACE. The
+// IIDs are copied from the local WebView2.h
+// (microsoft.web.webview2\1.0.3719.77\build\native\include\WebView2.h).
 // ---------------------------------------------------------------------------
+
+// ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler
+// {4E8A3389-C9D8-4BD2-B6B5-124FEE6CC14D}
+static const IID kIidEnvironmentCompleted = {
+    0x4e8a3389, 0xc9d8, 0x4bd2, {0xb6, 0xb5, 0x12, 0x4f, 0xee, 0x6c, 0xc1, 0x4d}};
+// ICoreWebView2CreateCoreWebView2ControllerCompletedHandler
+// {6C4819F3-C9B7-4260-8127-C9F5BDE7F68C}
+static const IID kIidControllerCompleted = {
+    0x6c4819f3, 0xc9b7, 0x4260, {0x81, 0x27, 0xc9, 0xf5, 0xbd, 0xe7, 0xf6, 0x8c}};
+// ICoreWebView2WebMessageReceivedEventHandler
+// {57213F19-00E6-49FA-8E07-898EA01ECBD2}
+static const IID kIidWebMessageReceived = {
+    0x57213f19, 0x00e6, 0x49fa, {0x8e, 0x07, 0x89, 0x8e, 0xa0, 0x1e, 0xcb, 0xd2}};
+// ICoreWebView2NavigationStartingEventHandler
+// {9ADBE429-F36D-432B-9DDC-F8881FBD76E3}
+static const IID kIidNavigationStarting = {
+    0x9adbe429, 0xf36d, 0x432b, {0x9d, 0xdc, 0xf8, 0x88, 0x1f, 0xbd, 0x76, 0xe3}};
+// ICoreWebView2NavigationCompletedEventHandler
+// {D33A35BF-1C49-4F98-93AB-006E0533FE1C}
+static const IID kIidNavigationCompleted = {
+    0xd33a35bf, 0x1c49, 0x4f98, {0x93, 0xab, 0x00, 0x6e, 0x05, 0x33, 0xfe, 0x1c}};
+// ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler
+// {B99369F3-9B11-47B5-BC6F-8E7895FCEA17}
+static const IID kIidAddScriptCompleted = {
+    0xb99369f3, 0x9b11, 0x47b5, {0xbc, 0x6f, 0x8e, 0x78, 0x95, 0xfc, 0xea, 0x17}};
+// ICoreWebView2ExecuteScriptCompletedHandler
+// {49511172-CC67-4BCA-9923-137112F4C4CC}
+static const IID kIidExecuteScriptCompleted = {
+    0x49511172, 0xcc67, 0x4bca, {0x99, 0x23, 0x13, 0x71, 0x12, 0xf4, 0xc4, 0xcc}};
 
 struct P0WrapperBase {
     const void* const* vtbl;
     volatile LONG ref;
     void (*finalize)(P0WrapperBase*);
+    const IID* iid;  // the one handler interface this wrapper implements
+    // True once the wrapper was passed to a WebView2 method and counted in
+    // g_p0OutstandingCallbacks. The final Release decrements the counter.
+    bool counted;
 };
 
 struct P0EnvHandler : P0WrapperBase {
@@ -4139,6 +4176,10 @@ struct P0ScriptHandler : P0WrapperBase {
     // HRESULT of the call that created this handler, filled in right after the
     // call returns so the (asynchronous) completion log can include it.
     HRESULT immediateHr;
+    // AddScript only: an owned webview reference kept until the completion
+    // arrives. It must outlive the teardown's P0CleanupWebView, otherwise a
+    // completion that arrives after Stopping cannot remove the script.
+    void* webView;
 };
 
 struct P0NavigationStartingHandler : P0WrapperBase {};
@@ -4157,6 +4198,10 @@ static void P0MessageHandlerFinalize(P0WrapperBase* self);
 static void P0ScriptHandlerFinalize(P0WrapperBase* self);
 static void P0NavigationStartingHandlerFinalize(P0WrapperBase* self);
 static void P0NavigationCompletedHandlerFinalize(P0WrapperBase* self);
+
+// Defined next to the release queue; the finalizer may run on any thread, so
+// it must never call Release on the held webview itself.
+static void P0ReleaseScriptWebView(P0ScriptHandler* handler);
 
 static HRESULT STDMETHODCALLTYPE P0EnvHandlerInvoke(P0EnvHandler* self,
                                                     HRESULT hr,
@@ -4233,34 +4278,29 @@ static const void* const kNavigationCompletedHandlerVtbl[4] = {
     reinterpret_cast<const void*>(&P0NavigationCompletedInvoke),
 };
 
-// The wrappers are only ever handed to WebView2 as completion/event handlers,
-// which the consumer calls through the pointer it already has; it never uses QI
-// to get a different interface from them. Returning `this` for every IID is
-// therefore safe for that narrow role and keeps E_NOINTERFACE out of the middle
-// of the callback chain. The first QI is logged so the requested IIDs show up in
-// p0.log.
-static std::atomic<bool> g_qiLogged{false};
-
+// Answer IID_IUnknown and the one handler interface the wrapper implements.
+// Anything else is E_NOINTERFACE with a null out pointer, as COM requires.
 static HRESULT STDMETHODCALLTYPE P0WrapperQueryInterface(P0WrapperBase* self,
                                                          const IID& riid,
                                                          void** ppv) {
+    P0WrapperCallScope scope;
     if (!ppv) {
         return E_POINTER;
     }
 
-    *ppv = self;
-    InterlockedIncrement(&self->ref);
-
-    if (!g_qiLogged.exchange(true, std::memory_order_relaxed)) {
-        const DWORD* d = reinterpret_cast<const DWORD*>(&riid);
-        P0_LOG(L"[p0] wrapper QueryInterface {%08X-%08X-%08X-%08X} -> this",
-               d[0], d[1], d[2], d[3]);
+    if (!self || !(IsEqualGUID(riid, IID_IUnknown) ||
+                   (self->iid && IsEqualGUID(riid, *self->iid)))) {
+        *ppv = nullptr;
+        return E_NOINTERFACE;
     }
 
+    *ppv = self;
+    InterlockedIncrement(&self->ref);
     return S_OK;
 }
 
 static ULONG STDMETHODCALLTYPE P0WrapperAddRef(P0WrapperBase* self) {
+    P0WrapperCallScope scope;
     if (!self) {
         return 0;
     }
@@ -4268,18 +4308,38 @@ static ULONG STDMETHODCALLTYPE P0WrapperAddRef(P0WrapperBase* self) {
 }
 
 static ULONG STDMETHODCALLTYPE P0WrapperRelease(P0WrapperBase* self) {
+    P0WrapperCallScope scope;
     if (!self) {
         return 0;
     }
 
     LONG count = InterlockedDecrement(&self->ref);
     if (count == 0) {
+        bool counted = self->counted;
         void (*finalize)(P0WrapperBase*) = self->finalize;
         if (finalize) {
             finalize(self);
         }
+        // Decrement only after the finalizer ran: the teardown pump must not
+        // observe zero while the object is still being destroyed. This is the
+        // whole notification: a release never signals anything, it only
+        // decrements its counter. The pump below is already on the UI thread,
+        // so the counter is observed without any cross-thread wake-up.
+        if (counted) {
+            P0CountCallbackReleased();
+        }
     }
     return static_cast<ULONG>(count);
+}
+
+// Counts a wrapper that is about to be passed to WebView2. Called on the UI
+// thread; the final Release may happen on any thread.
+static void P0MarkHandedOver(P0WrapperBase* handler) {
+    if (!handler) {
+        return;
+    }
+    handler->counted = true;
+    P0CountHandedOver();
 }
 
 static void P0EnvHandlerFinalize(P0WrapperBase* self) {
@@ -4311,7 +4371,11 @@ static void P0MessageHandlerFinalize(P0WrapperBase* self) {
 }
 
 static void P0ScriptHandlerFinalize(P0WrapperBase* self) {
-    delete static_cast<P0ScriptHandler*>(self);
+    auto* handler = static_cast<P0ScriptHandler*>(self);
+    // No completion arrived (or it never took the reference): hand the held
+    // webview reference to the UI thread instead of releasing it here.
+    P0ReleaseScriptWebView(handler);
+    delete handler;
 }
 
 static void P0NavigationStartingHandlerFinalize(P0WrapperBase* self) {
@@ -4331,6 +4395,8 @@ static P0EnvHandler* P0CreateEnvHandler(void* app) {
     handler->vtbl = kEnvHandlerVtbl;
     handler->ref = 1;
     handler->finalize = &P0EnvHandlerFinalize;
+    handler->iid = &kIidEnvironmentCompleted;
+    handler->counted = false;
     handler->app = app;
 
     if (app) {
@@ -4354,6 +4420,8 @@ static P0ControllerHandler* P0CreateControllerHandler(void* app) {
     handler->vtbl = kControllerHandlerVtbl;
     handler->ref = 1;
     handler->finalize = &P0ControllerHandlerFinalize;
+    handler->iid = &kIidControllerCompleted;
+    handler->counted = false;
     handler->app = app;
 
     if (app) {
@@ -4377,6 +4445,8 @@ static P0MessageHandler* P0CreateMessageHandler() {
     handler->vtbl = kMessageHandlerVtbl;
     handler->ref = 1;
     handler->finalize = &P0MessageHandlerFinalize;
+    handler->iid = &kIidWebMessageReceived;
+    handler->counted = false;
     return handler;
 }
 
@@ -4389,8 +4459,15 @@ static P0ScriptHandler* P0CreateScriptHandler(const wchar_t* label) {
     handler->vtbl = kScriptHandlerVtbl;
     handler->ref = 1;
     handler->finalize = &P0ScriptHandlerFinalize;
+    // The two completion handlers differ only by IID; the label says which call
+    // created this one.
+    handler->iid = (label && wcscmp(label, L"AddScript") == 0)
+                       ? &kIidAddScriptCompleted
+                       : &kIidExecuteScriptCompleted;
     handler->label = label;
     handler->immediateHr = E_FAIL;
+    handler->webView = nullptr;
+    handler->counted = false;
     return handler;
 }
 
@@ -4403,6 +4480,8 @@ static P0NavigationStartingHandler* P0CreateNavigationStartingHandler() {
     handler->vtbl = kNavigationStartingHandlerVtbl;
     handler->ref = 1;
     handler->finalize = &P0NavigationStartingHandlerFinalize;
+    handler->iid = &kIidNavigationStarting;
+    handler->counted = false;
     return handler;
 }
 
@@ -4415,6 +4494,8 @@ static P0NavigationCompletedHandler* P0CreateNavigationCompletedHandler() {
     handler->vtbl = kNavigationCompletedHandlerVtbl;
     handler->ref = 1;
     handler->finalize = &P0NavigationCompletedHandlerFinalize;
+    handler->iid = &kIidNavigationCompleted;
+    handler->counted = false;
     return handler;
 }
 
@@ -4436,20 +4517,15 @@ static std::atomic<void*> g_origEnvCreateControllerWithOptions{nullptr};
 
 static void P0PatchEnvironment(void* env) {
     if (!env) {
-        P0_LOG(L"env not patched: null environment");
+        Wh_Log(L"[p0] env not patched: null environment");
         return;
     }
 
     void** originalVtbl = *reinterpret_cast<void***>(env);
     if (!originalVtbl || !P0IsModuleCode(originalVtbl)) {
-        P0_LOG(L"env vtable: base=%p slot3=(unreadable) slot21=(unreadable) "
-               L"slot3InModule=0 slot21InModule=0",
-               static_cast<void*>(originalVtbl));
-        P0_LOG(L"[p0] env=%p has unexpected vtable %p; not patching", env,
-               originalVtbl);
-        P0_LOG(L"env not patched: vtable %p is not inside "
-               L"EmbeddedBrowserWebView.dll",
-               static_cast<void*>(originalVtbl));
+        Wh_Log(L"[p0] env=%p: vtable %p is not inside "
+               L"EmbeddedBrowserWebView.dll; not patching",
+               env, static_cast<void*>(originalVtbl));
         return;
     }
 
@@ -4460,36 +4536,33 @@ static void P0PatchEnvironment(void* env) {
     bool has3 = slot3InModule;
     bool has21 = slot21InModule;
 
-    P0_LOG(L"env vtable: base=%p slot3=%p slot21=%p slot3InModule=%d "
+    Wh_Log(L"[p0] env vtable: base=%p slot3=%p slot21=%p slot3InModule=%d "
            L"slot21InModule=%d",
            static_cast<void*>(originalVtbl), slot3, slot21,
            slot3InModule ? 1 : 0, slot21InModule ? 1 : 0);
 
     if (!has3 && !has21) {
-        P0_LOG(L"[p0] env=%p: neither slot 3 nor slot 21 is in %s; not patching",
-               env, L"EmbeddedBrowserWebView.dll");
-        P0_LOG(L"env not patched: neither slot 3 nor slot 21 is module code");
+        Wh_Log(L"[p0] env=%p: neither slot 3 nor slot 21 is module code; not "
+               L"patching",
+               env);
         return;
     }
 
     std::lock_guard<std::mutex> lock(g_envPatch.mtx);
     if (g_envPatch.installed) {
-        P0_LOG(L"[p0] env=%p: another environment is already patched; skipping",
+        Wh_Log(L"[p0] env=%p: another environment is already patched; skipping",
                env);
-        P0_LOG(L"env not patched: another environment is already patched");
         return;
     }
 
     auto* copy = new (std::nothrow) void*[kEnvVtblSlots];
     if (!copy) {
-        P0_LOG(L"[p0] env=%p: out of memory for vtable copy", env);
-        P0_LOG(L"env not patched: out of memory for the vtable copy");
+        Wh_Log(L"[p0] env=%p: out of memory for the vtable copy", env);
         return;
     }
 
     if (!P0CopyVtable(copy, originalVtbl, kEnvVtblSlots)) {
-        P0_LOG(L"[p0] env=%p: vtable copy faulted; not patching", env);
-        P0_LOG(L"env not patched: the vtable copy faulted");
+        Wh_Log(L"[p0] env=%p: vtable copy faulted; not patching", env);
         delete[] copy;
         return;
     }
@@ -4506,8 +4579,7 @@ static void P0PatchEnvironment(void* env) {
     auto addRef =
         reinterpret_cast<FnAddRef>(P0GetRawSlot(env, kSlotAddRef));
     if (!addRef) {
-        P0_LOG(L"[p0] env=%p: AddRef slot missing; not patching", env);
-        P0_LOG(L"env not patched: no AddRef slot");
+        Wh_Log(L"[p0] env=%p: AddRef slot missing; not patching", env);
         delete[] copy;
         return;
     }
@@ -4530,15 +4602,17 @@ static void P0PatchEnvironment(void* env) {
 
     *reinterpret_cast<void***>(env) = copy;
 
-    P0_LOG(L"[p0] env=%p patched (slot3=%p valid=%d, slot21=%p valid=%d)",
-           env, slot3, has3 ? 1 : 0, slot21, has21 ? 1 : 0);
-    P0_LOG(L"env patched");
+    Wh_Log(L"[p0] env=%p patched (slot3=%p valid=%d, slot21=%p valid=%d)", env,
+           slot3, has3 ? 1 : 0, slot21, has21 ? 1 : 0);
 }
 
-static void P0RestoreEnvironment() {
+// `full` is false only when the UI thread was never reachable: the vptr is put
+// back so the app cannot jump into this image, but the copy and the reference
+// are deliberately kept (leaked) because freeing them could race the UI thread.
+static void P0RestoreEnvironment(bool full) {
     std::lock_guard<std::mutex> lock(g_envPatch.mtx);
     if (!g_envPatch.installed) {
-        P0_LOG(L"cleanup: environment not patched, nothing to restore hr=0x00000000");
+        Wh_Log(L"cleanup: environment not patched, nothing to restore");
         return;
     }
 
@@ -4547,25 +4621,30 @@ static void P0RestoreEnvironment() {
         if (current == g_envPatch.patchedVtbl) {
             *reinterpret_cast<void***>(g_envPatch.env) =
                 g_envPatch.originalVtbl;
-            P0_LOG(L"[p0] env=%p vtable restored", g_envPatch.env);
-            P0_LOG(L"cleanup: env vtable restored hr=0x00000000");
+            Wh_Log(L"[p0] env=%p vtable restored", g_envPatch.env);
         } else {
-            P0_LOG(L"[p0] env=%p vptr changed externally (%p); not restoring",
+            Wh_Log(L"[p0] env=%p vptr changed externally (%p); not restoring",
                    g_envPatch.env, current);
-            P0_LOG(L"cleanup: env vptr changed externally (%p), not restoring "
-                   L"hr=0x00000000", current);
+        }
+
+        if (!full) {
+            Wh_Log(L"[p0] environment reference and vtable copy kept: teardown "
+                   L"did not run on the UI thread");
+            g_origEnvCreateController.store(nullptr);
+            g_origEnvCreateControllerWithOptions.store(nullptr);
+            return;
         }
 
         auto release = reinterpret_cast<FnRelease>(
             P0GetRawSlot(g_envPatch.env, kSlotRelease));
         if (release) {
             release(g_envPatch.env);
-            P0_LOG(L"cleanup: env reference released hr=0x00000000");
+            Wh_Log(L"cleanup: env reference released");
         }
     }
 
     delete[] g_envPatch.patchedVtbl;
-    P0_LOG(L"cleanup: env vtable copy freed hr=0x00000000");
+    Wh_Log(L"cleanup: env vtable copy freed");
 
     g_envPatch.installed = false;
     g_envPatch.env = nullptr;
@@ -4621,6 +4700,30 @@ static std::wstring P0GetLastNavigationUri() {
 // (P0ScriptHandler::immediateHr), so repeated injections cannot overwrite it.
 static std::atomic<unsigned long> g_addScriptHr{0xFFFFFFFFul};
 
+// Script id returned by the AddScriptToExecuteOnDocumentCreated completion. The
+// unload sequence passes it to RemoveScriptToExecuteOnDocumentCreated (slot 28)
+// so the next document cannot start the engine after the mod is gone.
+static std::mutex g_scriptIdMutex;
+static std::wstring g_scriptId;
+static std::atomic<bool> g_scriptRemoved{false};
+
+static void P0SetScriptId(const std::wstring& id) {
+    try {
+        std::lock_guard<std::mutex> lock(g_scriptIdMutex);
+        g_scriptId = id;
+    } catch (...) {
+    }
+}
+
+static std::wstring P0GetScriptId() {
+    try {
+        std::lock_guard<std::mutex> lock(g_scriptIdMutex);
+        return g_scriptId;
+    } catch (...) {
+        return std::wstring();
+    }
+}
+
 // RAII holder for a COM reference that is released through slot 2.
 struct P0ComRef {
     void* object = nullptr;
@@ -4674,6 +4777,38 @@ static bool P0StoreWebView(void* webView,
     return true;
 }
 
+// Removes the document-created script registered by AddScript. Must run on the
+// UI thread. The teardown calls it before the handlers are removed; a late
+// AddScript completion calls it afterwards through the webview reference the
+// completion handler kept alive.
+static void P0RemoveRegisteredScript(void* webView) {
+    if (!webView) {
+        return;
+    }
+    if (g_scriptRemoved.load(std::memory_order_acquire)) {
+        Wh_Log(L"[p0] AddScript script already removed");
+        return;
+    }
+    std::wstring id = P0GetScriptId();
+    if (id.empty()) {
+        Wh_Log(L"[p0] no AddScript id was captured yet; the document-created "
+               L"script installs observers and retries, so a late completion "
+               L"must still remove it");
+        return;
+    }
+    void* removeFn = nullptr;
+    if (!P0GetValidatedSlot(webView, kWebViewSlotRemoveScript, &removeFn)) {
+        Wh_Log(L"[p0] RemoveScriptToExecuteOnDocumentCreated slot invalid");
+        return;
+    }
+    HRESULT hr = reinterpret_cast<FnRemoveScript>(removeFn)(webView, id.c_str());
+    if (SUCCEEDED(hr)) {
+        g_scriptRemoved.store(true, std::memory_order_release);
+    }
+    Wh_Log(L"[p0] RemoveScriptToExecuteOnDocumentCreated id=%.200s -> %08X",
+           id.c_str(), static_cast<unsigned>(hr));
+}
+
 static void P0CleanupWebView() {
     void* webView = nullptr;
     EventRegistrationToken token{};
@@ -4708,17 +4843,11 @@ static void P0CleanupWebView() {
                                    &removeFn)) {
                 HRESULT hr = reinterpret_cast<FnRemoveNavigationEventHandler>(
                     removeFn)(webView, navStartingToken);
-                P0_LOG(L"[p0] remove_NavigationStarting token=%lld -> %08X",
-                       static_cast<long long>(navStartingToken.value),
-                       static_cast<unsigned>(hr));
-                P0_LOG(L"cleanup: remove_NavigationStarting token=%lld "
-                       L"hr=0x%08X",
+                Wh_Log(L"[p0] remove_NavigationStarting token=%lld -> %08X",
                        static_cast<long long>(navStartingToken.value),
                        static_cast<unsigned>(hr));
             } else {
-                P0_LOG(L"[p0] remove_NavigationStarting slot invalid");
-                P0_LOG(L"cleanup: remove_NavigationStarting slot invalid "
-                       L"hr=0x80004005");
+                Wh_Log(L"[p0] remove_NavigationStarting slot invalid");
             }
         }
 
@@ -4729,17 +4858,11 @@ static void P0CleanupWebView() {
                                    &removeFn)) {
                 HRESULT hr = reinterpret_cast<FnRemoveNavigationEventHandler>(
                     removeFn)(webView, navCompletedToken);
-                P0_LOG(L"[p0] remove_NavigationCompleted token=%lld -> %08X",
-                       static_cast<long long>(navCompletedToken.value),
-                       static_cast<unsigned>(hr));
-                P0_LOG(L"cleanup: remove_NavigationCompleted token=%lld "
-                       L"hr=0x%08X",
+                Wh_Log(L"[p0] remove_NavigationCompleted token=%lld -> %08X",
                        static_cast<long long>(navCompletedToken.value),
                        static_cast<unsigned>(hr));
             } else {
-                P0_LOG(L"[p0] remove_NavigationCompleted slot invalid");
-                P0_LOG(L"cleanup: remove_NavigationCompleted slot invalid "
-                       L"hr=0x80004005");
+                Wh_Log(L"[p0] remove_NavigationCompleted slot invalid");
             }
         }
 
@@ -4749,17 +4872,11 @@ static void P0CleanupWebView() {
                                    &removeFn)) {
                 HRESULT hr = reinterpret_cast<FnRemoveWebMessageReceived>(
                     removeFn)(webView, token);
-                P0_LOG(L"[p0] remove_WebMessageReceived token=%lld -> %08X",
-                       static_cast<long long>(token.value),
-                       static_cast<unsigned>(hr));
-                P0_LOG(L"cleanup: remove_WebMessageReceived token=%lld "
-                       L"hr=0x%08X",
+                Wh_Log(L"[p0] remove_WebMessageReceived token=%lld -> %08X",
                        static_cast<long long>(token.value),
                        static_cast<unsigned>(hr));
             } else {
-                P0_LOG(L"[p0] remove_WebMessageReceived slot invalid");
-                P0_LOG(L"cleanup: remove_WebMessageReceived slot invalid "
-                       L"hr=0x80004005");
+                Wh_Log(L"[p0] remove_WebMessageReceived slot invalid");
             }
         }
 
@@ -4767,23 +4884,23 @@ static void P0CleanupWebView() {
             reinterpret_cast<FnRelease>(P0GetRawSlot(webView, kSlotRelease));
         if (release) {
             release(webView);
-            P0_LOG(L"cleanup: WebView2 reference released hr=0x00000000");
+            Wh_Log(L"[p0] WebView2 reference released");
         }
     }
 
     if (handler) {
         P0WrapperRelease(handler);
-        P0_LOG(L"cleanup: message handler released hr=0x00000000");
+        Wh_Log(L"[p0] message handler released");
     }
 
     if (navStartingHandler) {
         P0WrapperRelease(navStartingHandler);
-        P0_LOG(L"cleanup: NavigationStarting handler released hr=0x00000000");
+        Wh_Log(L"[p0] NavigationStarting handler released");
     }
 
     if (navCompletedHandler) {
         P0WrapperRelease(navCompletedHandler);
-        P0_LOG(L"cleanup: NavigationCompleted handler released hr=0x00000000");
+        Wh_Log(L"[p0] NavigationCompleted handler released");
     }
 }
 
@@ -4820,14 +4937,18 @@ static constexpr wchar_t kP1Tag[] = L"whtr1";
 static constexpr wchar_t kP1DispatchClass[] = L"WindhawkUITranslator.P1Dispatch";
 static constexpr UINT kP1MsgDrainReplies = WM_APP + 0x51;
 static constexpr UINT kP1MsgSettingsChanged = WM_APP + 0x52;
+// Synchronous teardown request. Wh_ModBeforeUninit sends it with SendMessageW
+// and treats the return as the synchronisation point: the WndProc only returns
+// after the window is destroyed and the teardown recorded either proof of
+// quiescence or a failure for the unload decision.
 static constexpr UINT kP1MsgDestroyWindow = WM_APP + 0x53;
+// Deadline for the teardown pump. Reaching it is not permission to unload: only
+// a completion that never fires can reach it, and the only allowed outcome is
+// to record a failure, which keeps the module resident, and finish the cleanup.
+static constexpr ULONGLONG kP1TeardownPumpDeadlineMs = 60 * 1000;
 
 static constexpr size_t kP1MaxMessageChars = 4u * 1024u * 1024u;
 static constexpr size_t kP1MaxUrlChars = 4096;
-static constexpr size_t kP1MaxHeaderCount = 32;
-static constexpr size_t kP1MaxHeaderNameChars = 256;
-static constexpr size_t kP1MaxHeaderValueChars = 8192;
-static constexpr size_t kP1MaxHeadersChars = 64u * 1024u;
 static constexpr size_t kP1MaxBodyBytes = 1024u * 1024u;
 static constexpr size_t kP1MaxReplyBytes = 1024u * 1024u;
 static constexpr size_t kP1MaxJsLogChars = 500;
@@ -5010,7 +5131,6 @@ struct P1SettingsSnapshot {
     int timeoutMs = 20000;
     bool cacheEnabled = true;
     int cacheTtlDays = 30;
-    bool debug = false;
     bool clearCacheRequested = false;
 };
 
@@ -5083,7 +5203,6 @@ static P1SettingsSnapshot P1ReadSettings() {
     s.scopeModSummary = Wh_GetIntSetting(L"scopeModSummary") != 0;
     s.scopeChangelog = Wh_GetIntSetting(L"scopeChangelog") != 0;
     s.cacheEnabled = Wh_GetIntSetting(L"cacheEnabled") != 0;
-    s.debug = Wh_GetIntSetting(L"debug") != 0;
     s.clearCacheRequested = Wh_GetIntSetting(L"clearCache") != 0;
 
     s.hoverDelayMs = P1ClampInt(Wh_GetIntSetting(L"hoverDelayMs"), 0, 2000);
@@ -5202,7 +5321,6 @@ static std::wstring P1BuildSettingsJson(const P1SettingsSnapshot& s,
     appendBool(L"cacheEnabled", s.cacheEnabled);
     appendNumber(L"cacheTtlDays", s.cacheTtlDays);
     appendBool(L"clearCache", clearCache);
-    appendBool(L"debug", s.debug);
     json += L"}";
     return json;
 }
@@ -5217,11 +5335,10 @@ struct P1KeyInfo {
     std::wstring host;    // lower-case host of llmBaseUrl, may be empty
 };
 
-// Hosts that never receive the LLM key, whatever llmBaseUrl says: these are the
-// free translation endpoints, which need no auth. Compared case-insensitively.
+// The free Edge endpoint never receives the LLM key, whatever llmBaseUrl says.
+// Compared case-insensitively.
 static bool P1HostExcludedFromAuth(const std::wstring& host) {
-    return P1EqualsNoCase(host, L"edge.microsoft.com") ||
-           P1EqualsNoCase(host, L"translate.googleapis.com");
+    return P1EqualsNoCase(host, L"edge.microsoft.com");
 }
 
 // Only the host decides whether a request gets the key: ports and paths are
@@ -5348,14 +5465,46 @@ static bool P1ReadCredentialKey(const std::wstring& target,
 }
 
 struct P1UrlParts {
-    std::wstring host;
-    std::wstring path;
+    std::wstring host;   // as written; compare case-insensitively
+    std::wstring path;   // path plus query, never a fragment
     INTERNET_PORT port = INTERNET_DEFAULT_HTTPS_PORT;
     bool secure = true;
+    bool explicitPort = false;  // the URL spelled the port out
 };
 
+// True when the authority part of `url` contains a colon outside IPv6
+// brackets. WinHttpCrackUrl reports the effective port either way, so the
+// literal form has to be inspected to distinguish `host` from `host:443`.
+static bool P1UrlHasExplicitPort(const std::wstring& url) {
+    size_t scheme = url.find(L"://");
+    if (scheme == std::wstring::npos) {
+        return false;
+    }
+    size_t start = scheme + 3;
+    size_t end = url.find_first_of(L"/?#", start);
+    if (end == std::wstring::npos) {
+        end = url.size();
+    }
+    size_t hostStart = start;
+    if (hostStart < end && url[hostStart] == L'[') {
+        size_t close = url.find(L']', hostStart);
+        if (close == std::wstring::npos || close >= end) {
+            return false;
+        }
+        hostStart = close + 1;
+    }
+    size_t colon = url.find(L':', hostStart);
+    return colon != std::wstring::npos && colon < end;
+}
+
+// Strict parser for the two relay endpoints: https only, no userinfo, no
+// fragment. A fragment would silently change the request target and is not
+// part of the protocol.
 static bool P1ParseUrl(const std::wstring& url, P1UrlParts& parts) {
     if (url.empty() || url.size() > kP1MaxUrlChars) {
+        return false;
+    }
+    if (url.find(L'#') != std::wstring::npos) {
         return false;
     }
 
@@ -5371,8 +5520,7 @@ static bool P1ParseUrl(const std::wstring& url, P1UrlParts& parts) {
     if (!WinHttpCrackUrl(url.c_str(), 0, 0, &components)) {
         return false;
     }
-    if (components.nScheme != INTERNET_SCHEME_HTTP &&
-        components.nScheme != INTERNET_SCHEME_HTTPS) {
+    if (components.nScheme != INTERNET_SCHEME_HTTPS) {
         return false;
     }
     if (!components.lpszHostName || components.dwHostNameLength == 0) {
@@ -5384,11 +5532,11 @@ static bool P1ParseUrl(const std::wstring& url, P1UrlParts& parts) {
     }
 
     parts.host.assign(components.lpszHostName, components.dwHostNameLength);
-    parts.secure = components.nScheme == INTERNET_SCHEME_HTTPS;
+    parts.secure = true;
+    parts.explicitPort = P1UrlHasExplicitPort(url);
     parts.port = components.nPort;
     if (parts.port == 0) {
-        parts.port = parts.secure ? INTERNET_DEFAULT_HTTPS_PORT
-                                  : INTERNET_DEFAULT_HTTP_PORT;
+        parts.port = INTERNET_DEFAULT_HTTPS_PORT;
     }
 
     std::wstring path;
@@ -5426,7 +5574,7 @@ static P1KeyInfo P1BuildKeyInfo(const P1SettingsSnapshot& s) {
     if (P1ParseUrl(s.llmBaseUrl, base)) {
         info.host = P1Lower(base.host);
     } else {
-        P0_LOG(L"[p1] llmBaseUrl has no usable http(s) host; auth injection "
+        Wh_Log(L"[p1] llmBaseUrl has no usable https host; auth injection "
                L"disabled");
     }
 
@@ -5434,7 +5582,7 @@ static P1KeyInfo P1BuildKeyInfo(const P1SettingsSnapshot& s) {
     // line, so a typo can never silently send a key.
     std::wstring source = P1Lower(s.keySourceSetting);
     if (source != L"credential" && source != L"setting" && source != L"none") {
-        P0_LOG(L"[p1] unknown llmKeySource '%s'; treating it as none",
+        Wh_Log(L"[p1] unknown llmKeySource '%s'; treating it as none",
                s.keySourceSetting.c_str());
         source = L"none";
     }
@@ -5452,7 +5600,7 @@ static P1KeyInfo P1BuildKeyInfo(const P1SettingsSnapshot& s) {
         if (P1ReadCredentialKey(s.credentialTarget, key, error)) {
             P1SanitizeKey(key);
             if (!key.empty()) {
-                P0_LOG(L"[p1] credential target=%s found=1 bytes=%llu",
+                Wh_Log(L"[p1] credential target=%s found=1 bytes=%llu",
                        s.credentialTarget.c_str(),
                        static_cast<unsigned long long>(key.size()));
                 info.source = L"credential";
@@ -5463,10 +5611,10 @@ static P1KeyInfo P1BuildKeyInfo(const P1SettingsSnapshot& s) {
             error = ERROR_INVALID_DATA;
         }
         // Exactly one line, with the target name and the Win32 error, so a
-        // missing credential is diagnosable from p0.log. The key value itself
-        // is never part of any log call. Then the plaintext setting is used if
-        // it has anything in it.
-        P0_LOG(L"[p1] credential target=%s found=0 error=%lu; plaintext "
+        // missing credential is diagnosable from the mod log. The key value
+        // itself is never part of any log call. Then the plaintext setting is
+        // used if it has anything in it.
+        Wh_Log(L"[p1] credential target=%s found=0 error=%lu; plaintext "
                L"fallback=%s",
                s.credentialTarget.c_str(), error,
                s.llmApiKey.empty() ? L"absent" : L"used");
@@ -5514,7 +5662,9 @@ static void P1ClearKeyCache() {
 //
 // Win32 marshalling: the window is created on the WebView2 UI thread, workers
 // only PostMessage to it, and the window procedure runs on the UI thread. A
-// message-only window is never visible and is not enumerated.
+// message-only window is never visible and is not enumerated. The class is
+// registered against the mod's own module, so the window procedure cannot be
+// resolved from another image.
 // ---------------------------------------------------------------------------
 
 static std::atomic<HWND> g_p1DispatchWindow{nullptr};
@@ -5522,7 +5672,84 @@ static std::atomic<DWORD> g_p1UiThreadId{0};
 static std::atomic<bool> g_p1DispatchClassRegistered{false};
 static std::atomic<bool> g_p1PageReady{false};
 static std::atomic<bool> g_p1SettingsDirty{false};
-static std::atomic<bool> g_p1FirstSettingsPush{true};
+static std::atomic<bool> g_p1DispatchFailureLogged{false};
+
+// Dispatch-window protocol. The lock guards the state and the creator thread
+// id; the HWND stays atomic because workers only post to it and never need the
+// lock. The condition variable is signalled whenever a creation settles
+// (published or abandoned), so the unloader waits for an in-flight creation
+// instead of racing it.
+//
+//   None     - no window; a creation may be admitted while Running.
+//   Creating - one thread owns creation and is outside the lock; every other
+//              caller waits, the creator itself must not.
+//   Ready    - the HWND is published and stays valid until the UI-thread
+//              teardown destroys it and resets the state to None.
+//
+// Only the creating thread cleans up an unpublished window. The unloader never
+// touches a window it did not see published.
+enum class P1DispatchState : int {
+    None = 0,
+    Creating,
+    Ready,
+};
+
+static SRWLOCK g_p1DispatchLock = SRWLOCK_INIT;
+static CONDITION_VARIABLE g_p1DispatchCv = CONDITION_VARIABLE_INIT;
+static P1DispatchState g_p1DispatchState = P1DispatchState::None;  // lock
+static DWORD g_p1DispatchCreatorThreadId = 0;                      // lock
+
+// UI-thread only. True while the teardown runs inside the dispatch window's
+// WndProc. The teardown pump can dispatch a message that re-enters this path;
+// the nested call returns immediately instead of starting a second teardown.
+static bool g_p1TeardownInProgress = false;
+
+// Handle of the mod DLL itself, obtained from a function address so it is the
+// module that owns P1DispatchWndProc even when the host image differs.
+static HMODULE g_modModule = nullptr;
+
+// Verdict of the UI-thread teardown. This is evidence, not a decision: the
+// decision is made exactly once, by P1DecideUnload, after the sender of
+// kP1MsgDestroyWindow has resumed.
+//
+//   NotRun    - no teardown reached a conclusion (it never ran, or it threw
+//               before it could record one). Never proof of quiescence.
+//   Quiescent - the teardown ran to completion and proved that no callback,
+//               no wrapper call and no window of this module is left.
+//   Failed    - a DEFECT was observed. Sticky: a later successful path must
+//               not clear it.
+//
+// The reason is always a static string literal, so it can be stored in an
+// atomic and read after the SendMessageW returned.
+enum class P1TeardownVerdict : int {
+    NotRun = 0,
+    Quiescent,
+    Failed,
+};
+
+static std::atomic<P1TeardownVerdict> g_p1TeardownVerdict{
+    P1TeardownVerdict::NotRun};
+static std::atomic<const wchar_t*> g_p1TeardownReason{
+    L"the UI-thread teardown did not run"};
+
+// Records a DEFECT. Unconditional and sticky: a failure that was observed
+// (a DestroyWindow that failed, a window that changed under the teardown, an
+// exception, a deadline) must survive a later Quiescent record from another
+// path.
+static void P1RecordTeardownFailure(const wchar_t* reason) {
+    g_p1TeardownReason.store(reason, std::memory_order_release);
+    g_p1TeardownVerdict.store(P1TeardownVerdict::Failed,
+                              std::memory_order_release);
+}
+
+// Records proof of quiescence. Only the first record wins over NotRun; an
+// already recorded failure stays.
+static void P1RecordTeardownQuiescent() {
+    P1TeardownVerdict expected = P1TeardownVerdict::NotRun;
+    g_p1TeardownVerdict.compare_exchange_strong(
+        expected, P1TeardownVerdict::Quiescent, std::memory_order_acq_rel,
+        std::memory_order_acquire);
+}
 
 static void P1NoteUiThread() {
     DWORD current = GetCurrentThreadId();
@@ -5530,8 +5757,16 @@ static void P1NoteUiThread() {
     g_p1UiThreadId.compare_exchange_strong(expected, current);
 }
 
-static void P1DrainRepliesOnUiThread();
+// The wrapper scope calls this to decide whether a call is attributable to the
+// WebView2 UI thread. An unknown id (0) means no call can be attributed.
+static bool P1IsWebView2UiThread(DWORD threadId) {
+    DWORD uiThread = g_p1UiThreadId.load(std::memory_order_acquire);
+    return uiThread != 0 && threadId == uiThread;
+}
+
+static void P1DrainRepliesOnUiThread(bool postReplies);
 static void P1PushSettingsToAll(const wchar_t* reason);
+static void P1DestroyWindowOnUiThread(HWND hwnd);
 
 static LRESULT CALLBACK P1DispatchWndProc(HWND hwnd,
                                           UINT message,
@@ -5541,20 +5776,37 @@ static LRESULT CALLBACK P1DispatchWndProc(HWND hwnd,
     (void)lParam;
     try {
         switch (message) {
-            case kP1MsgDrainReplies:
-                P1DrainRepliesOnUiThread();
+            case kP1MsgDrainReplies: {
+                // While Running a drained reply is posted to the page; while
+                // Stopping it is only released on this thread.
+                P1Lifecycle state =
+                    g_p1Lifecycle.load(std::memory_order_acquire);
+                if (state == P1Lifecycle::Running) {
+                    P1DrainRepliesOnUiThread(true);
+                } else if (state == P1Lifecycle::Stopping) {
+                    P1DrainRepliesOnUiThread(false);
+                }
                 return 0;
+            }
             case kP1MsgSettingsChanged:
-                P1DrainRepliesOnUiThread();
+                if (!P1IsRunning()) {
+                    return 0;
+                }
+                P1DrainRepliesOnUiThread(true);
                 if (g_p1SettingsDirty.exchange(false) &&
                     g_p1PageReady.load()) {
                     P1PushSettingsToAll(L"settings-changed");
                 }
                 return 0;
             case kP1MsgDestroyWindow:
-                g_p1DispatchWindow.store(nullptr);
-                DestroyWindow(hwnd);
-                UnregisterClassW(kP1DispatchClass, GetModuleHandleW(nullptr));
+                if (g_p1Lifecycle.load(std::memory_order_acquire) !=
+                    P1Lifecycle::Stopping) {
+                    return 0;
+                }
+                // Runs the whole teardown synchronously. Wh_ModBeforeUninit's
+                // SendMessageW returns only after this WndProc returns to
+                // user32, so the sender resumes after everything is gone.
+                P1DestroyWindowOnUiThread(hwnd);
                 return 0;
             default:
                 break;
@@ -5564,46 +5816,128 @@ static LRESULT CALLBACK P1DispatchWndProc(HWND hwnd,
     return DefWindowProcW(hwnd, message, wParam, lParam);
 }
 
-static bool P1EnsureDispatchWindow() {
-    if (g_p1DispatchWindow.load(std::memory_order_acquire)) {
-        return true;
-    }
+// Called by the creating thread on every path that does not publish a window.
+// Must not be called with g_p1DispatchLock held.
+static void P1AbortDispatchCreation() {
+    AcquireSRWLockExclusive(&g_p1DispatchLock);
+    g_p1DispatchState = P1DispatchState::None;
+    g_p1DispatchCreatorThreadId = 0;
+    WakeAllConditionVariable(&g_p1DispatchCv);
+    ReleaseSRWLockExclusive(&g_p1DispatchLock);
+}
 
+static bool P1EnsureDispatchWindow() {
+    DWORD currentThread = GetCurrentThreadId();
     DWORD uiThread = g_p1UiThreadId.load(std::memory_order_acquire);
-    if (uiThread == 0 || GetCurrentThreadId() != uiThread) {
+    if (uiThread == 0 || currentThread != uiThread) {
+        return false;
+    }
+    if (!g_modModule) {
+        Wh_Log(L"[p1] mod module handle is missing; the dispatcher window "
+               L"cannot be created");
         return false;
     }
 
+    AcquireSRWLockExclusive(&g_p1DispatchLock);
+    for (;;) {
+        if (g_p1DispatchState == P1DispatchState::Ready) {
+            HWND window = g_p1DispatchWindow.load(std::memory_order_acquire);
+            ReleaseSRWLockExclusive(&g_p1DispatchLock);
+            return window != nullptr;
+        }
+        if (g_p1DispatchState == P1DispatchState::Creating) {
+            if (g_p1DispatchCreatorThreadId == currentThread) {
+                // Re-entrant call from the creating thread. Waiting would
+                // deadlock: this thread is the one that settles the state.
+                ReleaseSRWLockExclusive(&g_p1DispatchLock);
+                return false;
+            }
+            // Another thread owns the creation. Wait until it publishes or
+            // abandons the window, then re-evaluate.
+            SleepConditionVariableSRW(&g_p1DispatchCv, &g_p1DispatchLock,
+                                      INFINITE, 0);
+            continue;
+        }
+        // None: admit a creation only while the mod is running.
+        if (g_p1Lifecycle.load(std::memory_order_acquire) !=
+            P1Lifecycle::Running) {
+            ReleaseSRWLockExclusive(&g_p1DispatchLock);
+            return false;
+        }
+        g_p1DispatchState = P1DispatchState::Creating;
+        g_p1DispatchCreatorThreadId = currentThread;
+        break;
+    }
+    ReleaseSRWLockExclusive(&g_p1DispatchLock);
+
+    // RegisterClassExW and CreateWindowExW run outside the lock: either can
+    // dispatch messages, and a re-entrant P1EnsureDispatchWindow must observe
+    // Creating instead of blocking on a lock this thread holds.
     if (!g_p1DispatchClassRegistered.load(std::memory_order_acquire)) {
         WNDCLASSEXW windowClass{};
         windowClass.cbSize = sizeof(windowClass);
         windowClass.lpfnWndProc = &P1DispatchWndProc;
-        windowClass.hInstance = GetModuleHandleW(nullptr);
+        windowClass.hInstance = g_modModule;
         windowClass.lpszClassName = kP1DispatchClass;
         if (!RegisterClassExW(&windowClass)) {
-            DWORD error = GetLastError();
-            if (error != ERROR_CLASS_ALREADY_EXISTS) {
-                P0_LOG(L"[p1] RegisterClassExW failed (%lu); replies will be "
-                       L"flushed on the next page message",
-                       error);
-                return false;
-            }
+            // Any failure, ERROR_CLASS_ALREADY_EXISTS included, means this
+            // class is not ours: without the window the mod cannot be torn
+            // down safely, so injection is skipped by the caller.
+            Wh_Log(L"[p1] RegisterClassExW failed (%lu)", GetLastError());
+            P1AbortDispatchCreation();
+            return false;
         }
         g_p1DispatchClassRegistered.store(true, std::memory_order_release);
     }
 
     HWND window = CreateWindowExW(0, kP1DispatchClass, L"", 0, 0, 0, 0, 0,
-                                  HWND_MESSAGE, nullptr,
-                                  GetModuleHandleW(nullptr), nullptr);
+                                  HWND_MESSAGE, nullptr, g_modModule, nullptr);
     if (!window) {
-        P0_LOG(L"[p1] CreateWindowExW failed (%lu); replies will be flushed on "
-               L"the next page message",
-               GetLastError());
+        DWORD error = GetLastError();
+        Wh_Log(L"[p1] CreateWindowExW failed (%lu)", error);
+        // Do not leave a registered class pointing into this image when the
+        // window could not be created: the caller must be able to fall back to
+        // the real export with nothing owned by the mod.
+        if (g_p1DispatchClassRegistered.exchange(false,
+                                                std::memory_order_acq_rel) &&
+            g_modModule) {
+            UnregisterClassW(kP1DispatchClass, g_modModule);
+        }
+        P1AbortDispatchCreation();
         return false;
     }
 
-    g_p1DispatchWindow.store(window, std::memory_order_release);
-    return true;
+    AcquireSRWLockExclusive(&g_p1DispatchLock);
+    if (g_p1Lifecycle.load(std::memory_order_acquire) ==
+        P1Lifecycle::Running) {
+        g_p1DispatchWindow.store(window, std::memory_order_release);
+        g_p1DispatchState = P1DispatchState::Ready;
+        g_p1DispatchCreatorThreadId = 0;
+        WakeAllConditionVariable(&g_p1DispatchCv);
+        ReleaseSRWLockExclusive(&g_p1DispatchLock);
+        return true;
+    }
+    ReleaseSRWLockExclusive(&g_p1DispatchLock);
+
+    // Shutdown started while the window was being created. The creator owns
+    // this cleanup: the unloader only waited for the settled state and never
+    // saw the handle, so it must not touch it.
+    Wh_Log(L"[p1] dispatch window creation cancelled: shutdown started");
+    if (!DestroyWindow(window)) {
+        Wh_Log(L"[p1] DEFECT: DestroyWindow(cancelled window) failed (%lu)",
+               GetLastError());
+        // The window outlives the shutdown with a WndProc that points into
+        // this image, so the unload decision must stay unproven.
+        P1RecordTeardownFailure(
+            L"DestroyWindow(cancelled dispatch window) failed");
+    }
+    if (g_p1DispatchClassRegistered.exchange(false,
+                                            std::memory_order_acq_rel) &&
+        g_modModule) {
+        UnregisterClassW(kP1DispatchClass, g_modModule);
+    }
+    P1AbortDispatchCreation();
+    return false;
 }
 
 static void P1WakeUi() {
@@ -5614,6 +5948,9 @@ static void P1WakeUi() {
 }
 
 static void P1RequestSettingsPush() {
+    if (!P1IsRunning()) {
+        return;
+    }
     g_p1SettingsDirty.store(true);
 
     DWORD uiThread = g_p1UiThreadId.load(std::memory_order_acquire);
@@ -5631,194 +5968,503 @@ static void P1RequestSettingsPush() {
     }
 }
 
-static void P1PinModule() {
+// Takes a real loader reference to this image and never releases it. This is
+// the only mechanism that keeps the module resident when quiescence cannot be
+// proven. FreeLibrary then only decrements Windhawk's own reference, so the
+// image stays mapped for the life of the process: a deliberate leak, which is
+// always preferable to running code from an unmapped image.
+//
+// The reference is taken from a function address with FROM_ADDRESS and no PIN
+// flag. Unlike GET_MODULE_HANDLE_EX_FLAG_PIN, which is a loader-internal
+// state that cannot be queried, this is a normal loader reference, so its
+// presence is verifiable and Windhawk's FreeLibrary does not have to fail.
+// (dwFlags 0 would interpret lpModuleName as a module name, not an address.)
+//
+// Returns false when the reference could not be taken. The caller must treat
+// that as a DEFECT: the image will unload even though quiescence was not
+// proven, and nothing here can prevent it.
+static bool P1HoldModuleReference(const wchar_t* reason,
+                                  const P0OutstandingSnapshot& snapshot,
+                                  DWORD teardownThreadId,
+                                  long entryDepth) {
+    Wh_Log(L"[p1] DEFECT: %s (outstanding=%ld addScriptRefs=%ld "
+           L"lastReleaseThread=%lu teardownThread=%lu entryDepth=%ld); "
+           L"holding a module reference",
+           reason, snapshot.callbacks, snapshot.addScriptRefs,
+           static_cast<unsigned long>(snapshot.lastReleaseThreadId),
+           static_cast<unsigned long>(teardownThreadId), entryDepth);
+
+    if (g_p0ModuleReferenceHeld.load(std::memory_order_acquire)) {
+        return true;
+    }
+
     HMODULE module = nullptr;
-    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                               GET_MODULE_HANDLE_EX_FLAG_PIN,
-                           reinterpret_cast<LPCWSTR>(&P1PinModule), &module)) {
-        P0_LOG(L"[p1] a background thread is still busy at unload; the mod DLL "
-               L"is pinned so the thread cannot return into unloaded code");
-    } else {
-        P0_LOG(L"[p1] a background thread is still busy at unload and the DLL "
-               L"could not be pinned (error=%lu)",
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                            reinterpret_cast<LPCWSTR>(&P1HoldModuleReference),
+                            &module)) {
+        Wh_Log(L"[p1] DEFECT: GetModuleHandleExW(FROM_ADDRESS) failed (%lu); "
+               L"no module reference could be taken, so this image will unload "
+               L"even though quiescence was not proven",
                GetLastError());
-    }
-}
-
-static void P1DestroyDispatchWindow() {
-    HWND window = g_p1DispatchWindow.exchange(nullptr);
-    if (!window) {
-        return;
-    }
-
-    DWORD uiThread = g_p1UiThreadId.load(std::memory_order_acquire);
-    if (uiThread != 0 && GetCurrentThreadId() == uiThread) {
-        DestroyWindow(window);
-        UnregisterClassW(kP1DispatchClass, GetModuleHandleW(nullptr));
-        P0_LOG(L"[p1] dispatch window destroyed");
-        return;
-    }
-
-    DWORD_PTR result = 0;
-    if (!SendMessageTimeoutW(window, kP1MsgDestroyWindow, 0, 0,
-                             SMTO_ABORTIFHUNG | SMTO_BLOCK, 2000, &result)) {
-        P0_LOG(L"[p1] dispatch window could not be destroyed (error=%lu); "
-               L"pinning the module",
-               GetLastError());
-        P1PinModule();
-    } else {
-        P0_LOG(L"[p1] dispatch window destroyed");
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Debug trace of the HTTP relay
-//
-// Only active while the "debug" setting is on, so the normal path builds no
-// trace strings at all. It answers one question from outside the app: is the
-// same source string relayed more than once, and in which batches. Only the
-// request body is logged, never the headers, so neither the API key nor the
-// injected Authorization header can reach the log.
-//
-// The page sends a JSON array of strings; the segment count is the number of
-// occurrences of "," plus one (inside a JSON string a quote is escaped as \", so
-// the sequence can only sit between two elements). Bodies reach 1 MB, so only a
-// short, control-character-escaped prefix is logged, at most 40 lines per
-// minute, with one "[trace] throttled" notice when the budget runs out.
-// ---------------------------------------------------------------------------
-
-static constexpr unsigned kP1TraceLinesPerMinute = 40;
-static constexpr size_t kP1TraceBodyChars = 300;
-static constexpr size_t kP1TraceRespChars = 120;
-
-static SRWLOCK g_p1TraceLock = SRWLOCK_INIT;
-static unsigned long long g_p1TraceWindowStart = 0;
-static unsigned g_p1TraceLines = 0;
-static bool g_p1TraceThrottleLogged = false;
-
-enum class P1TraceDecision { Allow, Throttled, Suppress };
-
-static P1TraceDecision P1TraceReserve() {
-    AcquireSRWLockExclusive(&g_p1TraceLock);
-    unsigned long long now = GetTickCount64();
-    if (g_p1TraceWindowStart == 0 ||
-        now - g_p1TraceWindowStart >= 60ull * 1000ull) {
-        g_p1TraceWindowStart = now;
-        g_p1TraceLines = 0;
-        g_p1TraceThrottleLogged = false;
-    }
-    P1TraceDecision decision = P1TraceDecision::Suppress;
-    if (g_p1TraceLines < kP1TraceLinesPerMinute) {
-        ++g_p1TraceLines;
-        decision = P1TraceDecision::Allow;
-    } else if (!g_p1TraceThrottleLogged) {
-        g_p1TraceThrottleLogged = true;
-        decision = P1TraceDecision::Throttled;
-    }
-    ReleaseSRWLockExclusive(&g_p1TraceLock);
-    return decision;
-}
-
-// Returns true when the caller may write one trace line. Writes the single
-// "[trace] throttled" notice itself, so callers never repeat it.
-static bool P1TraceBegin() {
-    P1TraceDecision decision = P1TraceReserve();
-    if (decision == P1TraceDecision::Throttled) {
-        P0WriteFileLog(L"[trace] throttled");
         return false;
     }
-    return decision == P1TraceDecision::Allow;
+    g_p0ModuleReferenceHeld.store(true, std::memory_order_release);
+    Wh_Log(L"[p1] module reference held (%p); FreeLibrary cannot unload it",
+           module);
+    return true;
 }
 
-// Appends at most maxChars characters of text to out, escaping anything that
-// would break the one-line rule or smuggle a control character into the log.
-static void P1TraceAppendEscaped(std::wstring& out,
-                                 const std::wstring& text,
-                                 size_t maxChars) {
-    size_t count = std::min(maxChars, text.size());
-    for (size_t i = 0; i < count; ++i) {
-        wchar_t ch = text[i];
-        switch (ch) {
-            case L'\\':
-                out += L"\\\\";
-                break;
-            case L'\r':
-                out += L"\\r";
-                break;
-            case L'\n':
-                out += L"\\n";
-                break;
-            case L'\t':
-                out += L"\\t";
-                break;
-            default:
-                if (ch < 0x20 || ch == 0x7f) {
-                    wchar_t buffer[8] = {};
-                    swprintf_s(buffer, ARRAYSIZE(buffer), L"\\u%04X",
-                               static_cast<unsigned>(ch));
-                    out += buffer;
-                } else {
-                    out.push_back(ch);
-                }
-                break;
-        }
-    }
-}
-
-// Converts a short UTF-8 prefix, cut on a code-point boundary, and escapes it.
-static std::wstring P1TracePreviewUtf8(const std::string& utf8,
-                                       size_t maxChars) {
-    std::wstring preview;
-    if (utf8.empty()) {
-        return preview;
-    }
-    size_t limit = std::min(utf8.size(), maxChars * 4);
-    while (limit > 0 && limit < utf8.size() &&
-           (static_cast<unsigned char>(utf8[limit]) & 0xC0) == 0x80) {
-        --limit;
-    }
-    std::wstring wide = P1Utf8ToWide(utf8.substr(0, limit));
-    P1TraceAppendEscaped(preview, wide, maxChars);
-    return preview;
-}
-
-static unsigned long long P1TraceCountSegments(const std::string& body) {
-    if (body.empty()) {
-        return 0;
-    }
-    unsigned long long count = 1;
-    for (size_t i = 0; i + 2 < body.size(); ++i) {
-        if (body[i] == '"' && body[i + 1] == ',' && body[i + 2] == '"') {
-            ++count;
-        }
-    }
-    return count;
-}
-
-// Two lines per relayed request: size/batch, then the escaped body prefix.
-static void P1TraceHttpRequest(unsigned long long id,
-                               const std::string& body) {
-    if (P1TraceBegin()) {
-        P0WriteFileLog(L"[trace] http id=%llu bytes=%llu batch=%llu", id,
-                       static_cast<unsigned long long>(body.size()),
-                       P1TraceCountSegments(body));
-    }
-    if (P1TraceBegin()) {
-        std::wstring preview = P1TracePreviewUtf8(body, kP1TraceBodyChars);
-        P0WriteFileLog(L"[trace] body id=%llu %s", id, preview.c_str());
-    }
-}
-
-static void P1TraceHttpResponse(unsigned long long id,
-                                int status,
-                                const std::string& body) {
-    if (!P1TraceBegin()) {
+// Runs the whole teardown on the WebView2 UI thread, inside the dispatch
+// window's WndProc. The return of the SendMessageW that delivered
+// kP1MsgDestroyWindow is the synchronisation point with Wh_ModBeforeUninit:
+// the UI thread stays inside this function, and therefore inside this module,
+// until the teardown is complete; user32 does not resume the sender before the
+// WndProc returns.
+//
+// A counted release never signals anything: it only decrements its counter.
+// The pump below is what makes those decrements observable, because WebView2
+// delivers its completion callbacks (and the wrapper final releases) through
+// this thread's message queue.
+//
+// This function only records evidence. Unload is proven when the counters
+// reached zero, no wrapper entry point is executing on any thread, the
+// decrement that reached zero happened on this UI thread (so the pump runs
+// after that release returned and its frame is provably gone), this teardown
+// was not entered from inside one of our own callbacks, and no wrapper call
+// was ever observed outside this thread. Every other outcome records a
+// failure. P1DecideUnload turns the recorded verdict into the one unload/stay
+// decision.
+static void P1DestroyWindowOnUiThread(HWND hwnd) {
+    if (g_p1TeardownInProgress) {
+        // The pump below dispatched a message that re-entered this path. The
+        // outer call owns the teardown and keeps pumping until it finishes.
+        Wh_Log(L"[p1] nested destroy request ignored: teardown already in "
+               L"progress");
         return;
     }
-    std::wstring preview = P1TracePreviewUtf8(body, kP1TraceRespChars);
-    P0WriteFileLog(L"[trace] resp id=%llu status=%d bytes=%llu first=%s", id,
-                   status, static_cast<unsigned long long>(body.size()),
-                   preview.c_str());
+    g_p1TeardownInProgress = true;
+
+    // Read before any work: a positive depth means this teardown was entered
+    // from inside one of our callbacks (a nested message loop in an Invoke),
+    // and that frame must not return into an unloaded image.
+    const DWORD teardownThreadId = GetCurrentThreadId();
+    const long entryDepth = P0GetWrapperDepth();
+    bool quiescent = false;
+    // Always a static literal: the verdict stores this pointer and the sender
+    // reads it after SendMessageW returned.
+    const wchar_t* reason = L"quiescence could not be proven";
+    bool teardownFailed = false;
+
+    P0OutstandingSnapshot snapshot = P0ReadOutstanding();
+    Wh_Log(L"[p1] UI-thread teardown started (outstanding=%ld "
+           L"addScriptRefs=%ld lastReleaseThread=%lu teardownThread=%lu "
+           L"entryDepth=%ld)",
+           snapshot.callbacks, snapshot.addScriptRefs,
+           static_cast<unsigned long>(snapshot.lastReleaseThreadId),
+           static_cast<unsigned long>(teardownThreadId), entryDepth);
+
+    try {
+        // Queued worker references are released here, on the UI thread, before
+        // the webview itself goes away.
+        P1DrainRepliesOnUiThread(false);
+
+        void* webView = P0AcquireWebView();
+        P0ComRef webViewRef;
+        webViewRef.object = webView;
+
+        // 1) The page restores every translated text and stops; it must not
+        //    call into the mod again. No completion handler is needed.
+        if (webView) {
+            void* postFn = nullptr;
+            if (P0GetValidatedSlot(webView, kWebViewSlotPostWebMessageAsString,
+                                   &postFn)) {
+                std::wstring message = kP1Tag;
+                message.push_back(0x1f);
+                message += L"teardown";
+                HRESULT hr = reinterpret_cast<FnPostWebMessageAsString>(postFn)(
+                    webView, message.c_str());
+                if (FAILED(hr)) {
+                    Wh_Log(L"[p1] teardown message could not be posted (%08X)",
+                           static_cast<unsigned>(hr));
+                }
+            } else {
+                Wh_Log(L"[p1] teardown message skipped: post slot invalid");
+            }
+
+            // 2) The document-created script is removed by the id its AddScript
+            //    completion returned. If the completion has not arrived yet,
+            //    the pump below delivers it and the completion removes the
+            //    script itself; the AddScript reference counter is waited for,
+            //    so that completion cannot run after this function.
+            P0RemoveRegisteredScript(webView);
+        }
+
+        // 3) Navigation and web-message handlers are removed and every stored
+        //    reference is released.
+        P0CleanupWebView();
+
+        // 4) The environment vtable is restored before anything else can call
+        //    into this image.
+        P0RestoreEnvironment(true);
+    } catch (...) {
+        // The cleanup is incomplete, so quiescence is no longer provable.
+        // Never continue as if the callbacks were gone: record the failure.
+        teardownFailed = true;
+        reason = L"an exception aborted the UI-thread teardown";
+        Wh_Log(L"[p1] DEFECT: exception during UI-thread teardown; quiescence "
+               L"cannot be proven");
+    }
+
+    // 5) Pump until both counters are zero. Draining first also releases the
+    //    webview references queued by workers and by finalizers on other
+    //    threads; those releases are what let WebView2 finish its own objects.
+    //
+    //    The deadline is not a licence to unload. A completion that never
+    //    fires would otherwise block the unload forever, so the teardown stops
+    //    pumping and records a failure: the module stays resident, and the
+    //    objects that still point into it keep working. A timeout is never a
+    //    proven unload.
+    bool quitSeen = false;
+    int quitCode = 0;
+    if (!teardownFailed) {
+        const ULONGLONG deadline =
+            GetTickCount64() + kP1TeardownPumpDeadlineMs;
+        try {
+            MSG msg;
+            for (;;) {
+                P1DrainRepliesOnUiThread(false);
+
+                // One snapshot for the counters and the thread id, so a zero
+                // counter can never be read with an older release's thread.
+                // A release on any thread other than this UI thread is not
+                // provably done with this image (that thread has not returned
+                // yet from the frame that decremented), so it is not a proof.
+                // A nonzero entryDepth covers a teardown that was entered
+                // while one of our callbacks was still on this thread's stack.
+                snapshot = P0ReadOutstanding();
+                long active =
+                    g_p0ActiveWrapperCalls.load(std::memory_order_acquire);
+                if (snapshot.callbacks == 0 &&
+                    snapshot.addScriptRefs == 0 && active == 0) {
+                    bool lastReleaseOnUiThread =
+                        snapshot.lastReleaseThreadId == 0 ||
+                        snapshot.lastReleaseThreadId == teardownThreadId;
+                    if (lastReleaseOnUiThread && entryDepth == 0) {
+                        quiescent = true;
+                    } else {
+                        reason = L"the final release or the teardown entry is "
+                                 L"not attributable to this UI thread";
+                        Wh_Log(L"[p1] DEFECT: quiescence not provable: "
+                               L"lastReleaseThread=%lu teardownThread=%lu "
+                               L"entryDepth=%ld",
+                               static_cast<unsigned long>(
+                                   snapshot.lastReleaseThreadId),
+                               static_cast<unsigned long>(teardownThreadId),
+                               entryDepth);
+                    }
+                    break;
+                }
+                if (GetTickCount64() >= deadline) {
+                    reason = L"the teardown pump deadline passed";
+                    Wh_Log(L"[p1] DEFECT: teardown pump deadline passed after "
+                           L"%llu ms with %ld callbacks and %ld AddScript "
+                           L"references outstanding",
+                           static_cast<unsigned long long>(
+                               kP1TeardownPumpDeadlineMs),
+                           snapshot.callbacks, snapshot.addScriptRefs);
+                    break;
+                }
+
+                // Wait for input, then dispatch it. DispatchMessageW runs
+                // WebView2's completion callbacks and our wrapper finalizers
+                // on this thread.
+                MsgWaitForMultipleObjectsEx(0, nullptr, 50, QS_ALLINPUT, 0);
+                while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+                    if (msg.message == WM_QUIT) {
+                        // Do not swallow the app's quit request; restore it
+                        // after the pump, on every exit path.
+                        quitSeen = true;
+                        quitCode = static_cast<int>(msg.wParam);
+                        continue;
+                    }
+                    TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+            }
+        } catch (...) {
+            // An exception leaves the counters unproven. Record the failure;
+            // never finish as if the callbacks were gone.
+            reason = L"an exception aborted the teardown pump";
+            Wh_Log(L"[p1] DEFECT: exception during the teardown pump "
+                   L"(outstanding=%ld addScriptRefs=%ld); quiescence cannot be "
+                   L"proven",
+                   snapshot.callbacks, snapshot.addScriptRefs);
+        }
+    }
+
+    // Re-post on every exit path from the pump, including the exception path:
+    // the pump consumed WM_QUIT, so the app's quit request must not be lost.
+    if (quitSeen) {
+        PostQuitMessage(quitCode);
+    }
+
+    // 6) Cleanup is the same whether or not unload was proven: destroy the
+    //    window, unregister its class and mark the lifecycle Stopped before
+    //    returning to user32. A module that stays resident survives a later
+    //    enable, which loads a second copy.
+    HWND published = g_p1DispatchWindow.exchange(nullptr);
+    if (published && published != hwnd) {
+        Wh_Log(L"[p1] DEFECT: dispatch window changed during teardown "
+               L"(published=%p hwnd=%p)",
+               published, hwnd);
+        // A second window whose WndProc points into this image survives the
+        // teardown; unload is not provable.
+        P1RecordTeardownFailure(
+            L"the dispatch window changed during the teardown");
+    }
+    if (!DestroyWindow(hwnd)) {
+        Wh_Log(L"[p1] DEFECT: DestroyWindow(dispatch window) failed (%lu)",
+               GetLastError());
+        // The window, and with it a WndProc that points into this image,
+        // outlives the teardown. This must reach the decision, not just the
+        // log.
+        P1RecordTeardownFailure(L"DestroyWindow(dispatch window) failed");
+    }
+    if (g_p1DispatchClassRegistered.exchange(false) && g_modModule) {
+        UnregisterClassW(kP1DispatchClass, g_modModule);
+    }
+
+    AcquireSRWLockExclusive(&g_p1DispatchLock);
+    g_p1DispatchState = P1DispatchState::None;
+    g_p1DispatchCreatorThreadId = 0;
+    WakeAllConditionVariable(&g_p1DispatchCv);
+    ReleaseSRWLockExclusive(&g_p1DispatchLock);
+
+    // The verdict is recorded before the lifecycle becomes Stopped: the sender
+    // reads Stopped with acquire semantics and must observe it. A failure
+    // recorded by another path (or by DestroyWindow above) is sticky, so this
+    // call can never turn one into a proven unload.
+    if (quiescent) {
+        P1RecordTeardownQuiescent();
+    } else {
+        P1RecordTeardownFailure(reason);
+    }
+
+    g_p1Lifecycle.store(P1Lifecycle::Stopped, std::memory_order_release);
+    g_p1TeardownInProgress = false;
+    Wh_Log(L"[p1] UI-thread teardown complete (%s): %s",
+           g_p1TeardownVerdict.load(std::memory_order_acquire) ==
+                   P1TeardownVerdict::Quiescent
+               ? L"quiescence proven"
+               : L"quiescence not proven",
+           g_p1TeardownReason.load(std::memory_order_acquire));
+}
+
+// Blocks until no dispatch-window creation is in flight. Wh_ModBeforeUninit
+// calls this after the lifecycle became Stopping, so a creator that is still
+// running will observe Stopping in its publish branch, destroy its own window
+// and report None. The unloader must never set Stopped while a creation is
+// still in flight.
+static void P1WaitForDispatchCreation() {
+    DWORD currentThread = GetCurrentThreadId();
+    AcquireSRWLockExclusive(&g_p1DispatchLock);
+    while (g_p1DispatchState == P1DispatchState::Creating) {
+        if (g_p1DispatchCreatorThreadId == currentThread) {
+            // The unload re-entered the creator on its own thread. Waiting
+            // would deadlock; the creator's publish branch will see Stopping
+            // and clean up as soon as this call returns to it.
+            Wh_Log(L"[p1] DEFECT: unload re-entered dispatch-window creation "
+                   L"on the creating thread");
+            break;
+        }
+        SleepConditionVariableSRW(&g_p1DispatchCv, &g_p1DispatchLock,
+                                  INFINITE, 0);
+    }
+    ReleaseSRWLockExclusive(&g_p1DispatchLock);
+}
+
+// Called from Wh_ModBeforeUninit (engine thread) after the state became
+// Stopping and P1WaitForDispatchCreation returned. It hands the teardown to the
+// UI thread with a blocking SendMessageW and waits on nothing else: the call
+// returns only after the WndProc returned to user32, which happens after the
+// teardown recorded either proof of quiescence or a failure, the window was
+// destroyed, its class was unregistered and the lifecycle became Stopped.
+// Returning early would let the DLL unload while WebView2 still holds code
+// pointers into it.
+//
+// Every path that cannot hand the teardown to the UI thread records a failure
+// instead of acting on it: P1DecideUnload is the one place that turns the
+// recorded evidence into a decision.
+static void P1TeardownUiThread() {
+    if (g_p1Lifecycle.load(std::memory_order_acquire) == P1Lifecycle::Stopped) {
+        return;
+    }
+
+    P1DispatchState state;
+    HWND window;
+    AcquireSRWLockExclusive(&g_p1DispatchLock);
+    state = g_p1DispatchState;
+    window = g_p1DispatchWindow.load(std::memory_order_acquire);
+    ReleaseSRWLockExclusive(&g_p1DispatchLock);
+
+    if (state == P1DispatchState::Creating) {
+        // Wh_ModBeforeUninit already waited; this is only for a re-entrant
+        // unload on the creating thread.
+        P1WaitForDispatchCreation();
+        AcquireSRWLockExclusive(&g_p1DispatchLock);
+        state = g_p1DispatchState;
+        window = g_p1DispatchWindow.load(std::memory_order_acquire);
+        ReleaseSRWLockExclusive(&g_p1DispatchLock);
+        if (state == P1DispatchState::Creating) {
+            Wh_Log(L"[p1] DEFECT: unload reached teardown while this thread is "
+                   L"creating the dispatch window; the creator owns the "
+                   L"cleanup");
+            // The window's WndProc points into this image and the creator may
+            // still dispatch messages through it. Nothing here can prove
+            // quiescence.
+            P1RecordTeardownFailure(
+                L"the teardown re-entered dispatch-window creation");
+            return;
+        }
+    }
+
+    if (state == P1DispatchState::None && !window) {
+        // A missing window is legitimate here: the wait above guarantees no
+        // creation is in flight, so either none was ever admitted or the
+        // creator cancelled its own window when it saw Stopping. A wrapper is
+        // handed to WebView2 only after the window is Ready, so nothing can be
+        // outstanding and there is nothing to tear down.
+        // P0RestoreEnvironment is defensive: it is a no-op when no environment
+        // was patched.
+        Wh_Log(L"[p1] no dispatch window is published at unload (no creation "
+               L"in flight); nothing to tear down");
+        P0RestoreEnvironment(false);
+        P0OutstandingSnapshot snapshot = P0ReadOutstanding();
+        long active = g_p0ActiveWrapperCalls.load(std::memory_order_acquire);
+        // An unknown depth (no TLS slot) is not proof of zero, so it is not a
+        // proof of quiescence either.
+        long entryDepth = P0GetWrapperDepth();
+        if (snapshot.callbacks != 0 || snapshot.addScriptRefs != 0 ||
+            active != 0 || entryDepth != 0) {
+            // Contradicts the protocol; with no window there is no UI thread
+            // pump to prove quiescence.
+            P1RecordTeardownFailure(
+                L"no dispatch window but quiescence is not provable");
+        } else {
+            P1RecordTeardownQuiescent();
+        }
+        g_p1Lifecycle.store(P1Lifecycle::Stopped, std::memory_order_release);
+        return;
+    }
+
+    if (!window) {
+        // Ready without a handle cannot happen under the protocol; do not
+        // pretend the teardown ran.
+        Wh_Log(L"[p1] DEFECT: dispatch window state is Ready but the handle "
+               L"is missing");
+        P0RestoreEnvironment(false);
+        P1RecordTeardownFailure(
+            L"the dispatch window state is Ready without a handle");
+        return;
+    }
+
+    // Blocking send. SendMessageW on the UI thread itself dispatches directly;
+    // from the engine thread it delivers to the UI thread's queue and returns
+    // only after the WndProc has returned to user32. In both cases the sender
+    // resumes after P1DestroyWindowOnUiThread finished, so no event and no
+    // counter wait is needed here.
+    Wh_Log(L"[p1] sending destroy request to the UI thread (window=%p)", window);
+    SendMessageW(window, kP1MsgDestroyWindow, 0, 0);
+    if (g_p1Lifecycle.load(std::memory_order_acquire) != P1Lifecycle::Stopped) {
+        Wh_Log(L"[p1] DEFECT: SendMessageW(kP1MsgDestroyWindow) returned but "
+               L"the lifecycle is not Stopped");
+        // The WndProc did not complete the teardown (it was filtered, it
+        // threw, or the window died), so nothing proves quiescence. The
+        // recorded verdict may still be NotRun; make the failure explicit.
+        P1RecordTeardownFailure(
+            L"SendMessageW(kP1MsgDestroyWindow) returned without the lifecycle "
+            L"reaching Stopped");
+    }
+    Wh_Log(L"[p1] UI-thread teardown returned");
+}
+
+// Outcome of the single unload decision. See P1DecideUnload.
+enum class P1UnloadDecision : int {
+    // Quiescence proven: no reference was taken, the image may unload.
+    ProvenSafe = 0,
+    // Not proven, but a loader reference is held: the image stays resident.
+    Resident,
+    // Not proven and no reference could be taken: the image will unload
+    // anyway. DEFECT.
+    Unresolved,
+};
+
+// The one place that decides whether this image may unload.
+//
+// Every teardown path reaches this function with its evidence already recorded
+// by P1RecordTeardownQuiescent / P1RecordTeardownFailure, and the counters are
+// re-read here as the last observation. The decision is:
+//
+//   ProvenSafe - quiescence was proven and every counter is zero: no module
+//                reference is taken, so Windhawk's FreeLibrary unloads the
+//                image.
+//   Resident   - not proven, but a real loader reference was taken: the image
+//                stays mapped for the life of the process (a deliberate leak).
+//   Unresolved - not proven and no reference could be taken: the image will
+//                unload anyway. This is a DEFECT that is logged here and
+//                reported to the caller; nothing can prevent the unload.
+//
+// Nothing else calls P1HoldModuleReference, and no teardown path logs a DEFECT
+// and then proceeds as if quiescence had been proven.
+static P1UnloadDecision P1DecideUnload(bool threadsStopped) {
+    P0OutstandingSnapshot snapshot = P0ReadOutstanding();
+    const long active =
+        g_p0ActiveWrapperCalls.load(std::memory_order_acquire);
+    const long entryDepth = P0GetWrapperDepth();
+    const DWORD teardownThreadId = GetCurrentThreadId();
+    const P1TeardownVerdict verdict =
+        g_p1TeardownVerdict.load(std::memory_order_acquire);
+    const wchar_t* recordedReason =
+        g_p1TeardownReason.load(std::memory_order_acquire);
+
+    const wchar_t* defect = nullptr;
+    if (!threadsStopped) {
+        defect = L"the mod's worker threads could not be stopped";
+    } else if (verdict != P1TeardownVerdict::Quiescent) {
+        defect = recordedReason ? recordedReason
+                                : L"quiescence was not proven";
+    } else if (g_p0WrapperCallOutsideUiThread.load(
+                   std::memory_order_acquire)) {
+        // Sticky and unconditional: a snapshot cannot prove that another
+        // thread's wrapper frame already returned.
+        defect = L"a wrapper call was observed on a thread other than the "
+                 L"WebView2 UI thread";
+    } else if (snapshot.callbacks != 0 || snapshot.addScriptRefs != 0) {
+        defect = L"callback objects remain outstanding";
+    } else if (active != 0) {
+        defect = L"a wrapper entry point is still executing";
+    } else if (entryDepth != 0) {
+        defect = L"the decision ran inside a wrapper entry point";
+    }
+
+    if (!defect) {
+        Wh_Log(L"[p1] unload proven safe: no callback, wrapper call or window "
+               L"of this module is left");
+        return P1UnloadDecision::ProvenSafe;
+    }
+
+    // From here on the module must not be freed. The TLS slot is kept even if
+    // the reference cannot be taken: a late wrapper may still run while the
+    // image is mapped.
+    g_p0StayResident.store(true, std::memory_order_release);
+    if (!P1HoldModuleReference(defect, snapshot, teardownThreadId,
+                               entryDepth)) {
+        Wh_Log(L"[p1] DEFECT: unload is not proven and no module reference "
+               L"could be taken; this image will unload with callbacks that "
+               L"may still point into it");
+        return P1UnloadDecision::Unresolved;
+    }
+    return P1UnloadDecision::Resident;
 }
 
 // ---------------------------------------------------------------------------
@@ -5829,12 +6475,10 @@ struct P1HttpRequest {
     unsigned long long id = 0;
     std::wstring method;
     std::wstring url;
-    std::vector<std::pair<std::wstring, std::wstring>> headers;
     std::string body;
     unsigned long long timeoutMs = 20000;
     std::string apiKey;       // never passed to a log call; header only
     std::wstring apiKeyHost;  // lower-case host the key is allowed for
-    bool trace = false;       // debug setting at relay time
     void* webView = nullptr;  // owned reference, released on the UI thread
 };
 
@@ -5844,14 +6488,30 @@ struct P1HttpReply {
     unsigned long error = 0;
     std::string body;
     void* webView = nullptr;  // owned reference, released on the UI thread
+    // True for a queue item that only carries a webview reference to release
+    // on the UI thread (a worker or the engine thread must never release one).
+    bool releaseOnly = false;
+};
+
+// Pool lifecycle. The state is changed under g_p1HttpLock; the join itself is
+// done outside it because the workers need that lock to observe Stopping.
+enum class P1PoolState : int {
+    NotStarted = 0,
+    Starting,
+    Running,
+    Stopping,
+    Stopped,
 };
 
 static SRWLOCK g_p1HttpLock = SRWLOCK_INIT;
 static CONDITION_VARIABLE g_p1HttpCv = CONDITION_VARIABLE_INIT;
 static std::deque<P1HttpRequest*> g_p1HttpQueue;
-static std::vector<HANDLE> g_p1Workers;
-static bool g_p1HttpStarted = false;
-static bool g_p1HttpStop = false;
+// Fixed-size storage reserved before any thread is created: no allocation can
+// fail between CreateThread and storing the handle, and no handle can be lost.
+// Guarded by g_p1HttpLock.
+static HANDLE g_p1Workers[kP1HttpWorkers] = {};
+static size_t g_p1WorkerCount = 0;
+static P1PoolState g_p1PoolState = P1PoolState::NotStarted;
 
 static SRWLOCK g_p1ReplyLock = SRWLOCK_INIT;
 static std::deque<P1HttpReply*> g_p1ReplyQueue;
@@ -5865,6 +6525,56 @@ static void P1ReleaseWebViewRef(void* webView) {
     if (release) {
         release(webView);
     }
+}
+
+// Queues a webview reference for release on the UI thread. Used by workers and
+// by the engine thread; the reply drain releases it. If the queue cannot be
+// reached the reference is deliberately leaked rather than released on the
+// wrong thread.
+static void P1QueueWebViewRelease(void* webView) {
+    if (!webView) {
+        return;
+    }
+    auto* item = new (std::nothrow) P1HttpReply();
+    if (!item) {
+        Wh_Log(L"[p1] out of memory while queueing a webview release; the "
+               L"reference is leaked");
+        return;
+    }
+    item->releaseOnly = true;
+    item->webView = webView;
+
+    bool stored = false;
+    AcquireSRWLockExclusive(&g_p1ReplyLock);
+    try {
+        g_p1ReplyQueue.push_back(item);
+        stored = true;
+    } catch (...) {
+    }
+    ReleaseSRWLockExclusive(&g_p1ReplyLock);
+
+    if (!stored) {
+        Wh_Log(L"[p1] reply queue rejected a webview release; the reference is "
+               L"leaked");
+        delete item;
+        return;
+    }
+    P1WakeUi();
+}
+
+// Transfers the webview reference held by an AddScript completion handler to
+// the UI thread's release queue. Called from the completion (UI thread) and
+// from the handler finalizer (any thread); it never calls Release directly.
+static void P0ReleaseScriptWebView(P0ScriptHandler* handler) {
+    if (!handler || !handler->webView) {
+        return;
+    }
+    void* webView = handler->webView;
+    handler->webView = nullptr;
+    P1QueueWebViewRelease(webView);
+    // This is the whole notification: the counter is decremented and nothing
+    // is signalled. The teardown pump runs on the UI thread and observes it.
+    P0CountAddScriptRefReleased();
 }
 
 static std::wstring P1BuildHttpReplyMessage(unsigned long long id,
@@ -5904,12 +6614,14 @@ static void P1PostHttpReply(void* webView,
     HRESULT hr = reinterpret_cast<FnPostWebMessageAsString>(postFn)(
         webView, text.c_str());
     if (FAILED(hr)) {
-        P0_LOG(L"[p1] http reply id=%llu could not be posted (hr=%08X)", id,
+        Wh_Log(L"[p1] http reply id=%llu could not be posted (hr=%08X)", id,
                static_cast<unsigned>(hr));
     }
 }
 
-static void P1DrainRepliesOnUiThread() {
+// Runs on the UI thread. `postReplies` is false while Stopping: the page is
+// going away, only the webview references still have to be released here.
+static void P1DrainRepliesOnUiThread(bool postReplies) {
     std::deque<P1HttpReply*> replies;
     AcquireSRWLockExclusive(&g_p1ReplyLock);
     replies.swap(g_p1ReplyQueue);
@@ -5919,12 +6631,14 @@ static void P1DrainRepliesOnUiThread() {
         if (!reply) {
             continue;
         }
-        try {
-            P1PostHttpReply(reply->webView, reply->id, reply->status,
-                            reply->error, reply->body);
-        } catch (...) {
-            P0_LOG(L"[p1] exception while posting http reply id=%llu",
-                   reply->id);
+        if (postReplies && !reply->releaseOnly) {
+            try {
+                P1PostHttpReply(reply->webView, reply->id, reply->status,
+                                reply->error, reply->body);
+            } catch (...) {
+                Wh_Log(L"[p1] exception while posting http reply id=%llu",
+                       reply->id);
+            }
         }
         P1ReleaseWebViewRef(reply->webView);
         delete reply;
@@ -5934,6 +6648,10 @@ static void P1DrainRepliesOnUiThread() {
 // ---------------------------------------------------------------------------
 // HTTP worker pool
 // ---------------------------------------------------------------------------
+
+// The redirect-policy failure is logged once per process: it is a configuration
+// or WinHTTP failure, not a per-request event.
+static std::atomic<bool> g_p1RedirectPolicyLogged{false};
 
 static P1HttpReply* P1PerformHttp(const P1HttpRequest* request) {
     auto* reply = new (std::nothrow) P1HttpReply();
@@ -5953,14 +6671,10 @@ static P1HttpReply* P1PerformHttp(const P1HttpRequest* request) {
         P1UrlParts parts;
         if (!P1ParseUrl(request->url, parts)) {
             reply->error = ERROR_INVALID_PARAMETER;
-            P0WriteFileLog(L"[p1] http id=%llu method=%s host=%s stage=%s "
-                           L"error=%lu ms=%llu",
-                           request->id, methodForLog.c_str(),
-                           hostForLog.c_str(), stage, reply->error,
-                           GetTickCount64() - started);
-            if (request->trace) {
-                P1TraceHttpResponse(request->id, reply->status, reply->body);
-            }
+            Wh_Log(L"[p1] http id=%llu method=%s host=%s stage=%s error=%lu "
+                   L"ms=%llu",
+                   request->id, methodForLog.c_str(), hostForLog.c_str(), stage,
+                   reply->error, GetTickCount64() - started);
             return reply;
         }
         hostForLog = P1ClipForLog(parts.host, 80);
@@ -6012,58 +6726,57 @@ static P1HttpReply* P1PerformHttp(const P1HttpRequest* request) {
             throw reply->error;
         }
 
+        // Redirects are never followed: the relay accepts exactly one URL, so
+        // a 3xx is an error and must not turn into a request to another host.
+        // The policy is part of the allowlist, so failing to set it aborts the
+        // request instead of falling back to WinHTTP's default policy.
+        DWORD redirectPolicy = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
+        if (!WinHttpSetOption(handles.request, WINHTTP_OPTION_REDIRECT_POLICY,
+                              &redirectPolicy, sizeof(redirectPolicy))) {
+            reply->error = GetLastError();
+            if (!g_p1RedirectPolicyLogged.exchange(true,
+                                                   std::memory_order_relaxed)) {
+                Wh_Log(L"[p1] http id=%llu redirect policy option failed (%lu); "
+                       L"request aborted",
+                       request->id, reply->error);
+            }
+            return reply;
+        }
+
         DWORD decompression = WINHTTP_DECOMPRESSION_FLAG_ALL;
         if (!WinHttpSetOption(handles.request, WINHTTP_OPTION_DECOMPRESSION,
                               &decompression, sizeof(decompression))) {
-            P0WriteFileLog(L"[p1] http id=%llu decompression option failed "
-                           L"(%lu); continuing",
-                           request->id, GetLastError());
+            Wh_Log(L"[p1] http id=%llu decompression option failed (%lu); "
+                   L"continuing",
+                   request->id, GetLastError());
         }
 
         stage = L"headers";
-        // The key lives in P1HttpRequest::apiKey and in this header block, and
-        // nowhere else. Neither is ever passed to a log call: every log line in
-        // this function takes only the host, the stage, an error/status code or
-        // a body, and the trace functions receive the request body alone.
-        std::wstring headerBlock;
-        for (const auto& header : request->headers) {
-            headerBlock += header.first;
-            headerBlock += L": ";
-            headerBlock += header.second;
-            headerBlock += L"\r\n";
-        }
-
-        bool hasAuthorization = false;
-        for (const auto& header : request->headers) {
-            if (P1EqualsNoCase(header.first, L"authorization")) {
-                hasAuthorization = true;
-                break;
-            }
-        }
+        // The page sends no headers at all; the protocol fixes the content
+        // type. The key lives in P1HttpRequest::apiKey and in this header block,
+        // and nowhere else: no log line below includes it.
+        std::wstring headerBlock = L"Content-Type: application/json\r\n";
 
         bool hostMatchesKey =
             !request->apiKey.empty() &&
             P1HostMatchesKey(parts.host, request->apiKeyHost);
-        // The free endpoints never take the key, even when llmBaseUrl is
-        // misconfigured to point at one of them.
+        // The free endpoint never takes the key, even when llmBaseUrl is
+        // misconfigured to point at it.
         if (hostMatchesKey && P1HostExcludedFromAuth(parts.host)) {
             hostMatchesKey = false;
         }
-        if (hostMatchesKey && parts.secure && !hasAuthorization) {
+        if (hostMatchesKey && parts.secure) {
             headerBlock += L"Authorization: Bearer ";
             headerBlock += P1Utf8ToWide(request->apiKey);
             headerBlock += L"\r\n";
-            P0WriteFileLog(L"[p1] injected auth for host=%s",
-                           hostForLog.c_str());
-        } else if (hostMatchesKey && !hasAuthorization) {
-            P0WriteFileLog(L"[p1] not injecting auth for non-https host=%s",
-                           hostForLog.c_str());
+            Wh_Log(L"[p1] injected auth for host=%s", hostForLog.c_str());
+        } else if (hostMatchesKey) {
+            Wh_Log(L"[p1] not injecting auth for non-https host=%s",
+                   hostForLog.c_str());
         }
 
-        const wchar_t* headers =
-            headerBlock.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS
-                                : headerBlock.c_str();
-        DWORD headersLength = headerBlock.empty() ? 0 : static_cast<DWORD>(-1);
+        const wchar_t* headers = headerBlock.c_str();
+        DWORD headersLength = static_cast<DWORD>(-1);
 
         LPVOID body = nullptr;
         DWORD bodyLength = 0;
@@ -6097,6 +6810,15 @@ static P1HttpReply* P1PerformHttp(const P1HttpRequest* request) {
             throw reply->error;
         }
         reply->status = static_cast<int>(statusCode);
+        if (statusCode >= 300 && statusCode <= 399) {
+            reply->error = ERROR_WINHTTP_REDIRECT_FAILED;
+            Wh_Log(L"[p1] http id=%llu method=%s host=%s status=%d error=%lu "
+                   L"redirect=rejected ms=%llu",
+                   request->id, methodForLog.c_str(), hostForLog.c_str(),
+                   reply->status, reply->error,
+                   GetTickCount64() - started);
+            return reply;
+        }
 
         stage = L"read";
         std::string bodyText;
@@ -6154,20 +6876,16 @@ static P1HttpReply* P1PerformHttp(const P1HttpRequest* request) {
         }
 
         unsigned long long elapsed = GetTickCount64() - started;
-        P0WriteFileLog(L"[p1] http id=%llu method=%s host=%s status=%d "
-                       L"error=%lu bytes=%llu ms=%llu%s",
-                       request->id, methodForLog.c_str(),
-                       hostForLog.c_str(), reply->status, reply->error,
-                       static_cast<unsigned long long>(reply->body.size()),
-                       elapsed, truncated ? L" truncated=1" : L"");
+        Wh_Log(L"[p1] http id=%llu method=%s host=%s status=%d error=%lu "
+               L"bytes=%llu ms=%llu%s",
+               request->id, methodForLog.c_str(), hostForLog.c_str(),
+               reply->status, reply->error,
+               static_cast<unsigned long long>(reply->body.size()), elapsed,
+               truncated ? L" truncated=1" : L"");
         if (truncated) {
-            P0WriteFileLog(L"[p1] http id=%llu response truncated at %llu "
-                           L"bytes",
-                           request->id,
-                           static_cast<unsigned long long>(kP1MaxReplyBytes));
-        }
-        if (request->trace) {
-            P1TraceHttpResponse(request->id, reply->status, reply->body);
+            Wh_Log(L"[p1] http id=%llu response truncated at %llu bytes",
+                   request->id,
+                   static_cast<unsigned long long>(kP1MaxReplyBytes));
         }
         return reply;
     } catch (...) {
@@ -6175,15 +6893,11 @@ static P1HttpReply* P1PerformHttp(const P1HttpRequest* request) {
             reply->error = ERROR_NOT_ENOUGH_MEMORY;
         }
         unsigned long long elapsed = GetTickCount64() - started;
-        P0WriteFileLog(L"[p1] http id=%llu method=%s host=%s status=%d "
-                       L"stage=%s error=%lu bytes=%llu ms=%llu",
-                       request->id, methodForLog.c_str(), hostForLog.c_str(),
-                       reply->status, stage, reply->error,
-                       static_cast<unsigned long long>(reply->body.size()),
-                       elapsed);
-        if (request->trace) {
-            P1TraceHttpResponse(request->id, reply->status, reply->body);
-        }
+        Wh_Log(L"[p1] http id=%llu method=%s host=%s status=%d stage=%s "
+               L"error=%lu bytes=%llu ms=%llu",
+               request->id, methodForLog.c_str(), hostForLog.c_str(),
+               reply->status, stage, reply->error,
+               static_cast<unsigned long long>(reply->body.size()), elapsed);
         return reply;
     }
 }
@@ -6193,16 +6907,27 @@ static DWORD WINAPI P1HttpWorkerProc(void*) {
         P1HttpRequest* request = nullptr;
 
         AcquireSRWLockExclusive(&g_p1HttpLock);
-        while (!g_p1HttpStop && g_p1HttpQueue.empty()) {
+        while (g_p1PoolState == P1PoolState::Running &&
+               g_p1HttpQueue.empty()) {
             SleepConditionVariableSRW(&g_p1HttpCv, &g_p1HttpLock, INFINITE, 0);
         }
-        if (g_p1HttpStop) {
+        if (g_p1PoolState != P1PoolState::Running) {
             ReleaseSRWLockExclusive(&g_p1HttpLock);
             break;
         }
         request = g_p1HttpQueue.front();
         g_p1HttpQueue.pop_front();
         ReleaseSRWLockExclusive(&g_p1HttpLock);
+
+        // Once Stopping was set no new request may be performed; a request
+        // that was already in flight is bounded by its timeout and completes.
+        if (!request || !P1IsRunning()) {
+            if (request) {
+                P1QueueWebViewRelease(request->webView);
+                delete request;
+            }
+            continue;
+        }
 
         P1HttpReply* reply = nullptr;
         try {
@@ -6212,11 +6937,19 @@ static DWORD WINAPI P1HttpWorkerProc(void*) {
         }
         if (!reply) {
             // P1PerformHttp failed before taking over the webview reference.
-            P1ReleaseWebViewRef(request->webView);
+            P1QueueWebViewRelease(request->webView);
             delete request;
             continue;
         }
         delete request;
+
+        // A request that finished after Stopping is never answered; only its
+        // webview reference is handed to the UI thread for release.
+        if (!P1IsRunning()) {
+            P1QueueWebViewRelease(reply->webView);
+            delete reply;
+            continue;
+        }
 
         bool stored = false;
         AcquireSRWLockExclusive(&g_p1ReplyLock);
@@ -6230,58 +6963,80 @@ static DWORD WINAPI P1HttpWorkerProc(void*) {
         if (stored) {
             P1WakeUi();
         } else {
-            P1ReleaseWebViewRef(reply->webView);
+            // Cannot queue: leak the reference instead of releasing it here.
+            Wh_Log(L"[p1] reply queue rejected an http reply; its webview "
+                   L"reference is leaked");
             delete reply;
         }
     }
     return 0;
 }
 
+static bool P1EnsureCacheSaver();
+static void P1StopHttpWorkers();
+
+// Starts the HTTP pool. The state transition, the handle storage and the
+// thread creation happen under g_p1HttpLock; a partial start is torn down by
+// P1StopHttpWorkers, which is the only place that waits on and closes worker
+// handles. Never starts once the mod is not Running, and never moves a
+// Stopping/Stopped pool back to Running. The cache saver starts with the pool,
+// as the two are joined together at teardown.
 static bool P1StartHttpWorkers() {
     AcquireSRWLockExclusive(&g_p1HttpLock);
-    if (g_p1HttpStarted) {
+    if (g_p1PoolState == P1PoolState::Running) {
         ReleaseSRWLockExclusive(&g_p1HttpLock);
         return true;
     }
-    g_p1HttpStarted = true;
-    g_p1HttpStop = false;
-    ReleaseSRWLockExclusive(&g_p1HttpLock);
+    if (g_p1PoolState != P1PoolState::NotStarted || !P1IsRunning()) {
+        ReleaseSRWLockExclusive(&g_p1HttpLock);
+        return false;
+    }
+    g_p1PoolState = P1PoolState::Starting;
+    g_p1WorkerCount = 0;
+    for (HANDLE& handle : g_p1Workers) {
+        handle = nullptr;
+    }
 
     for (size_t i = 0; i < kP1HttpWorkers; ++i) {
         HANDLE thread =
             CreateThread(nullptr, 0, &P1HttpWorkerProc, nullptr, 0, nullptr);
         if (!thread) {
-            P0_LOG(L"[p1] CreateThread for an http worker failed (%lu)",
+            Wh_Log(L"[p1] CreateThread for an http worker failed (%lu)",
                    GetLastError());
-            continue;
+            break;
         }
-        try {
-            g_p1Workers.push_back(thread);
-        } catch (...) {
-            CloseHandle(thread);
-        }
+        g_p1Workers[g_p1WorkerCount++] = thread;
     }
 
-    if (g_p1Workers.empty()) {
-        AcquireSRWLockExclusive(&g_p1HttpLock);
-        g_p1HttpStarted = false;
+    bool complete = g_p1WorkerCount == kP1HttpWorkers;
+    if (!complete || !P1IsRunning()) {
+        size_t started = g_p1WorkerCount;
         ReleaseSRWLockExclusive(&g_p1HttpLock);
-        P0_LOG(L"[p1] no http worker could be started");
+        Wh_Log(L"[p1] http worker start failed (%llu of %llu); stopping the "
+               L"partial pool",
+               static_cast<unsigned long long>(started),
+               static_cast<unsigned long long>(kP1HttpWorkers));
+        P1StopHttpWorkers();
         return false;
     }
 
-    P0_LOG(L"[p1] %llu http workers started",
-           static_cast<unsigned long long>(g_p1Workers.size()));
+    g_p1PoolState = P1PoolState::Running;
+    size_t started = g_p1WorkerCount;
+    ReleaseSRWLockExclusive(&g_p1HttpLock);
+    Wh_Log(L"[p1] %llu http workers started",
+           static_cast<unsigned long long>(started));
+    P1EnsureCacheSaver();
     return true;
 }
 
 static bool P1EnqueueHttpRequest(P1HttpRequest* request) {
-    if (!P1StartHttpWorkers()) {
+    if (!P1IsRunning() || !P1StartHttpWorkers()) {
         return false;
     }
 
     AcquireSRWLockExclusive(&g_p1HttpLock);
-    if (g_p1HttpStop || g_p1HttpQueue.size() >= kP1HttpQueueLimit) {
+    if (g_p1PoolState != P1PoolState::Running ||
+        g_p1HttpQueue.size() >= kP1HttpQueueLimit) {
         ReleaseSRWLockExclusive(&g_p1HttpLock);
         return false;
     }
@@ -6300,85 +7055,104 @@ static bool P1EnqueueHttpRequest(P1HttpRequest* request) {
 }
 
 static void P1StopHttpWorkers() {
-    AcquireSRWLockExclusive(&g_p1HttpLock);
-    g_p1HttpStop = true;
     std::deque<P1HttpRequest*> pending;
+    HANDLE workers[kP1HttpWorkers] = {};
+    size_t count = 0;
+
+    AcquireSRWLockExclusive(&g_p1HttpLock);
+    if (g_p1PoolState == P1PoolState::NotStarted ||
+        g_p1PoolState == P1PoolState::Stopped) {
+        g_p1PoolState = P1PoolState::Stopped;
+        ReleaseSRWLockExclusive(&g_p1HttpLock);
+        return;
+    }
+    if (g_p1PoolState == P1PoolState::Stopping) {
+        // Another caller already owns the join. It is idempotent: this caller
+        // must not wait on, close or clear the same handles again.
+        ReleaseSRWLockExclusive(&g_p1HttpLock);
+        return;
+    }
+    g_p1PoolState = P1PoolState::Stopping;
+    count = g_p1WorkerCount;
+    for (size_t i = 0; i < count; ++i) {
+        workers[i] = g_p1Workers[i];
+        g_p1Workers[i] = nullptr;
+    }
+    g_p1WorkerCount = 0;
     pending.swap(g_p1HttpQueue);
     ReleaseSRWLockExclusive(&g_p1HttpLock);
     WakeAllConditionVariable(&g_p1HttpCv);
 
+    // Pending requests never ran: their webview references go to the UI
+    // thread's release queue, never to Release on this thread.
     for (P1HttpRequest* request : pending) {
         if (request) {
-            P1ReleaseWebViewRef(request->webView);
+            P1QueueWebViewRelease(request->webView);
             delete request;
         }
     }
 
-    if (!g_p1Workers.empty()) {
-        // Idle workers exit at once. A worker that is still inside a request
-        // would otherwise block the unload (possibly on the UI thread), so the
-        // wait is short; the module is pinned if one is still busy.
-        DWORD wait = WaitForMultipleObjects(
-            static_cast<DWORD>(g_p1Workers.size()), g_p1Workers.data(), TRUE,
-            2000);
-        if (wait == WAIT_TIMEOUT) {
-            P1PinModule();
+    if (count) {
+        // Every request is bounded by timeoutMs, so this wait ends. INFINITE
+        // on purpose: Wh_ModBeforeUninit must not return while a worker could
+        // still run code from this image.
+        WaitForMultipleObjects(static_cast<DWORD>(count), workers, TRUE,
+                               INFINITE);
+        for (size_t i = 0; i < count; ++i) {
+            CloseHandle(workers[i]);
         }
-        for (HANDLE thread : g_p1Workers) {
-            CloseHandle(thread);
-        }
-        g_p1Workers.clear();
     }
 
-    std::deque<P1HttpReply*> replies;
-    AcquireSRWLockExclusive(&g_p1ReplyLock);
-    replies.swap(g_p1ReplyQueue);
-    ReleaseSRWLockExclusive(&g_p1ReplyLock);
-    for (P1HttpReply* reply : replies) {
-        if (reply) {
-            P1ReleaseWebViewRef(reply->webView);
-            delete reply;
-        }
-    }
+    AcquireSRWLockExclusive(&g_p1HttpLock);
+    g_p1PoolState = P1PoolState::Stopped;
+    ReleaseSRWLockExclusive(&g_p1HttpLock);
+
+    // The reply queue is drained by the UI thread, which releases the webview
+    // references there. If it is never drained those references leak, which is
+    // still safer than releasing them here.
+    P1WakeUi();
 }
 
 // ---------------------------------------------------------------------------
 // Settings push
 // ---------------------------------------------------------------------------
 
-// clearCache is a write-once trigger: only the first settings push of this
-// process may carry true. Wh_SetIntSetting is not available for mod settings,
-// so the user has to switch the checkbox off again by hand.
+static void P1CacheClear();
+
+// clearCache is an edge trigger: remember the value carried by the previous
+// push and clear only on a false -> true transition. Wh_SetIntSetting is not
+// available for mod settings, so the user switches the checkbox off by hand
+// before it can fire again.
+static std::atomic<bool> g_p1LastClearCachePushed{false};
+
 static bool P1ConsumeClearCache(bool requested) {
-    bool firstPush = g_p1FirstSettingsPush.exchange(false);
-    if (!requested) {
+    bool previous =
+        g_p1LastClearCachePushed.exchange(requested, std::memory_order_acq_rel);
+    if (!requested || previous) {
         return false;
     }
-    if (!firstPush) {
-        P0_LOG(L"[p1] clearCache is on but this is not the first settings push "
-               L"of this process; it is ignored until the next start");
-        return false;
-    }
-    P0_LOG(L"[p1] clearCache=true pushed once; turn the clearCache setting off "
-           L"again or the cache is cleared once on every start");
+    Wh_Log(L"[p1] clearCache false->true; clearing the translation cache");
     return true;
 }
 
 static void P1PushSettingsToWebView(void* webView, const wchar_t* reason) {
-    if (!webView) {
+    if (!webView || !P1IsRunning()) {
         return;
     }
 
     P1SettingsSnapshot snapshot = P1ReadSettings();
     P1KeyInfo key = P1GetKeyInfo();
     bool clearCache = P1ConsumeClearCache(snapshot.clearCacheRequested);
+    if (clearCache) {
+        P1CacheClear();
+    }
     std::wstring json =
         P1BuildSettingsJson(snapshot, key.source, clearCache);
 
     void* postFn = nullptr;
     if (!P0GetValidatedSlot(webView, kWebViewSlotPostWebMessageAsString,
                             &postFn)) {
-        P0_LOG(L"[p1] settings not pushed: PostWebMessageAsString slot invalid");
+        Wh_Log(L"[p1] settings not pushed: PostWebMessageAsString slot invalid");
         return;
     }
 
@@ -6390,7 +7164,7 @@ static void P1PushSettingsToWebView(void* webView, const wchar_t* reason) {
 
     HRESULT hr = reinterpret_cast<FnPostWebMessageAsString>(postFn)(
         webView, message.c_str());
-    P0_LOG(L"[p1] settings pushed (%s): targetLang=%s provider=%s key=%s "
+    Wh_Log(L"[p1] settings pushed (%s): targetLang=%s provider=%s key=%s "
            L"clearCache=%d hr=%08X",
            reason ? reason : L"?", snapshot.targetLang.c_str(),
            snapshot.provider.c_str(), key.source.c_str(),
@@ -6398,6 +7172,9 @@ static void P1PushSettingsToWebView(void* webView, const wchar_t* reason) {
 }
 
 static void P1PushSettingsToAll(const wchar_t* reason) {
+    if (!P1IsRunning()) {
+        return;
+    }
     void* webView = P0AcquireWebView();
     if (!webView) {
         return;
@@ -6405,6 +7182,584 @@ static void P1PushSettingsToAll(const wchar_t* reason) {
     P0ComRef webViewRef;
     webViewRef.object = webView;
     P1PushSettingsToWebView(webView, reason);
+}
+
+// ---------------------------------------------------------------------------
+// Translation cache
+//
+// The page supplies the key; the mod owns the store. An in-memory map is
+// persisted as a small UTF-8 text file under Wh_GetModStoragePath(), entries
+// expire after cacheTtlDays and the store is capped at 8 MB with the oldest
+// entries evicted first. The UI thread only mutates the map and marks it
+// dirty; one saver thread writes the file after a short debounce. The file is
+// loaded at init and flushed by the saver on teardown.
+//
+// A put is accepted for any non-empty key and value. That check is a guard
+// against empty writes, not a security boundary: the page may store a result
+// it obtained from any provider, including an LLM -> Edge fallback.
+// ---------------------------------------------------------------------------
+
+static constexpr size_t kP1CacheMaxBytes = 8u * 1024u * 1024u;
+static constexpr size_t kP1CachePruneEveryPuts = 32;
+static constexpr DWORD kP1CacheSaveDebounceMs = 2000;
+static constexpr wchar_t kP1CacheFileName[] = L"translation-cache.tsv";
+
+struct P1CacheEntry {
+    std::wstring text;
+    unsigned long long at = 0;  // stored, FILETIME milliseconds
+};
+
+static std::mutex g_p1CacheMutex;
+static std::unordered_map<std::wstring, P1CacheEntry> g_p1Cache;
+static std::wstring g_p1CachePath;
+static size_t g_p1CacheBytes = 0;  // running total, never rescanned per put
+static unsigned g_p1CachePutsSincePrune = 0;  // guarded by g_p1CacheMutex
+static bool g_p1CacheDirty = false;
+static bool g_p1CacheClearPending = false;
+
+// Saver thread. g_p1CacheEvents[0] is the auto-reset save signal, [1] the
+// manual stop event. The mutex guards only the thread/event handles.
+static std::mutex g_p1CacheSaverMutex;
+static HANDLE g_p1CacheEvents[2] = {nullptr, nullptr};
+static HANDLE g_p1CacheSaverThread = nullptr;
+static bool g_p1CacheSaverStarted = false;
+
+// cacheTtlDays is read once per settings generation: a cache-get must not hit
+// the registry for every translated string.
+static std::mutex g_p1CacheTtlMutex;
+static int g_p1CacheTtlDays = 30;
+static long g_p1CacheTtlGeneration = -1;
+
+static int P1CacheTtlDays() {
+    long generation = g_p1SettingsGeneration.load(std::memory_order_acquire);
+    std::lock_guard<std::mutex> lock(g_p1CacheTtlMutex);
+    if (g_p1CacheTtlGeneration != generation) {
+        g_p1CacheTtlDays = P1ReadSettings().cacheTtlDays;
+        g_p1CacheTtlGeneration = generation;
+    }
+    return g_p1CacheTtlDays;
+}
+
+// Wall-clock milliseconds since 1601, so the lifetime survives a restart
+// (GetTickCount64 resets with the machine).
+static unsigned long long P1CacheNowMs() {
+    FILETIME fileTime{};
+    GetSystemTimeAsFileTime(&fileTime);
+    ULARGE_INTEGER value{};
+    value.LowPart = fileTime.dwLowDateTime;
+    value.HighPart = fileTime.dwHighDateTime;
+    return value.QuadPart / 10000ull;
+}
+
+static size_t P1CacheEntryBytes(const std::wstring& key,
+                                const P1CacheEntry& entry) {
+    return (key.size() + entry.text.size()) * sizeof(wchar_t) + 32;
+}
+
+// Evicts oldest-first only while the running total is over the cap.
+static void P1CacheEvictLocked() {
+    if (g_p1CacheBytes <= kP1CacheMaxBytes) {
+        return;
+    }
+    std::vector<std::pair<unsigned long long, std::wstring>> order;
+    order.reserve(g_p1Cache.size());
+    for (const auto& item : g_p1Cache) {
+        order.emplace_back(item.second.at, item.first);
+    }
+    std::sort(order.begin(), order.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    for (const auto& item : order) {
+        if (g_p1CacheBytes <= kP1CacheMaxBytes) {
+            break;
+        }
+        auto found = g_p1Cache.find(item.second);
+        if (found == g_p1Cache.end()) {
+            continue;
+        }
+        size_t bytes = P1CacheEntryBytes(found->first, found->second);
+        g_p1CacheBytes =
+            g_p1CacheBytes > bytes ? g_p1CacheBytes - bytes : 0;
+        g_p1Cache.erase(found);
+    }
+}
+
+static void P1CachePruneExpiredLocked(int ttlDays, unsigned long long now) {
+    if (ttlDays <= 0) {
+        return;
+    }
+    const unsigned long long ttl =
+        static_cast<unsigned long long>(ttlDays) * 86400000ull;
+    for (auto it = g_p1Cache.begin(); it != g_p1Cache.end();) {
+        if (it->second.at != 0 && now > it->second.at &&
+            now - it->second.at > ttl) {
+            size_t bytes = P1CacheEntryBytes(it->first, it->second);
+            g_p1CacheBytes =
+                g_p1CacheBytes > bytes ? g_p1CacheBytes - bytes : 0;
+            it = g_p1Cache.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+static void P1CacheEscapeAppend(std::wstring& out, const std::wstring& value) {
+    for (wchar_t ch : value) {
+        switch (ch) {
+            case L'\\':
+                out += L"\\\\";
+                break;
+            case L'\t':
+                out += L"\\t";
+                break;
+            case L'\n':
+                out += L"\\n";
+                break;
+            case L'\r':
+                out += L"\\r";
+                break;
+            default:
+                out.push_back(ch);
+                break;
+        }
+    }
+}
+
+static bool P1CacheUnescape(const std::wstring& in, std::wstring& out) {
+    out.clear();
+    out.reserve(in.size());
+    for (size_t i = 0; i < in.size(); ++i) {
+        wchar_t ch = in[i];
+        if (ch != L'\\') {
+            out.push_back(ch);
+            continue;
+        }
+        if (++i >= in.size()) {
+            return false;
+        }
+        switch (in[i]) {
+            case L'\\':
+                out.push_back(L'\\');
+                break;
+            case L't':
+                out.push_back(L'\t');
+                break;
+            case L'n':
+                out.push_back(L'\n');
+                break;
+            case L'r':
+                out.push_back(L'\r');
+                break;
+            default:
+                return false;
+        }
+    }
+    return true;
+}
+
+static bool P1ResolveCachePath(std::wstring& path) {
+    wchar_t storage[MAX_PATH]{};
+    size_t length = Wh_GetModStoragePath(storage, ARRAYSIZE(storage));
+    if (length == 0 || length >= ARRAYSIZE(storage)) {
+        return false;
+    }
+    try {
+        path.assign(storage, length);
+        if (path.empty()) {
+            return false;
+        }
+        if (path.back() != L'\\') {
+            path.push_back(L'\\');
+        }
+        path += kP1CacheFileName;
+    } catch (...) {
+        return false;
+    }
+    return true;
+}
+
+static void P1CacheLoad() {
+    try {
+        std::wstring path;
+        if (!P1ResolveCachePath(path)) {
+            Wh_Log(L"[p1] cache: no storage path; memory only");
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(g_p1CacheMutex);
+            g_p1CachePath = path;
+        }
+
+        HANDLE file = CreateFileW(path.c_str(), GENERIC_READ,
+                                  FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                  OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file == INVALID_HANDLE_VALUE) {
+            Wh_Log(L"[p1] cache: no file yet");
+            return;
+        }
+        LARGE_INTEGER size{};
+        if (!GetFileSizeEx(file, &size) || size.QuadPart <= 0 ||
+            size.QuadPart > 32 * 1024 * 1024) {
+            CloseHandle(file);
+            Wh_Log(L"[p1] cache: file has an unusable size; ignored");
+            return;
+        }
+        std::string utf8(static_cast<size_t>(size.QuadPart), '\0');
+        DWORD read = 0;
+        BOOL ok = ReadFile(file, &utf8[0], static_cast<DWORD>(utf8.size()),
+                           &read, nullptr);
+        CloseHandle(file);
+        if (!ok) {
+            Wh_Log(L"[p1] cache: read failed (%lu)", GetLastError());
+            return;
+        }
+        utf8.resize(read);
+
+        std::wstring text = P1Utf8ToWide(utf8);
+        int ttlDays = P1CacheTtlDays();
+        unsigned long long now = P1CacheNowMs();
+        size_t loaded = 0;
+        size_t start = 0;
+        while (start < text.size()) {
+            size_t end = text.find(L'\n', start);
+            if (end == std::wstring::npos) {
+                end = text.size();
+            }
+            std::wstring line = text.substr(start, end - start);
+            start = end + 1;
+            if (!line.empty() && line.back() == L'\r') {
+                line.pop_back();
+            }
+            if (line.empty()) {
+                continue;
+            }
+            std::vector<std::wstring> fields;
+            P1Split(line, L'\t', 3, fields);
+            if (fields.size() != 3) {
+                continue;
+            }
+            unsigned long long at = 0;
+            if (!P1ParseUInt64(fields[0], at)) {
+                continue;
+            }
+            std::wstring key;
+            std::wstring value;
+            if (!P1CacheUnescape(fields[1], key) ||
+                !P1CacheUnescape(fields[2], value) || key.empty()) {
+                continue;
+            }
+            P1CacheEntry entry;
+            entry.text = std::move(value);
+            entry.at = at;
+            std::lock_guard<std::mutex> lock(g_p1CacheMutex);
+            auto inserted = g_p1Cache.emplace(key, std::move(entry));
+            if (inserted.second) {
+                g_p1CacheBytes +=
+                    P1CacheEntryBytes(inserted.first->first,
+                                      inserted.first->second);
+            }
+            ++loaded;
+        }
+
+        std::lock_guard<std::mutex> lock(g_p1CacheMutex);
+        P1CachePruneExpiredLocked(ttlDays, now);
+        P1CacheEvictLocked();
+        Wh_Log(L"[p1] cache loaded: %llu entries, %llu bytes",
+               static_cast<unsigned long long>(loaded),
+               static_cast<unsigned long long>(g_p1CacheBytes));
+    } catch (...) {
+        Wh_Log(L"[p1] cache load failed");
+    }
+}
+
+static void P1CacheSubtractBytes(size_t bytes) {
+    g_p1CacheBytes = g_p1CacheBytes > bytes ? g_p1CacheBytes - bytes : 0;
+}
+
+// Serializes the map and writes the file. Called only from the saver thread,
+// or from the engine thread when the saver was never started; never from the
+// UI thread. The map is only copied under g_p1CacheMutex; formatting and the
+// file I/O happen outside it, so the UI thread never waits for a full
+// serialization.
+static void P1CacheSaveIfNeeded() {
+    try {
+        std::wstring path;
+        std::vector<std::pair<std::wstring, P1CacheEntry>> entries;
+        bool clear = false;
+        bool dirty = false;
+        {
+            std::lock_guard<std::mutex> lock(g_p1CacheMutex);
+            if (g_p1CachePath.empty()) {
+                return;
+            }
+            clear = g_p1CacheClearPending;
+            dirty = g_p1CacheDirty;
+            if (!clear && !dirty) {
+                return;
+            }
+            g_p1CacheClearPending = false;
+            g_p1CacheDirty = false;
+            path = g_p1CachePath;
+            if (dirty) {
+                entries.reserve(g_p1Cache.size());
+                for (const auto& item : g_p1Cache) {
+                    entries.emplace_back(item.first, item.second);
+                }
+            }
+        }
+
+        if (clear) {
+            DeleteFileW(path.c_str());
+            Wh_Log(L"[p1] cache file removed");
+        }
+        if (!dirty) {
+            return;
+        }
+
+        std::wstring out;
+        out.reserve(entries.size() * 64);
+        for (const auto& item : entries) {
+            out += std::to_wstring(item.second.at);
+            out.push_back(L'\t');
+            P1CacheEscapeAppend(out, item.first);
+            out.push_back(L'\t');
+            P1CacheEscapeAppend(out, item.second.text);
+            out.push_back(L'\n');
+        }
+
+        std::string utf8 = P1WideToUtf8(out);
+        std::wstring temp = path + L".tmp";
+        HANDLE file = CreateFileW(temp.c_str(), GENERIC_WRITE, 0, nullptr,
+                                  CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL,
+                                  nullptr);
+        if (file == INVALID_HANDLE_VALUE) {
+            Wh_Log(L"[p1] cache save: cannot open %s (%lu)", temp.c_str(),
+                   GetLastError());
+            std::lock_guard<std::mutex> lock(g_p1CacheMutex);
+            g_p1CacheDirty = true;
+            return;
+        }
+        DWORD written = 0;
+        BOOL ok = WriteFile(file, utf8.data(),
+                            static_cast<DWORD>(utf8.size()), &written, nullptr);
+        CloseHandle(file);
+        if (!ok || written != utf8.size()) {
+            DeleteFileW(temp.c_str());
+            Wh_Log(L"[p1] cache save: write failed (%lu)", GetLastError());
+            std::lock_guard<std::mutex> lock(g_p1CacheMutex);
+            g_p1CacheDirty = true;
+            return;
+        }
+        if (!MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+            DeleteFileW(temp.c_str());
+            Wh_Log(L"[p1] cache save: replace failed (%lu)", GetLastError());
+            std::lock_guard<std::mutex> lock(g_p1CacheMutex);
+            g_p1CacheDirty = true;
+        }
+    } catch (...) {
+        Wh_Log(L"[p1] cache save failed");
+        std::lock_guard<std::mutex> lock(g_p1CacheMutex);
+        g_p1CacheDirty = true;
+    }
+}
+
+static DWORD WINAPI P1CacheSaverProc(void*) {
+    for (;;) {
+        DWORD wait =
+            WaitForMultipleObjects(2, g_p1CacheEvents, FALSE, INFINITE);
+        if (wait == WAIT_OBJECT_0 + 1) {
+            P1CacheSaveIfNeeded();
+            return 0;
+        }
+        if (wait != WAIT_OBJECT_0) {
+            return 0;
+        }
+        // Debounce: another signal restarts the wait, a timeout writes.
+        for (;;) {
+            DWORD again = WaitForMultipleObjects(2, g_p1CacheEvents, FALSE,
+                                                 kP1CacheSaveDebounceMs);
+            if (again == WAIT_OBJECT_0 + 1) {
+                P1CacheSaveIfNeeded();
+                return 0;
+            }
+            if (again == WAIT_OBJECT_0) {
+                continue;
+            }
+            break;
+        }
+        P1CacheSaveIfNeeded();
+    }
+}
+
+static bool P1EnsureCacheSaver() {
+    std::lock_guard<std::mutex> lock(g_p1CacheSaverMutex);
+    if (g_p1CacheSaverStarted) {
+        return true;
+    }
+    if (!P1IsRunning()) {
+        return false;
+    }
+    if (!g_p1CacheEvents[0]) {
+        g_p1CacheEvents[0] = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        g_p1CacheEvents[1] = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    }
+    if (!g_p1CacheEvents[0] || !g_p1CacheEvents[1]) {
+        Wh_Log(L"[p1] cache saver events could not be created (%lu)",
+               GetLastError());
+        for (HANDLE& event : g_p1CacheEvents) {
+            if (event) {
+                CloseHandle(event);
+                event = nullptr;
+            }
+        }
+        return false;
+    }
+    HANDLE thread =
+        CreateThread(nullptr, 0, &P1CacheSaverProc, nullptr, 0, nullptr);
+    if (!thread) {
+        Wh_Log(L"[p1] cache saver thread could not be started (%lu)",
+               GetLastError());
+        for (HANDLE& event : g_p1CacheEvents) {
+            if (event) {
+                CloseHandle(event);
+                event = nullptr;
+            }
+        }
+        return false;
+    }
+    g_p1CacheSaverThread = thread;
+    g_p1CacheSaverStarted = true;
+    return true;
+}
+
+static void P1SignalCacheSave() {
+    std::lock_guard<std::mutex> lock(g_p1CacheSaverMutex);
+    if (g_p1CacheEvents[0]) {
+        SetEvent(g_p1CacheEvents[0]);
+    }
+}
+
+// Stops the saver and flushes any last dirty state on this thread. The UI
+// thread never serializes the map.
+static void P1StopCacheSaver() {
+    HANDLE thread = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_p1CacheSaverMutex);
+        if (!g_p1CacheSaverStarted) {
+            P1CacheSaveIfNeeded();
+            return;
+        }
+        g_p1CacheSaverStarted = false;
+        thread = g_p1CacheSaverThread;
+        g_p1CacheSaverThread = nullptr;
+        if (g_p1CacheEvents[1]) {
+            SetEvent(g_p1CacheEvents[1]);
+        }
+    }
+
+    if (thread) {
+        WaitForSingleObject(thread, INFINITE);
+        CloseHandle(thread);
+    }
+
+    std::lock_guard<std::mutex> lock(g_p1CacheSaverMutex);
+    for (HANDLE& event : g_p1CacheEvents) {
+        if (event) {
+            CloseHandle(event);
+            event = nullptr;
+        }
+    }
+}
+
+static void P1CacheClear() {
+    try {
+        P1EnsureCacheSaver();
+        {
+            std::lock_guard<std::mutex> lock(g_p1CacheMutex);
+            g_p1Cache.clear();
+            g_p1CacheBytes = 0;
+            g_p1CachePutsSincePrune = 0;
+            g_p1CacheDirty = false;
+            g_p1CacheClearPending = true;
+        }
+        P1SignalCacheSave();
+        Wh_Log(L"[p1] cache cleared");
+    } catch (...) {
+        Wh_Log(L"[p1] cache clear failed");
+    }
+}
+
+static bool P1CacheGet(const std::wstring& key,
+                       std::wstring& text,
+                       int ttlDays) {
+    if (key.empty() || !P1IsRunning()) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(g_p1CacheMutex);
+    auto found = g_p1Cache.find(key);
+    if (found == g_p1Cache.end()) {
+        return false;
+    }
+    unsigned long long now = P1CacheNowMs();
+    if (ttlDays > 0 && found->second.at != 0 && now > found->second.at &&
+        now - found->second.at >
+            static_cast<unsigned long long>(ttlDays) * 86400000ull) {
+        P1CacheSubtractBytes(P1CacheEntryBytes(found->first, found->second));
+        g_p1Cache.erase(found);
+        return false;
+    }
+    text = found->second.text;
+    return true;
+}
+
+// Returns false when the put could not be stored: empty key or value, or an
+// allocation failure. The non-empty check is a guard against empty writes, not
+// a security boundary; any non-empty key and value is accepted.
+static bool P1CachePut(const std::wstring& key,
+                       const std::wstring& text,
+                       int ttlDays) {
+    if (key.empty() || text.empty() || !P1IsRunning()) {
+        return false;
+    }
+    P1EnsureCacheSaver();
+    try {
+        std::lock_guard<std::mutex> lock(g_p1CacheMutex);
+        unsigned long long now = P1CacheNowMs();
+        auto found = g_p1Cache.find(key);
+        if (found != g_p1Cache.end()) {
+            P1CacheSubtractBytes(
+                P1CacheEntryBytes(found->first, found->second));
+            found->second.text = text;
+            found->second.at = now;
+            g_p1CacheBytes +=
+                P1CacheEntryBytes(found->first, found->second);
+        } else {
+            P1CacheEntry entry;
+            entry.text = text;
+            entry.at = now;
+            auto inserted = g_p1Cache.emplace(key, std::move(entry));
+            if (!inserted.second) {
+                return false;
+            }
+            g_p1CacheBytes +=
+                P1CacheEntryBytes(inserted.first->first,
+                                  inserted.first->second);
+        }
+        g_p1CacheDirty = true;
+        // Do not walk the whole map on every put: prune at most once every
+        // kP1CachePruneEveryPuts puts, and always when the byte total is over
+        // the cap.
+        ++g_p1CachePutsSincePrune;
+        if (g_p1CacheBytes > kP1CacheMaxBytes ||
+            g_p1CachePutsSincePrune >= kP1CachePruneEveryPuts) {
+            P1CachePruneExpiredLocked(ttlDays, now);
+            P1CacheEvictLocked();
+            g_p1CachePutsSincePrune = 0;
+        }
+    } catch (...) {
+        return false;
+    }
+    P1SignalCacheSave();
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -6423,29 +7778,97 @@ static void P1HandleJsLog(const std::wstring& text) {
             ch = L' ';
         }
     }
-    P0WriteFileLog(L"[js] %s", line.c_str());
+    Wh_Log(L"[js] %s", line.c_str());
 }
+
+// Protocol rule: unknown kinds, malformed messages and oversized payloads are
+// logged once per session, not once per message.
+static std::atomic<bool> g_p1LogOversized{false};
+static std::atomic<bool> g_p1LogMalformed{false};
+static std::atomic<bool> g_p1LogUnknownKind{false};
+static std::atomic<bool> g_p1LogCachePutRejected{false};
 
 static void P1RejectHttp(void* webView,
                          unsigned long long id,
                          const wchar_t* reason,
                          unsigned long error) {
-    P0_LOG(L"[p1] http rejected id=%llu: %s", id, reason);
+    Wh_Log(L"[p1] http rejected id=%llu: %s", id, reason);
     P1PostHttpReply(webView, id, 0, error, std::string());
 }
 
+// The relay accepts exactly two endpoints: Microsoft's Edge translation
+// service and the configured LLM's /chat/completions. Anything else is refused
+// with status 0 / error 87, so the mod cannot be used as an open proxy.
+static bool P1IsAllowedHttpUrl(const std::wstring& url,
+                               const P1SettingsSnapshot& settings) {
+    P1UrlParts parts;
+    if (!P1ParseUrl(url, parts)) {
+        return false;
+    }
+
+    // https://edge.microsoft.com/translate/translatetext?...
+    // The host is case-insensitive; no explicit port; the path is exact and a
+    // query must follow the path. P1ParseUrl already rejected fragments.
+    if (P1EqualsNoCase(parts.host, L"edge.microsoft.com")) {
+        if (parts.explicitPort) {
+            return false;
+        }
+        static constexpr wchar_t kPath[] = L"/translate/translatetext";
+        constexpr size_t kPathChars = ARRAYSIZE(kPath) - 1;
+        if (parts.path.size() <= kPathChars ||
+            parts.path.compare(0, kPathChars, kPath) != 0) {
+            return false;
+        }
+        return parts.path[kPathChars] == L'?';
+    }
+
+    // Exactly <llmBaseUrl>/chat/completions. Scheme and host are compared
+    // case-insensitively; the path (and any port) must match exactly.
+    P1UrlParts base;
+    std::wstring trimmed = settings.llmBaseUrl;
+    while (!trimmed.empty() && trimmed.back() == L'/') {
+        trimmed.pop_back();
+    }
+    if (trimmed.empty() || !P1ParseUrl(trimmed, base)) {
+        return false;
+    }
+    // A query or fragment in the base would make the expected path ambiguous.
+    if (base.path.find(L'?') != std::wstring::npos) {
+        return false;
+    }
+    if (base.explicitPort != parts.explicitPort || base.port != parts.port) {
+        return false;
+    }
+    if (!P1EqualsNoCase(base.host, parts.host)) {
+        return false;
+    }
+
+    std::wstring expectedPath = base.path;
+    while (!expectedPath.empty() && expectedPath.back() == L'/') {
+        expectedPath.pop_back();
+    }
+    expectedPath += L"/chat/completions";
+    return parts.path == expectedPath;
+}
+
 static void P1HandleHttp(void* sender, const std::wstring& rest) {
+    // Fields after the kind: requestId, method, url, body. The body is last and
+    // may itself contain the separator, hence the field limit.
     std::vector<std::wstring> head;
     P1Split(rest, 0x1f, 4, head);
     if (head.size() < 4) {
-        P0_LOG(L"[p1] http message malformed (fields=%llu); ignored",
-               static_cast<unsigned long long>(head.size()));
+        if (!g_p1LogMalformed.exchange(true, std::memory_order_relaxed)) {
+            Wh_Log(L"[p1] http message malformed (fields=%llu); ignored",
+                   static_cast<unsigned long long>(head.size()));
+        }
         return;
     }
 
     unsigned long long id = 0;
     if (!P1ParseUInt64(head[0], id)) {
-        P0_LOG(L"[p1] http message has no usable request id; ignored");
+        if (!g_p1LogMalformed.exchange(true, std::memory_order_relaxed)) {
+            Wh_Log(L"[p1] http message has no usable request id; ignored");
+        }
         return;
     }
 
@@ -6467,75 +7890,21 @@ static void P1HandleHttp(void* sender, const std::wstring& rest) {
         P1RejectHttp(sender, id, L"url too long", ERROR_INVALID_PARAMETER);
         return;
     }
-    P1UrlParts parts;
-    if (!P1ParseUrl(url, parts)) {
-        P1RejectHttp(sender, id, L"bad url", ERROR_INVALID_PARAMETER);
-        return;
-    }
 
-    std::vector<std::wstring> countAndRest;
-    P1Split(head[3], 0x1f, 2, countAndRest);
-    unsigned long long headerCount = 0;
-    if (!P1ParseUInt64(countAndRest[0], headerCount) && countAndRest[0] != L"0") {
-        P1RejectHttp(sender, id, L"bad header count", ERROR_INVALID_PARAMETER);
-        return;
-    }
-    if (headerCount > kP1MaxHeaderCount) {
-        P1RejectHttp(sender, id, L"too many headers", ERROR_INVALID_PARAMETER);
-        return;
-    }
-
-    std::wstring afterCount = countAndRest.size() > 1 ? countAndRest[1]
-                                                      : std::wstring();
-    std::vector<std::wstring> tail;
-    size_t expectedFields = static_cast<size_t>(headerCount) * 2 + 1;
-    P1Split(afterCount, 0x1f, expectedFields, tail);
-    if (tail.size() != expectedFields) {
-        P1RejectHttp(sender, id, L"header fields missing",
-                     ERROR_INVALID_PARAMETER);
-        return;
-    }
-
-    std::vector<std::pair<std::wstring, std::wstring>> headers;
-    size_t headerChars = 0;
-    try {
-        headers.reserve(static_cast<size_t>(headerCount));
-        for (size_t i = 0; i < static_cast<size_t>(headerCount); ++i) {
-            const std::wstring& name = tail[i * 2];
-            const std::wstring& value = tail[i * 2 + 1];
-            if (name.empty() || name.size() > kP1MaxHeaderNameChars ||
-                value.size() > kP1MaxHeaderValueChars) {
-                P1RejectHttp(sender, id, L"header name or value has a bad length",
-                             ERROR_INVALID_PARAMETER);
-                return;
-            }
-            if (name.find_first_of(L":\r\n") != std::wstring::npos ||
-                value.find_first_of(L"\r\n") != std::wstring::npos) {
-                P1RejectHttp(sender, id, L"header contains a forbidden character",
-                             ERROR_INVALID_PARAMETER);
-                return;
-            }
-            headerChars += name.size() + value.size();
-            if (headerChars > kP1MaxHeadersChars) {
-                P1RejectHttp(sender, id, L"headers too large",
-                             ERROR_INVALID_PARAMETER);
-                return;
-            }
-            headers.emplace_back(name, value);
-        }
-    } catch (...) {
-        P1RejectHttp(sender, id, L"out of memory while reading headers",
-                     ERROR_NOT_ENOUGH_MEMORY);
-        return;
-    }
-
-    const std::wstring& bodyWide = tail[expectedFields - 1];
+    const std::wstring& bodyWide = head[3];
     if (bodyWide.size() > kP1MaxBodyBytes) {
         P1RejectHttp(sender, id, L"body too large", ERROR_INVALID_PARAMETER);
         return;
     }
     if (method == L"GET" && !bodyWide.empty()) {
-        P0_LOG(L"[p1] http id=%llu: GET with a body; the body is ignored", id);
+        Wh_Log(L"[p1] http id=%llu: GET with a body; the body is ignored", id);
+    }
+
+    P1SettingsSnapshot snapshot = P1ReadSettings();
+    if (!P1IsAllowedHttpUrl(url, snapshot)) {
+        P1RejectHttp(sender, id, L"url is not an allowed endpoint",
+                     ERROR_INVALID_PARAMETER);
+        return;
     }
 
     std::string body;
@@ -6548,13 +7917,7 @@ static void P1HandleHttp(void* sender, const std::wstring& rest) {
         }
     }
 
-    P1SettingsSnapshot snapshot = P1ReadSettings();
     P1KeyInfo key = P1GetKeyInfo();
-
-    // Debug trace: only the body, never the headers, so the key cannot leak.
-    if (snapshot.debug) {
-        P1TraceHttpRequest(id, body);
-    }
 
     auto* request = new (std::nothrow) P1HttpRequest();
     if (!request) {
@@ -6565,13 +7928,11 @@ static void P1HandleHttp(void* sender, const std::wstring& rest) {
     request->id = id;
     request->method = method;
     request->url = url;
-    request->headers = std::move(headers);
     request->body = std::move(body);
     request->timeoutMs =
         static_cast<unsigned long long>(snapshot.timeoutMs);
     request->apiKey = key.key;
     request->apiKeyHost = key.host;
-    request->trace = snapshot.debug;
 
     auto addRef =
         reinterpret_cast<FnAddRef>(P0GetRawSlot(sender, kSlotAddRef));
@@ -6593,24 +7954,39 @@ static void P1HandleHttp(void* sender, const std::wstring& rest) {
 
 static void P1HandleMessage(void* sender, const std::wstring& text) {
     P1NoteUiThread();
-    P1EnsureDispatchWindow();
-    P1DrainRepliesOnUiThread();
+    if (!P1IsRunning()) {
+        return;
+    }
+    // The dispatch window is a prerequisite for injection, so it must exist
+    // here; without it replies and teardown could not reach the UI thread.
+    if (!P1EnsureDispatchWindow()) {
+        if (!g_p1DispatchFailureLogged.exchange(true)) {
+            Wh_Log(L"[p1] dispatch window unavailable; page messages are "
+                   L"ignored");
+        }
+        return;
+    }
+    P1DrainRepliesOnUiThread(true);
 
     if (g_p1SettingsDirty.exchange(false) && g_p1PageReady.load()) {
         P1PushSettingsToAll(L"deferred");
     }
 
     if (text.size() > kP1MaxMessageChars) {
-        P0_LOG(L"[p1] message too large (%llu chars); ignored",
-               static_cast<unsigned long long>(text.size()));
+        if (!g_p1LogOversized.exchange(true, std::memory_order_relaxed)) {
+            Wh_Log(L"[p1] message too large (%llu chars); ignored",
+                   static_cast<unsigned long long>(text.size()));
+        }
         return;
     }
 
     std::vector<std::wstring> parts;
     P1Split(text, 0x1f, 3, parts);
     if (parts.size() < 2 || parts[0] != kP1Tag) {
-        P0_LOG(L"[p1] malformed message ignored (len=%llu)",
-               static_cast<unsigned long long>(text.size()));
+        if (!g_p1LogMalformed.exchange(true, std::memory_order_relaxed)) {
+            Wh_Log(L"[p1] malformed message ignored (len=%llu)",
+                   static_cast<unsigned long long>(text.size()));
+        }
         return;
     }
 
@@ -6619,7 +7995,7 @@ static void P1HandleMessage(void* sender, const std::wstring& text) {
 
     if (kind == L"settings?") {
         g_p1PageReady.store(true);
-        P0_LOG(L"[p1] settings requested (page ready)");
+        Wh_Log(L"[p1] settings requested (page ready)");
         P1PushSettingsToWebView(sender, L"settings?");
         return;
     }
@@ -6636,8 +8012,90 @@ static void P1HandleMessage(void* sender, const std::wstring& text) {
         return;
     }
 
-    std::wstring kindForLog = P1ClipForLog(kind, 32);
-    P0_LOG(L"[p1] unknown message kind '%s' ignored", kindForLog.c_str());
+    if (kind == L"cache-get") {
+        g_p1PageReady.store(true);
+        // Fields after the kind: requestId, key. The reply echoes requestId so
+        // a late answer cannot resolve a newer lookup for the same key.
+        std::vector<std::wstring> fields;
+        P1Split(rest, 0x1f, 2, fields);
+        unsigned long long requestId = 0;
+        if (fields.size() != 2 || fields[1].empty() ||
+            !P1ParseUInt64(fields[0], requestId)) {
+            if (!g_p1LogMalformed.exchange(true, std::memory_order_relaxed)) {
+                Wh_Log(L"[p1] cache-get malformed (requestId and key are "
+                       L"required); ignored");
+            }
+            return;
+        }
+        std::wstring value;
+        bool hit = false;
+        try {
+            hit = P1CacheGet(fields[1], value, P1CacheTtlDays());
+        } catch (...) {
+            hit = false;
+        }
+        std::wstring reply = kP1Tag;
+        reply.push_back(0x1f);
+        reply += hit ? L"cache-hit" : L"cache-miss";
+        reply.push_back(0x1f);
+        reply += fields[0];  // echo the requestId token exactly
+        reply.push_back(0x1f);
+        reply += fields[1];
+        if (hit) {
+            reply.push_back(0x1f);
+            reply += value;
+        }
+        void* postFn = nullptr;
+        if (P0GetValidatedSlot(sender, kWebViewSlotPostWebMessageAsString,
+                               &postFn)) {
+            HRESULT hr = reinterpret_cast<FnPostWebMessageAsString>(postFn)(
+                sender, reply.c_str());
+            if (FAILED(hr)) {
+                Wh_Log(L"[p1] cache reply could not be posted (%08X)",
+                       static_cast<unsigned>(hr));
+            }
+        }
+        return;
+    }
+
+    if (kind == L"cache-put") {
+        g_p1PageReady.store(true);
+        std::vector<std::wstring> fields;
+        P1Split(rest, 0x1f, 2, fields);
+        if (fields.size() != 2 || fields[0].empty() || fields[1].empty()) {
+            if (!g_p1LogMalformed.exchange(true, std::memory_order_relaxed)) {
+                Wh_Log(L"[p1] cache-put with an empty key or value; ignored "
+                       L"(guard against empty writes, not a security boundary)");
+            }
+            return;
+        }
+        bool accepted = false;
+        try {
+            accepted = P1CachePut(fields[0], fields[1], P1CacheTtlDays());
+        } catch (...) {
+            accepted = false;
+        }
+        if (!accepted &&
+            !g_p1LogCachePutRejected.exchange(true,
+                                              std::memory_order_relaxed)) {
+            Wh_Log(L"[p1] cache-put could not be stored (out of memory or the "
+                   L"mod is shutting down)");
+        }
+        return;
+    }
+
+    if (kind == L"teardown") {
+        // The page never sends this; the mod sends it. Ignored on purpose.
+        if (!g_p1LogMalformed.exchange(true, std::memory_order_relaxed)) {
+            Wh_Log(L"[p1] unexpected teardown message from the page; ignored");
+        }
+        return;
+    }
+
+    if (!g_p1LogUnknownKind.exchange(true, std::memory_order_relaxed)) {
+        std::wstring kindForLog = P1ClipForLog(kind, 32);
+        Wh_Log(L"[p1] unknown message kind '%s' ignored", kindForLog.c_str());
+    }
 }
 
 // Runs the P0 script in the webview's current document. `label` must be a
@@ -6648,24 +8106,20 @@ static HRESULT P0ExecuteScript(void* webView,
                                const wchar_t* label,
                                const wchar_t* when) {
     if (!webView) {
-        P0_LOG(L"[p0] ExecuteScript(%s): no webview", label);
-        P0_LOG(L"ExecuteScript %s skipped: no webview", label);
+        Wh_Log(L"[p0] ExecuteScript(%s) skipped: no webview", label);
         return E_POINTER;
     }
 
     void* executeScriptFn = nullptr;
     if (!P0GetValidatedSlot(webView, kWebViewSlotExecuteScript,
                             &executeScriptFn)) {
-        P0_LOG(L"[p0] ExecuteScript(%s): slot invalid", label);
-        P0_LOG(L"ExecuteScript %s skipped: slot invalid", label);
+        Wh_Log(L"[p0] ExecuteScript(%s) skipped: slot invalid", label);
         return E_FAIL;
     }
 
     P0ScriptHandler* handler = P0CreateScriptHandler(label);
     if (!handler) {
-        P0_LOG(L"[p0] ExecuteScript(%s): out of memory for the completion "
-               L"handler", label);
-        P0_LOG(L"ExecuteScript %s skipped: no completion handler", label);
+        Wh_Log(L"[p0] ExecuteScript(%s) skipped: no completion handler", label);
         return E_OUTOFMEMORY;
     }
     P0HandlerRef handlerRef;
@@ -6684,17 +8138,17 @@ static HRESULT P0ExecuteScript(void* webView,
             script = markedScript.c_str();
         }
     } catch (...) {
-        P0_LOG(L"[p0] ExecuteScript(%s): exception while building the script; "
+        Wh_Log(L"[p0] ExecuteScript(%s): exception while building the script; "
                L"using the plain P0 script", label);
         script = kP0Js;
     }
 
+    P0MarkHandedOver(handler);
     HRESULT hr = reinterpret_cast<FnExecuteScript>(executeScriptFn)(
         webView, script, handler);
     handler->immediateHr = hr;
 
-    P0_LOG(L"%s hr=0x%08X", label, static_cast<unsigned>(hr));
-    P0_LOG(L"[p0] %s (when=%s) -> %08X", label, when ? when : L"immediate",
+    Wh_Log(L"[p0] %s (when=%s) -> %08X", label, when ? when : L"immediate",
            static_cast<unsigned>(hr));
     return hr;
 }
@@ -6708,15 +8162,27 @@ static void P0OnControllerReady(void* controller) {
         return;
     }
 
-    // This callback runs on the WebView2 UI thread: remember it and create the
-    // dispatcher window here, before any page message can need it.
+    // This callback runs on the WebView2 UI thread. The dispatcher window is a
+    // prerequisite for injection: without it replies could not reach this
+    // thread and the unloader could not request the synchronous teardown, so
+    // nothing is injected at all.
     P1NoteUiThread();
-    P1EnsureDispatchWindow();
+    if (!P1IsRunning()) {
+        Wh_Log(L"[p0] controller completed after shutdown; not injecting");
+        return;
+    }
+    if (!P1EnsureDispatchWindow()) {
+        if (!g_p1DispatchFailureLogged.exchange(true,
+                                               std::memory_order_relaxed)) {
+            Wh_Log(L"[p0] dispatch window unavailable; injection skipped");
+        }
+        return;
+    }
 
     {
         std::lock_guard<std::mutex> lock(g_webViewMutex);
         if (g_webView) {
-            P0_LOG(L"[p0] controller=%p: a webview is already set up; ignoring",
+            Wh_Log(L"[p0] controller=%p: a webview is already set up; ignoring",
                    controller);
             return;
         }
@@ -6725,7 +8191,7 @@ static void P0OnControllerReady(void* controller) {
     void* getWebViewFn = nullptr;
     if (!P0GetValidatedSlot(controller, kControllerSlotGetCoreWebView2,
                             &getWebViewFn)) {
-        P0_LOG(L"[p0] controller=%p: get_CoreWebView2 slot invalid", controller);
+        Wh_Log(L"[p0] controller=%p: get_CoreWebView2 slot invalid", controller);
         return;
     }
 
@@ -6734,12 +8200,12 @@ static void P0OnControllerReady(void* controller) {
         reinterpret_cast<FnControllerGetCoreWebView2>(getWebViewFn)(
             controller, &webView);
     if (FAILED(hr) || !webView) {
-        P0_LOG(L"[p0] controller=%p: get_CoreWebView2 -> %08X, webview=%p",
+        Wh_Log(L"[p0] controller=%p: get_CoreWebView2 -> %08X, webview=%p",
                controller, static_cast<unsigned>(hr), webView);
         return;
     }
 
-    P0_LOG(L"[p0] controller=%p CoreWebView2=%p", controller, webView);
+    Wh_Log(L"[p0] controller=%p CoreWebView2=%p", controller, webView);
 
     P0ComRef webViewRef;
     webViewRef.object = webView;
@@ -6761,16 +8227,14 @@ static void P0OnControllerReady(void* controller) {
                     reinterpret_cast<FnGetBool>(getEnabledFn)(settings, &enabled);
                 if (FAILED(getHr)) {
                     enabled = TRUE;
-                    P0_LOG(L"[p0] get_IsWebMessageEnabled -> %08X",
+                    Wh_Log(L"[p0] get_IsWebMessageEnabled -> %08X",
                            static_cast<unsigned>(getHr));
                 }
             } else {
-                P0_LOG(L"[p0] get_IsWebMessageEnabled slot invalid");
+                Wh_Log(L"[p0] get_IsWebMessageEnabled slot invalid");
             }
 
-            P0_LOG(L"webview=%p settings=%p webMessageEnabled(before)=%d",
-                   webView, settings, enabled ? 1 : 0);
-            P0_LOG(L"[p0] IsWebMessageEnabled=%d", enabled ? 1 : 0);
+            Wh_Log(L"[p0] IsWebMessageEnabled=%d", enabled ? 1 : 0);
             if (!enabled) {
                 void* putEnabledFn = nullptr;
                 if (P0GetValidatedSlot(settings,
@@ -6778,37 +8242,51 @@ static void P0OnControllerReady(void* controller) {
                                        &putEnabledFn)) {
                     HRESULT putHr = reinterpret_cast<FnPutBool>(putEnabledFn)(
                         settings, TRUE);
-                    P0_LOG(L"[p0] put_IsWebMessageEnabled(TRUE) -> %08X",
+                    Wh_Log(L"[p0] put_IsWebMessageEnabled(TRUE) -> %08X",
                            static_cast<unsigned>(putHr));
                 } else {
-                    P0_LOG(L"[p0] put_IsWebMessageEnabled slot invalid");
+                    Wh_Log(L"[p0] put_IsWebMessageEnabled slot invalid");
                 }
             }
         } else {
-            P0_LOG(L"webview=%p settings=%p webMessageEnabled(before)=unknown",
-                   webView, settings);
-            P0_LOG(L"[p0] get_Settings -> %08X, settings=%p",
+            Wh_Log(L"[p0] get_Settings -> %08X, settings=%p",
                    static_cast<unsigned>(hr), settings);
         }
     } else {
-        P0_LOG(L"webview=%p settings=%p webMessageEnabled(before)=unknown",
-               webView, static_cast<void*>(nullptr));
-        P0_LOG(L"[p0] get_Settings slot invalid");
+        Wh_Log(L"[p0] get_Settings slot invalid");
     }
 
-    // 2) Register the script for future documents.
+    // 2) Register the script for future documents. The handler keeps its own
+    //    webview reference until the asynchronous completion arrives: the
+    //    completion may run after teardown and must still be able to remove
+    //    the script.
     void* addScriptFn = nullptr;
     if (P0GetValidatedSlot(webView, kWebViewSlotAddScript, &addScriptFn)) {
         P0HandlerRef scriptHandler;
         scriptHandler.handler = P0CreateScriptHandler(L"AddScript");
-        HRESULT addHr = reinterpret_cast<FnAddScript>(addScriptFn)(
-            webView, kP0Js, scriptHandler.handler);
-        g_addScriptHr.store(static_cast<unsigned long>(addHr));
-        P0_LOG(L"AddScript hr=0x%08X", static_cast<unsigned>(addHr));
-        P0_LOG(L"[p0] AddScriptToExecuteOnDocumentCreated -> %08X",
-               static_cast<unsigned>(addHr));
+        if (scriptHandler.handler) {
+            auto* script = static_cast<P0ScriptHandler*>(scriptHandler.handler);
+            auto addRef =
+                reinterpret_cast<FnAddRef>(P0GetRawSlot(webView, kSlotAddRef));
+            if (!addRef) {
+                Wh_Log(L"[p0] AddScript skipped: no AddRef slot, so the script "
+                       L"could not be removed at unload");
+            } else {
+                addRef(webView);
+                script->webView = webView;
+                P0CountAddScriptRefHeld();
+                P0MarkHandedOver(scriptHandler.handler);
+                HRESULT addHr = reinterpret_cast<FnAddScript>(addScriptFn)(
+                    webView, kP0Js, scriptHandler.handler);
+                g_addScriptHr.store(static_cast<unsigned long>(addHr));
+                Wh_Log(L"[p0] AddScriptToExecuteOnDocumentCreated -> %08X",
+                       static_cast<unsigned>(addHr));
+            }
+        } else {
+            Wh_Log(L"[p0] out of memory for the AddScript completion handler");
+        }
     } else {
-        P0_LOG(L"[p0] AddScriptToExecuteOnDocumentCreated slot invalid");
+        Wh_Log(L"[p0] AddScriptToExecuteOnDocumentCreated slot invalid");
     }
 
     // 3) Register the message handler before running any script, so that the
@@ -6820,17 +8298,15 @@ static void P0OnControllerReady(void* controller) {
         messageHandler.handler = P0CreateMessageHandler();
         if (messageHandler.handler) {
             EventRegistrationToken token{};
+            P0MarkHandedOver(messageHandler.handler);
             HRESULT addHr = reinterpret_cast<FnAddWebMessageReceived>(
                 addMessageFn)(webView, messageHandler.handler, &token);
-            P0_LOG(L"add_WebMessageReceived hr=0x%08X token=%lld",
-                   static_cast<unsigned>(addHr),
-                   static_cast<long long>(token.value));
             if (SUCCEEDED(addHr) && token.value != 0) {
                 if (P0StoreWebView(webView, token, static_cast<P0MessageHandler*>(
                                                       messageHandler.handler))) {
                     // The global state now owns the handler reference.
                     messageHandler.handler = nullptr;
-                    P0_LOG(L"[p0] add_WebMessageReceived -> %08X token=%lld",
+                    Wh_Log(L"[p0] add_WebMessageReceived -> %08X token=%lld",
                            static_cast<unsigned>(addHr),
                            static_cast<long long>(token.value));
                 } else {
@@ -6841,18 +8317,18 @@ static void P0OnControllerReady(void* controller) {
                         reinterpret_cast<FnRemoveWebMessageReceived>(removeFn)(
                             webView, token);
                     }
-                    P0_LOG(L"[p0] add_WebMessageReceived raced; removed token");
+                    Wh_Log(L"[p0] add_WebMessageReceived raced; removed token");
                 }
             } else {
-                P0_LOG(L"[p0] add_WebMessageReceived -> %08X token=%lld",
+                Wh_Log(L"[p0] add_WebMessageReceived -> %08X token=%lld",
                        static_cast<unsigned>(addHr),
                        static_cast<long long>(token.value));
             }
         } else {
-            P0_LOG(L"[p0] out of memory for message handler");
+            Wh_Log(L"[p0] out of memory for message handler");
         }
     } else {
-        P0_LOG(L"[p0] add_WebMessageReceived slot invalid");
+        Wh_Log(L"[p0] add_WebMessageReceived slot invalid");
     }
 
     // 4) Navigation events. AddScriptToExecuteOnDocumentCreated completes
@@ -6866,9 +8342,7 @@ static void P0OnControllerReady(void* controller) {
     }
 
     if (!webViewStored) {
-        P0_LOG(L"add_NavigationStarting skipped: webview not stored");
-        P0_LOG(L"add_NavigationCompleted skipped: webview not stored");
-        P0_LOG(L"[p0] navigation events not registered: webview was not stored");
+        Wh_Log(L"[p0] navigation events not registered: webview was not stored");
     } else {
         void* addNavStartingFn = nullptr;
         if (P0GetValidatedSlot(webView, kWebViewSlotAddNavigationStarting,
@@ -6877,11 +8351,9 @@ static void P0OnControllerReady(void* controller) {
             navHandler.handler = P0CreateNavigationStartingHandler();
             if (navHandler.handler) {
                 EventRegistrationToken navToken{};
+                P0MarkHandedOver(navHandler.handler);
                 HRESULT addHr = reinterpret_cast<FnAddNavigationEventHandler>(
                     addNavStartingFn)(webView, navHandler.handler, &navToken);
-                P0_LOG(L"add_NavigationStarting hr=0x%08X token=%lld",
-                       static_cast<unsigned>(addHr),
-                       static_cast<long long>(navToken.value));
                 if (SUCCEEDED(addHr) && navToken.value != 0) {
                     {
                         std::lock_guard<std::mutex> lock(g_webViewMutex);
@@ -6892,21 +8364,20 @@ static void P0OnControllerReady(void* controller) {
                         // The global state now owns the handler reference.
                         navHandler.handler = nullptr;
                     }
-                    P0_LOG(L"[p0] add_NavigationStarting -> %08X token=%lld",
+                    Wh_Log(L"[p0] add_NavigationStarting -> %08X token=%lld",
                            static_cast<unsigned>(addHr),
                            static_cast<long long>(navToken.value));
                 } else {
-                    P0_LOG(L"[p0] add_NavigationStarting -> %08X token=%lld "
+                    Wh_Log(L"[p0] add_NavigationStarting -> %08X token=%lld "
                            L"(not registered)",
                            static_cast<unsigned>(addHr),
                            static_cast<long long>(navToken.value));
                 }
             } else {
-                P0_LOG(L"[p0] out of memory for NavigationStarting handler");
+                Wh_Log(L"[p0] out of memory for NavigationStarting handler");
             }
         } else {
-            P0_LOG(L"[p0] add_NavigationStarting slot invalid");
-            P0_LOG(L"add_NavigationStarting skipped: slot invalid");
+            Wh_Log(L"[p0] add_NavigationStarting slot invalid");
         }
 
         void* addNavCompletedFn = nullptr;
@@ -6916,11 +8387,9 @@ static void P0OnControllerReady(void* controller) {
             navHandler.handler = P0CreateNavigationCompletedHandler();
             if (navHandler.handler) {
                 EventRegistrationToken navToken{};
+                P0MarkHandedOver(navHandler.handler);
                 HRESULT addHr = reinterpret_cast<FnAddNavigationEventHandler>(
                     addNavCompletedFn)(webView, navHandler.handler, &navToken);
-                P0_LOG(L"add_NavigationCompleted hr=0x%08X token=%lld",
-                       static_cast<unsigned>(addHr),
-                       static_cast<long long>(navToken.value));
                 if (SUCCEEDED(addHr) && navToken.value != 0) {
                     {
                         std::lock_guard<std::mutex> lock(g_webViewMutex);
@@ -6930,28 +8399,33 @@ static void P0OnControllerReady(void* controller) {
                                 navHandler.handler);
                         navHandler.handler = nullptr;
                     }
-                    P0_LOG(L"[p0] add_NavigationCompleted -> %08X token=%lld",
+                    Wh_Log(L"[p0] add_NavigationCompleted -> %08X token=%lld",
                            static_cast<unsigned>(addHr),
                            static_cast<long long>(navToken.value));
                 } else {
-                    P0_LOG(L"[p0] add_NavigationCompleted -> %08X token=%lld "
+                    Wh_Log(L"[p0] add_NavigationCompleted -> %08X token=%lld "
                            L"(not registered)",
                            static_cast<unsigned>(addHr),
                            static_cast<long long>(navToken.value));
                 }
             } else {
-                P0_LOG(L"[p0] out of memory for NavigationCompleted handler");
+                Wh_Log(L"[p0] out of memory for NavigationCompleted handler");
             }
         } else {
-            P0_LOG(L"[p0] add_NavigationCompleted slot invalid");
-            P0_LOG(L"add_NavigationCompleted skipped: slot invalid");
+            Wh_Log(L"[p0] add_NavigationCompleted slot invalid");
         }
     }
 
     // 5) Fallback for the current document, often still about:blank; that is why
-    //    NavigationCompleted injects again. The script is idempotent.
+    //    NavigationCompleted injects again. The script is idempotent. Without a
+    //    stored webview there is no message handler, so injecting would only
+    //    create a page that can never talk to the mod.
+    if (!webViewStored) {
+        Wh_Log(L"[p0] ExecuteScript fallback skipped: no message handler");
+        return;
+    }
     HRESULT execHr = P0ExecuteScript(webView, L"ExecuteScript-fallback", nullptr);
-    P0_LOG(L"ExecuteScript fallback hr=0x%08X", static_cast<unsigned>(execHr));
+    Wh_Log(L"ExecuteScript fallback hr=0x%08X", static_cast<unsigned>(execHr));
 }
 
 // ---------------------------------------------------------------------------
@@ -6961,21 +8435,24 @@ static void P0OnControllerReady(void* controller) {
 static HRESULT STDMETHODCALLTYPE P0EnvHandlerInvoke(P0EnvHandler* self,
                                                     HRESULT hr,
                                                     void* env) {
+    P0WrapperCallScope scope;
     try {
-        P0_LOG(L"env handler Invoke hr=0x%08X env=%p",
-               static_cast<unsigned>(hr), env);
-        P0_LOG(L"[p0] environment completed: hr=%08X env=%p",
+        Wh_Log(L"[p0] environment completed: hr=%08X env=%p",
                static_cast<unsigned>(hr), env);
 
-        if (SUCCEEDED(hr) && env) {
+        // The app's continuation is forwarded either way; only our own work
+        // is gated by the lifecycle state.
+        if (P1IsRunning() && SUCCEEDED(hr) && env) {
             P0PatchEnvironment(env);
+        } else if (SUCCEEDED(hr) && env) {
+            Wh_Log(L"[p0] environment completed after shutdown; not patching");
         } else {
-            P0_LOG(L"[p0] no environment to patch; forwarding as-is");
+            Wh_Log(L"[p0] no environment to patch; forwarding as-is");
         }
 
         return P0SafeForwardEnvHandler(self ? self->app : nullptr, hr, env);
     } catch (...) {
-        P0_LOG(L"[p0] exception in environment callback");
+        Wh_Log(L"[p0] exception in environment callback");
         return S_OK;
     }
 }
@@ -6984,20 +8461,19 @@ static HRESULT STDMETHODCALLTYPE P0ControllerHandlerInvoke(
     P0ControllerHandler* self,
     HRESULT hr,
     void* controller) {
+    P0WrapperCallScope scope;
     try {
-        P0_LOG(L"controller Invoke hr=0x%08X controller=%p",
-               static_cast<unsigned>(hr), controller);
-        P0_LOG(L"[p0] controller completed: hr=%08X controller=%p",
+        Wh_Log(L"[p0] controller completed: hr=%08X controller=%p",
                static_cast<unsigned>(hr), controller);
 
-        if (SUCCEEDED(hr) && controller) {
+        if (P1IsRunning() && SUCCEEDED(hr) && controller) {
             P0OnControllerReady(controller);
         }
 
         return P0SafeForwardControllerHandler(self ? self->app : nullptr, hr,
                                               controller);
     } catch (...) {
-        P0_LOG(L"[p0] exception in controller callback");
+        Wh_Log(L"[p0] exception in controller callback");
         return S_OK;
     }
 }
@@ -7006,6 +8482,7 @@ static HRESULT STDMETHODCALLTYPE P0MessageHandlerInvoke(
     P0MessageHandler* self,
     void* sender,
     void* args) {
+    P0WrapperCallScope scope;
     (void)self;
 
     try {
@@ -7013,21 +8490,18 @@ static HRESULT STDMETHODCALLTYPE P0MessageHandlerInvoke(
             return S_OK;
         }
 
-        // WebView2 raises this event on the UI thread. Remember it here too so
-        // the P1 dispatcher can be created even if the controller path missed
-        // its chance (for example after a renderer swap).
+        // WebView2 raises this event on the UI thread. P1HandleMessage owns
+        // the dispatcher/drain/settings work; this callback only decodes the
+        // transport and enforces the lifecycle gate.
         P1NoteUiThread();
-        P1EnsureDispatchWindow();
-        P1DrainRepliesOnUiThread();
-
-        if (g_p1SettingsDirty.exchange(false) && g_p1PageReady.load()) {
-            P1PushSettingsToAll(L"deferred");
+        if (!P1IsRunning()) {
+            return S_OK;
         }
 
         void* tryGetFn = nullptr;
         if (!P0GetValidatedSlot(args, kArgsSlotTryGetWebMessageAsString,
                                 &tryGetFn)) {
-            P0_LOG(L"[p0] TryGetWebMessageAsString slot invalid");
+            Wh_Log(L"[p1] TryGetWebMessageAsString slot invalid");
             return S_OK;
         }
 
@@ -7035,53 +8509,36 @@ static HRESULT STDMETHODCALLTYPE P0MessageHandlerInvoke(
         HRESULT hr =
             reinterpret_cast<FnTryGetWebMessageAsString>(tryGetFn)(args, &text);
         if (FAILED(hr) || !text) {
-            // Non-string messages are not part of the protocol.
-            P0_LOG(L"[p0] TryGetWebMessageAsString -> %08X",
-                   static_cast<unsigned>(hr));
+            if (text) {
+                CoTaskMemFree(text);
+            }
+            // Non-string messages are not part of the protocol; log once.
+            static std::atomic<bool> nonStringLogged{false};
+            if (!nonStringLogged.exchange(true, std::memory_order_relaxed)) {
+                Wh_Log(L"[p1] non-string web message ignored (%08X)",
+                       static_cast<unsigned>(hr));
+            }
             return S_OK;
         }
 
-        if (wcsncmp(text, L"p0:", 3) == 0) {
-            P0_LOG(L"msg received: %s", P0Trunc(text));
-            P0_LOG(L"[p0] JS -> mod: %s", P0Trunc(text));
-
-            HRESULT postHr = E_FAIL;
-            void* postFn = nullptr;
-            if (P0GetValidatedSlot(sender, kWebViewSlotPostWebMessageAsString,
-                                   &postFn)) {
-                try {
-                    std::wstring reply = L"p0:ack:";
-                    reply += text;
-                    postHr = reinterpret_cast<FnPostWebMessageAsString>(postFn)(
-                        sender, reply.c_str());
-                } catch (...) {
-                    P0_LOG(L"[p0] exception while building the reply");
-                }
-            } else {
-                P0_LOG(L"[p0] PostWebMessageAsString slot invalid");
-            }
-
-            P0_LOG(L"ack posted hr=0x%08X", static_cast<unsigned>(postHr));
-            P0_LOG(L"[p0] mod -> JS reply: %08X",
-                   static_cast<unsigned>(postHr));
-        } else if (wcsncmp(text, kP1Tag, 5) == 0) {
+        if (wcsncmp(text, kP1Tag, 5) == 0) {
             try {
                 std::wstring message(text);
                 P1HandleMessage(sender, message);
             } catch (...) {
-                P0_LOG(L"[p1] exception while handling a page message");
+                Wh_Log(L"[p1] exception while handling a page message");
             }
         } else {
             static std::atomic<bool> unknownPrefixLogged{false};
             if (!unknownPrefixLogged.exchange(true, std::memory_order_relaxed)) {
-                P0_LOG(L"[p1] message with an unknown prefix ignored: %s",
-                       P0Trunc(text));
+                Wh_Log(L"[p1] message with an unknown prefix ignored: %.200s",
+                       text ? text : L"(null)");
             }
         }
 
         CoTaskMemFree(text);
     } catch (...) {
-        P0_LOG(L"[p0] exception in message handler");
+        Wh_Log(L"[p1] exception in message handler");
     }
 
     return S_OK;
@@ -7091,15 +8548,36 @@ static HRESULT STDMETHODCALLTYPE P0ScriptHandlerInvoke(
     P0ScriptHandler* self,
     HRESULT hr,
     LPCWSTR text) {
+    P0WrapperCallScope scope;
+    const wchar_t* label = self && self->label ? self->label : L"?";
     try {
-        const wchar_t* label = self && self->label ? self->label : L"?";
-        HRESULT immediateHr = self ? self->immediateHr : E_FAIL;
-        P0_LOG(L"[p0] script '%s' completed: hr=%08X result=%s", label,
-               static_cast<unsigned>(hr), P0Trunc(text));
-        if (wcscmp(label, L"AddScript") == 0) {
-            P0_LOG(L"AddScript hr=0x%08X id=%s",
+        if (self && wcscmp(label, L"AddScript") == 0) {
+            // Handle the result before any lifecycle check. A completion that
+            // arrives after Stopping was set still carries the script id and
+            // must remove the document-created script; the teardown's own
+            // removal already ran (or will run without an id).
+            if (text && *text) {
+                P0SetScriptId(text);
+                if (!P1IsRunning()) {
+                    // We are on the WebView2 UI thread, the thread the removal
+                    // requires. The reference kept in self->webView is still
+                    // valid here even though P0CleanupWebView has run.
+                    try {
+                        P0RemoveRegisteredScript(self->webView);
+                    } catch (...) {
+                        Wh_Log(L"[p0] exception while removing the AddScript "
+                               L"script");
+                    }
+                }
+            }
+            P0ReleaseScriptWebView(self);
+
+            Wh_Log(L"[p0] AddScript completed: hr=%08X id=%.200s running=%d",
                    static_cast<unsigned>(g_addScriptHr.load()),
-                   P0Trunc(text));
+                   text ? text : L"(null)", P1IsRunning() ? 1 : 0);
+            if (!P1IsRunning()) {
+                return S_OK;
+            }
 
             // AddScriptToExecuteOnDocumentCreated finishes asynchronously. By
             // the time this fires, wry has usually started the first real
@@ -7112,25 +8590,35 @@ static HRESULT STDMETHODCALLTYPE P0ScriptHandlerInvoke(
                 if (webView) {
                     P0ComRef webViewRef;
                     webViewRef.object = webView;
-                    P0_LOG(L"[p0] AddScript completed late; injecting into the "
+                    Wh_Log(L"[p0] AddScript completed late; injecting into the "
                            L"current document");
                     P0ExecuteScript(webView, L"ExecuteScript-afterAddScript",
                                     L"afteraddscript");
                 } else {
-                    P0_LOG(L"ExecuteScript afterAddScript skipped: no webview");
-                    P0_LOG(L"[p0] AddScript completed but no webview is stored; "
+                    Wh_Log(L"[p0] AddScript completed but no webview is stored; "
                            L"relying on NavigationCompleted");
                 }
             }
-        } else if (wcscmp(label, L"ExecuteScript-fallback") == 0) {
-            P0_LOG(L"ExecuteScript fallback hr=0x%08X result=%s",
-                   static_cast<unsigned>(immediateHr), P0Trunc(text));
+            return S_OK;
+        }
+
+        if (!P1IsRunning()) {
+            return S_OK;
+        }
+
+        HRESULT immediateHr = self ? self->immediateHr : E_FAIL;
+        if (wcscmp(label, L"ExecuteScript-fallback") == 0) {
+            Wh_Log(L"[p0] ExecuteScript fallback: hr=%08X result=%.200s",
+                   static_cast<unsigned>(immediateHr),
+                   text ? text : L"(null)");
         } else if (wcscmp(label, L"ExecuteScript-afterAddScript") == 0) {
-            P0_LOG(L"ExecuteScript afterAddScript hr=0x%08X result=%s",
-                   static_cast<unsigned>(immediateHr), P0Trunc(text));
+            Wh_Log(L"[p0] ExecuteScript afterAddScript: hr=%08X result=%.200s",
+                   static_cast<unsigned>(immediateHr),
+                   text ? text : L"(null)");
         } else if (wcscmp(label, L"ExecuteScript-navcompleted") == 0) {
-            P0_LOG(L"ExecuteScript navcompleted hr=0x%08X result=%s",
-                   static_cast<unsigned>(immediateHr), P0Trunc(text));
+            Wh_Log(L"[p0] ExecuteScript navcompleted: hr=%08X result=%.200s",
+                   static_cast<unsigned>(immediateHr),
+                   text ? text : L"(null)");
         }
     } catch (...) {
     }
@@ -7143,21 +8631,24 @@ static HRESULT STDMETHODCALLTYPE P0NavigationStartingInvoke(
     P0NavigationStartingHandler* self,
     void* sender,
     void* args) {
+    P0WrapperCallScope scope;
     (void)self;
     (void)sender;
 
+    if (!P1IsRunning()) {
+        return S_OK;
+    }
+
     try {
         if (!args) {
-            P0_LOG(L"navstarting uri=(unavailable) get_Uri=0x80004003");
-            P0_LOG(L"[p0] NavigationStarting: no event args");
+            Wh_Log(L"[p0] NavigationStarting: no event args");
             return S_OK;
         }
 
         void* getUriFn = nullptr;
         if (!P0GetValidatedSlot(args, kNavigationStartingArgsSlotGetUri,
                                 &getUriFn)) {
-            P0_LOG(L"navstarting uri=(unavailable) get_Uri=0x80004005");
-            P0_LOG(L"[p0] NavigationStarting: get_Uri slot invalid");
+            Wh_Log(L"[p0] NavigationStarting: get_Uri slot invalid");
             return S_OK;
         }
 
@@ -7175,20 +8666,16 @@ static HRESULT STDMETHODCALLTYPE P0NavigationStartingInvoke(
         }
 
         if (FAILED(getHr)) {
-            P0_LOG(L"navstarting uri=(unavailable) get_Uri=0x%08X",
-                   static_cast<unsigned>(getHr));
-            P0_LOG(L"[p0] NavigationStarting: get_Uri -> %08X",
+            Wh_Log(L"[p0] NavigationStarting: get_Uri -> %08X",
                    static_cast<unsigned>(getHr));
             return S_OK;
         }
 
         P0SetLastNavigationUri(uri);
-        P0_LOG(L"navstarting uri=%s get_Uri=0x%08X", P0Trunc(uri.c_str()),
-               static_cast<unsigned>(getHr));
-        P0_LOG(L"[p0] NavigationStarting: uri=%s get_Uri=0x%08X",
-               P0Trunc(uri.c_str()), static_cast<unsigned>(getHr));
+        Wh_Log(L"[p0] NavigationStarting: uri=%.200s get_Uri=0x%08X",
+               uri.c_str(), static_cast<unsigned>(getHr));
     } catch (...) {
-        P0_LOG(L"[p0] exception in NavigationStarting handler");
+        Wh_Log(L"[p0] exception in NavigationStarting handler");
     }
 
     return S_OK;
@@ -7201,7 +8688,12 @@ static HRESULT STDMETHODCALLTYPE P0NavigationCompletedInvoke(
     P0NavigationCompletedHandler* self,
     void* sender,
     void* args) {
+    P0WrapperCallScope scope;
     (void)self;
+
+    if (!P1IsRunning()) {
+        return S_OK;
+    }
 
     try {
         BOOL isSuccess = FALSE;
@@ -7212,15 +8704,14 @@ static HRESULT STDMETHODCALLTYPE P0NavigationCompletedInvoke(
         HRESULT navigationIdHr = E_POINTER;
 
         if (!args) {
-            P0_LOG(L"navcompleted event args missing; IsSuccess unknown");
-            P0_LOG(L"[p0] NavigationCompleted: no event args");
+            Wh_Log(L"[p0] NavigationCompleted: no event args");
         } else {
             void* fn = nullptr;
             if (P0GetValidatedSlot(
                     args, kNavigationCompletedArgsSlotGetIsSuccess, &fn)) {
                 successHr = reinterpret_cast<FnGetBool>(fn)(args, &isSuccess);
             } else {
-                P0_LOG(L"[p0] NavigationCompleted: get_IsSuccess slot invalid");
+                Wh_Log(L"[p0] NavigationCompleted: get_IsSuccess slot invalid");
             }
 
             fn = nullptr;
@@ -7229,7 +8720,7 @@ static HRESULT STDMETHODCALLTYPE P0NavigationCompletedInvoke(
                 errorStatusHr = reinterpret_cast<FnGetInt32>(fn)(
                     args, &webErrorStatus);
             } else {
-                P0_LOG(
+                Wh_Log(
                     L"[p0] NavigationCompleted: get_WebErrorStatus slot invalid");
             }
 
@@ -7241,28 +8732,23 @@ static HRESULT STDMETHODCALLTYPE P0NavigationCompletedInvoke(
             }
 
             if (FAILED(successHr)) {
-                P0_LOG(L"[p0] NavigationCompleted: get_IsSuccess -> %08X",
+                Wh_Log(L"[p0] NavigationCompleted: get_IsSuccess -> %08X",
                        static_cast<unsigned>(successHr));
             }
             if (FAILED(errorStatusHr)) {
-                P0_LOG(L"[p0] NavigationCompleted: get_WebErrorStatus -> %08X",
+                Wh_Log(L"[p0] NavigationCompleted: get_WebErrorStatus -> %08X",
                        static_cast<unsigned>(errorStatusHr));
             }
             if (FAILED(navigationIdHr)) {
-                P0_LOG(L"[p0] NavigationCompleted: get_NavigationId -> %08X",
+                Wh_Log(L"[p0] NavigationCompleted: get_NavigationId -> %08X",
                        static_cast<unsigned>(navigationIdHr));
             }
         }
 
         std::wstring uri = P0GetLastNavigationUri();
-        P0_LOG(L"navcompleted uri=%s success=%d webErrorStatus=%d "
-               L"navigationId=%llu get_IsSuccess=0x%08X",
-               P0Trunc(uri.c_str()), isSuccess ? 1 : 0, webErrorStatus,
-               static_cast<unsigned long long>(navigationId),
-               static_cast<unsigned>(successHr));
-        P0_LOG(L"[p0] NavigationCompleted: uri=%s success=%d webErrorStatus=%d "
-               L"navigationId=%llu",
-               P0Trunc(uri.c_str()), isSuccess ? 1 : 0, webErrorStatus,
+        Wh_Log(L"[p0] NavigationCompleted: uri=%.200s success=%d "
+               L"webErrorStatus=%d navigationId=%llu",
+               uri.c_str(), isSuccess ? 1 : 0, webErrorStatus,
                static_cast<unsigned long long>(navigationId));
 
         // sender is the ICoreWebView2 that raised the event; use it directly.
@@ -7275,17 +8761,16 @@ static HRESULT STDMETHODCALLTYPE P0NavigationCompletedInvoke(
             acquired.object = target;
         }
         if (!target) {
-            P0_LOG(L"ExecuteScript navcompleted skipped: no webview");
-            P0_LOG(L"[p0] NavigationCompleted: sender is null and no webview is "
+            Wh_Log(L"[p0] NavigationCompleted: sender is null and no webview is "
                    L"stored");
             return S_OK;
         }
 
-        P0_LOG(L"[p0] NavigationCompleted: late injection into the completed "
+        Wh_Log(L"[p0] NavigationCompleted: late injection into the completed "
                L"document");
         P0ExecuteScript(target, L"ExecuteScript-navcompleted", L"navcompleted");
     } catch (...) {
-        P0_LOG(L"[p0] exception in NavigationCompleted handler");
+        Wh_Log(L"[p0] exception in NavigationCompleted handler");
     }
 
     return S_OK;
@@ -7298,34 +8783,36 @@ static HRESULT STDMETHODCALLTYPE P0NavigationCompletedInvoke(
 static HRESULT STDMETHODCALLTYPE P0EnvCreateControllerThunk(void* self,
                                                             HWND parent,
                                                             void* handler) {
+    P0WrapperCallScope scope;
     try {
-        P0_LOG(L"[p0] env->CreateCoreWebView2Controller(parent=%p handler=%p)",
+        Wh_Log(L"[p0] env->CreateCoreWebView2Controller(parent=%p handler=%p)",
                reinterpret_cast<void*>(parent), handler);
 
         auto original = reinterpret_cast<FnEnvCreateController>(
             g_origEnvCreateController.load(std::memory_order_acquire));
         if (!original) {
-            P0_LOG(L"[p0] original CreateCoreWebView2Controller missing");
+            Wh_Log(L"[p0] original CreateCoreWebView2Controller missing");
             return E_FAIL;
         }
 
-        if (!handler) {
+        if (!handler || !P1IsRunning()) {
             return original(self, parent, handler);
         }
 
         P0HandlerRef wrapped;
         wrapped.handler = P0CreateControllerHandler(handler);
         if (!wrapped.handler) {
-            P0_LOG(L"[p0] out of memory for controller handler; passing through");
+            Wh_Log(L"[p0] out of memory for controller handler; passing through");
             return original(self, parent, handler);
         }
 
+        P0MarkHandedOver(wrapped.handler);
         HRESULT hr = original(self, parent, wrapped.handler);
-        P0_LOG(L"[p0] CreateCoreWebView2Controller -> %08X",
+        Wh_Log(L"[p0] CreateCoreWebView2Controller -> %08X",
                static_cast<unsigned>(hr));
         return hr;
     } catch (...) {
-        P0_LOG(L"[p0] exception in CreateCoreWebView2Controller thunk");
+        Wh_Log(L"[p0] exception in CreateCoreWebView2Controller thunk");
         return E_FAIL;
     }
 }
@@ -7335,36 +8822,38 @@ static HRESULT STDMETHODCALLTYPE P0EnvCreateControllerWithOptionsThunk(
     HWND parent,
     void* options,
     void* handler) {
+    P0WrapperCallScope scope;
     try {
-        P0_LOG(L"[p0] env->CreateCoreWebView2ControllerWithOptions(parent=%p "
+        Wh_Log(L"[p0] env->CreateCoreWebView2ControllerWithOptions(parent=%p "
                L"options=%p handler=%p)",
                reinterpret_cast<void*>(parent), options, handler);
 
         auto original = reinterpret_cast<FnEnvCreateControllerWithOptions>(
             g_origEnvCreateControllerWithOptions.load(std::memory_order_acquire));
         if (!original) {
-            P0_LOG(L"[p0] original CreateCoreWebView2ControllerWithOptions "
+            Wh_Log(L"[p0] original CreateCoreWebView2ControllerWithOptions "
                    L"missing");
             return E_FAIL;
         }
 
-        if (!handler) {
+        if (!handler || !P1IsRunning()) {
             return original(self, parent, options, handler);
         }
 
         P0HandlerRef wrapped;
         wrapped.handler = P0CreateControllerHandler(handler);
         if (!wrapped.handler) {
-            P0_LOG(L"[p0] out of memory for controller handler; passing through");
+            Wh_Log(L"[p0] out of memory for controller handler; passing through");
             return original(self, parent, options, handler);
         }
 
+        P0MarkHandedOver(wrapped.handler);
         HRESULT hr = original(self, parent, options, wrapped.handler);
-        P0_LOG(L"[p0] CreateCoreWebView2ControllerWithOptions -> %08X",
+        Wh_Log(L"[p0] CreateCoreWebView2ControllerWithOptions -> %08X",
                static_cast<unsigned>(hr));
         return hr;
     } catch (...) {
-        P0_LOG(L"[p0] exception in CreateCoreWebView2ControllerWithOptions "
+        Wh_Log(L"[p0] exception in CreateCoreWebView2ControllerWithOptions "
                L"thunk");
         return E_FAIL;
     }
@@ -7386,8 +8875,22 @@ static HRESULT STDMETHODCALLTYPE P0CreateEnvShim(BOOL fromClientDll,
                                                  void* handler);
 
 static FARPROC WINAPI P0GetProcAddressHook(HMODULE module, LPCSTR procName) {
+    // The scope is constructed before the lifecycle check so that a hook call
+    // that races the teardown is still counted in g_p0ActiveWrapperCalls; the
+    // teardown then pins instead of unloading under it. Once Stopping was set
+    // there is no wrapper work left to do, so the original export is returned
+    // untouched.
+    //
+    // false: this hook runs on every thread in the process, not only on the
+    // WebView2 UI thread. Feeding the sticky "outside the UI thread" pin from
+    // here would pin on essentially every unload; the active counter still
+    // covers the whole call.
+    P0WrapperCallScope scope(/*webView2Callback=*/false);
     if (!g_originalGetProcAddress) {
         return nullptr;
+    }
+    if (!P1IsRunning()) {
+        return g_originalGetProcAddress(module, procName);
     }
 
     __try {
@@ -7413,9 +8916,29 @@ static FARPROC WINAPI P0GetProcAddressHook(HMODULE module, LPCSTR procName) {
                         g_originalGetProcAddress(module, procName));
                     if (real) {
                         g_realCreateEnv.store(real, std::memory_order_release);
+
+                        // The dispatch window is a prerequisite for every
+                        // wrapper this mod hands to WebView2. Create it here,
+                        // on the environment-creation (UI) thread, before the
+                        // shim can wrap anything. If it cannot be created,
+                        // return the real export unchanged: no wrapper, no
+                        // script, no message handler, nothing owned by the mod.
+                        P1NoteUiThread();
+                        if (!P1EnsureDispatchWindow()) {
+                            if (!g_p1DispatchFailureLogged.exchange(
+                                    true, std::memory_order_relaxed)) {
+                                Wh_Log(L"[p0] GetProcAddress("
+                                       L"EmbeddedBrowserWebView.dll, "
+                                       L"CreateWebViewEnvironmentWithOptions"
+                                       L"Internal) -> real export (dispatch "
+                                       L"window unavailable)");
+                            }
+                            return reinterpret_cast<FARPROC>(real);
+                        }
+
                         if (!g_createExportLogged.exchange(
                                 true, std::memory_order_relaxed)) {
-                            P0_LOG(L"GetProcAddress(EmbeddedBrowserWebView.dll, "
+                            Wh_Log(L"GetProcAddress(EmbeddedBrowserWebView.dll, "
                                    L"CreateWebViewEnvironmentWithOptionsInternal) "
                                    L"-> shim original=%p",
                                    reinterpret_cast<void*>(real));
@@ -7424,7 +8947,7 @@ static FARPROC WINAPI P0GetProcAddressHook(HMODULE module, LPCSTR procName) {
                     }
                     if (!g_createExportLogged.exchange(
                             true, std::memory_order_relaxed)) {
-                        P0_LOG(L"GetProcAddress(EmbeddedBrowserWebView.dll, "
+                        Wh_Log(L"GetProcAddress(EmbeddedBrowserWebView.dll, "
                                L"CreateWebViewEnvironmentWithOptionsInternal) "
                                L"-> unresolved");
                     }
@@ -7437,9 +8960,7 @@ static FARPROC WINAPI P0GetProcAddressHook(HMODULE module, LPCSTR procName) {
                         g_originalGetProcAddress(module, procName);
                     if (!g_sharedExportLogged.exchange(
                             true, std::memory_order_relaxed)) {
-                        P0_LOG(L"[p0] CreateSharedWebViewEnvironmentInternal "
-                               L"requested; passing through unmodified");
-                        P0_LOG(L"GetProcAddress(EmbeddedBrowserWebView.dll, "
+                        Wh_Log(L"[p0] GetProcAddress(EmbeddedBrowserWebView.dll, "
                                L"CreateSharedWebViewEnvironmentInternal) -> "
                                L"passthrough original=%p",
                                reinterpret_cast<void*>(original));
@@ -7459,126 +8980,60 @@ static HRESULT STDMETHODCALLTYPE P0CreateEnvShim(
     PCWSTR userDataFolder,
     IUnknown* environmentOptions,
     void* handler) {
+    P0WrapperCallScope scope;
     try {
-        P0_LOG(L"CreateEnvShim: fromClientDll=%d runtimeType=%d "
-               L"userDataFolder=%s",
+        Wh_Log(L"[p0] CreateWebViewEnvironmentWithOptionsInternal: "
+               L"fromClientDll=%d runtimeType=%d userDataFolder=%.200s handler=%p",
                static_cast<int>(fromClientDll), runtimeType,
-               P0Trunc(userDataFolder));
-        P0_LOG(L"[p0] CreateWebViewEnvironmentWithOptionsInternal: "
-               L"fromClientDll=%d runtimeType=%d userDataFolder=%s handler=%p",
-               static_cast<int>(fromClientDll), runtimeType,
-               P0Trunc(userDataFolder), handler);
+               userDataFolder ? userDataFolder : L"(null)", handler);
 
         FnCreateEnv real = g_realCreateEnv.load(std::memory_order_acquire);
         if (!real) {
-            P0_LOG(L"[p0] real CreateWebViewEnvironmentWithOptionsInternal "
+            Wh_Log(L"[p0] real CreateWebViewEnvironmentWithOptionsInternal "
                    L"not resolved");
             return E_FAIL;
         }
 
-        if (!handler) {
+        if (!handler || !P1IsRunning()) {
             HRESULT passthroughHr = real(fromClientDll, runtimeType,
                                          userDataFolder, environmentOptions,
                                          handler);
-            P0_LOG(L"original createEnv returned hr=0x%08X",
+            Wh_Log(L"original createEnv returned hr=0x%08X",
                    static_cast<unsigned>(passthroughHr));
             return passthroughHr;
+        }
+
+        // The hook created the dispatch window before returning this shim; if
+        // it is gone now, pass the original handler through unwrapped rather
+        // than handing WebView2 something the mod could not tear down.
+        P1NoteUiThread();
+        if (!P1EnsureDispatchWindow()) {
+            if (!g_p1DispatchFailureLogged.exchange(true,
+                                                    std::memory_order_relaxed)) {
+                Wh_Log(L"[p0] dispatch window unavailable; environment handler "
+                       L"passed through unwrapped");
+            }
+            return real(fromClientDll, runtimeType, userDataFolder,
+                        environmentOptions, handler);
         }
 
         P0HandlerRef wrapped;
         wrapped.handler = P0CreateEnvHandler(handler);
         if (!wrapped.handler) {
-            P0_LOG(L"[p0] out of memory for environment handler; passing through");
+            Wh_Log(L"[p0] out of memory for environment handler; passing through");
             return real(fromClientDll, runtimeType, userDataFolder,
                         environmentOptions, handler);
         }
 
+        P0MarkHandedOver(wrapped.handler);
         HRESULT hr = real(fromClientDll, runtimeType, userDataFolder,
                           environmentOptions, wrapped.handler);
-        P0_LOG(L"original createEnv returned hr=0x%08X",
-               static_cast<unsigned>(hr));
-        P0_LOG(L"[p0] environment creation call -> %08X",
+        Wh_Log(L"[p0] environment creation call -> %08X",
                static_cast<unsigned>(hr));
         return hr;
     } catch (...) {
-        P0_LOG(L"[p0] exception in environment creation shim");
+        Wh_Log(L"[p0] exception in environment creation shim");
         return E_FAIL;
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Heartbeat
-//
-// One line every 30 s proves the DLL is loaded and its threads run, and reports
-// the windhawk-ui.exe base and whether the WebView2 runtime DLL is loaded yet:
-// that separates "mod not loaded" from "loaded, hook never hit". P1 already logs
-// every request and page error, so this is only a liveness marker and must not
-// flood p0.log.
-// ---------------------------------------------------------------------------
-
-static HANDLE g_heartbeatStop = nullptr;
-static HANDLE g_heartbeatThread = nullptr;
-
-static DWORD WINAPI P0HeartbeatThreadProc(void*) {
-    for (;;) {
-        DWORD wait = WaitForSingleObject(g_heartbeatStop, 30000);
-        if (wait != WAIT_TIMEOUT) {
-            break;
-        }
-
-        HMODULE uiModule = GetModuleHandleW(nullptr);
-        HMODULE embeddedBrowser =
-            GetModuleHandleW(L"EmbeddedBrowserWebView.dll");
-        P0WriteFileLog(L"heartbeat pid=%lu uiBase=%p EmbeddedBrowserWebView=%s "
-                       L"base=%p",
-                       static_cast<unsigned long>(GetCurrentProcessId()),
-                       static_cast<void*>(uiModule),
-                       embeddedBrowser ? L"loaded" : L"not loaded",
-                       static_cast<void*>(embeddedBrowser));
-    }
-    return 0;
-}
-
-static bool P0StartHeartbeat() {
-    g_heartbeatStop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    if (!g_heartbeatStop) {
-        DWORD error = GetLastError();
-        P0_LOG(L"heartbeat: CreateEventW failed (%lu)", error);
-        return false;
-    }
-
-    g_heartbeatThread =
-        CreateThread(nullptr, 0, &P0HeartbeatThreadProc, nullptr, 0, nullptr);
-    if (!g_heartbeatThread) {
-        DWORD error = GetLastError();
-        P0_LOG(L"heartbeat: CreateThread failed (%lu)", error);
-        CloseHandle(g_heartbeatStop);
-        g_heartbeatStop = nullptr;
-        return false;
-    }
-
-    P0_LOG(L"heartbeat started (every 30 s)");
-    return true;
-}
-
-static void P0StopHeartbeat() {
-    if (g_heartbeatStop) {
-        SetEvent(g_heartbeatStop);
-    }
-
-    if (g_heartbeatThread) {
-        DWORD wait = WaitForSingleObject(g_heartbeatThread, 3000);
-        P0_LOG(L"cleanup: heartbeat stop wait=%lu hr=0x%08X", wait,
-               wait == WAIT_OBJECT_0
-                   ? 0u
-                   : static_cast<unsigned>(HRESULT_FROM_WIN32(ERROR_TIMEOUT)));
-        CloseHandle(g_heartbeatThread);
-        g_heartbeatThread = nullptr;
-    }
-
-    if (g_heartbeatStop) {
-        CloseHandle(g_heartbeatStop);
-        g_heartbeatStop = nullptr;
     }
 }
 
@@ -7587,10 +9042,40 @@ static void P0StopHeartbeat() {
 // ---------------------------------------------------------------------------
 
 BOOL Wh_ModInit() {
-    P0LogInit();
+    // The wrapper depth uses a Win32 TLS slot. Module thread_local storage is
+    // unusable here: Windhawk's loader does not register a mod's TLS directory,
+    // so the first module TLS access reads TEB->ThreadLocalStoragePointer
+    // (gs:0x58) before it is populated and faults. Allocate the slot before
+    // the GetProcAddress hook below can admit a wrapper. On failure the depth
+    // stays unknown, so the unload decision can never be proven.
+    DWORD depthIndex = TlsAlloc();
+    if (depthIndex == TLS_OUT_OF_INDEXES) {
+        Wh_Log(L"[p0] TlsAlloc failed (%lu); wrapper depth is unknown and the "
+               L"unload decision will not be provable",
+               GetLastError());
+    } else {
+        g_p0DepthTlsIndex.store(depthIndex, std::memory_order_release);
+        // A recycled TLS index can carry a stale value on this thread. Start
+        // the init/unload thread at depth zero; a failure here sets the
+        // "unknown" flag and the teardown pins.
+        P0SetWrapperDepth(0);
+        Wh_Log(L"[p0] wrapper depth TLS slot=%lu", depthIndex);
+    }
 
     wchar_t exePath[MAX_PATH]{};
     GetModuleFileNameW(nullptr, exePath, ARRAYSIZE(exePath));
+
+    // The dispatch window class belongs to this module, not to the host
+    // image. The same handle unregisters it at unload.
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR>(&P1DispatchWndProc),
+                            &g_modModule)) {
+        g_modModule = nullptr;
+        Wh_Log(L"[p1] GetModuleHandleExW failed (%lu); the dispatcher window is "
+               L"unavailable",
+               GetLastError());
+    }
 
     wchar_t disableValue[8]{};
     DWORD disableLength =
@@ -7598,17 +9083,18 @@ BOOL Wh_ModInit() {
                                 ARRAYSIZE(disableValue));
     bool disabled = disableLength > 0 && wcscmp(disableValue, L"1") == 0;
 
-    P0_LOG(L"log file: %s", g_p0LogPathDisplay);
-    P0_LOG(L"mod init: pid=%lu exe=%s kill-switch=%s",
-           static_cast<unsigned long>(GetCurrentProcessId()), P0Trunc(exePath),
+    Wh_Log(L"mod init: pid=%lu exe=%.200s kill-switch=%s",
+           static_cast<unsigned long>(GetCurrentProcessId()), exePath,
            disabled ? L"on (WH_TRANSLATOR_DISABLE=1)" : L"off");
-    P0_LOG(L"[p0] Wh_ModInit (P0 injection proof + P1 bridge)");
+    Wh_Log(L"[p0] Wh_ModInit (P0 injection proof + P1 bridge)");
 
     if (disabled) {
-        P0_LOG(L"[p0] WH_TRANSLATOR_DISABLE=1; not hooking anything");
-        P0_LOG(L"WH_TRANSLATOR_DISABLE=1: no hook installed, no heartbeat");
+        Wh_Log(L"[p0] WH_TRANSLATOR_DISABLE=1; not hooking anything");
+        g_p1Lifecycle.store(P1Lifecycle::Stopped, std::memory_order_release);
         return TRUE;
     }
+
+    P1CacheLoad();
 
     // Read the settings once at init: this also resolves the API key source so
     // the log shows whether a credential was found. The key itself is never
@@ -7616,80 +9102,158 @@ BOOL Wh_ModInit() {
     try {
         P1SettingsSnapshot snapshot = P1ReadSettings();
         P1KeyInfo key = P1GetKeyInfo();
-        P0_LOG(L"[p1] settings: targetLang=%s provider=%s keySource=%s "
+        Wh_Log(L"[p1] settings: targetLang=%s provider=%s keySource=%s "
                L"timeoutMs=%d concurrency=%d batchSize=%d batchChars=%d "
                L"clearCache=%d",
                snapshot.targetLang.c_str(), snapshot.provider.c_str(),
                key.source.c_str(), snapshot.timeoutMs, snapshot.concurrency,
                snapshot.batchSize, snapshot.batchChars,
                snapshot.clearCacheRequested ? 1 : 0);
-        P0_LOG(L"[p1] llm base host=%s keyBytes=%llu",
+        Wh_Log(L"[p1] llm base host=%s keyBytes=%llu",
                key.host.empty() ? L"(none)" : key.host.c_str(),
                static_cast<unsigned long long>(key.key.size()));
     } catch (...) {
-        P0_LOG(L"[p1] exception while reading settings at init");
+        Wh_Log(L"[p1] exception while reading settings at init");
     }
 
     HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
     if (!kernel32) {
-        P0_LOG(L"[p0] kernel32.dll not found; aborting");
+        Wh_Log(L"[p0] kernel32.dll not found; aborting");
+        g_p1Lifecycle.store(P1Lifecycle::Stopped, std::memory_order_release);
+        // Init failed, so the loader will unload this image; no hook exists
+        // that could call a wrapper after the slot is freed.
+        P0FreeDepthTlsIfUnloadable();
         return FALSE;
     }
 
     FARPROC getProcAddress = GetProcAddress(kernel32, "GetProcAddress");
     if (!getProcAddress) {
-        P0_LOG(L"[p0] GetProcAddress not found; aborting");
+        Wh_Log(L"[p0] GetProcAddress not found; aborting");
+        g_p1Lifecycle.store(P1Lifecycle::Stopped, std::memory_order_release);
+        P0FreeDepthTlsIfUnloadable();
         return FALSE;
     }
 
+    // Running is set before the hook is installed: an environment creation
+    // that races Wh_ModInit must see the mod as live.
+    g_p1Lifecycle.store(P1Lifecycle::Running, std::memory_order_release);
     if (!Wh_SetFunctionHook(reinterpret_cast<void*>(getProcAddress),
                             reinterpret_cast<void*>(&P0GetProcAddressHook),
                             reinterpret_cast<void**>(
                                 &g_originalGetProcAddress))) {
-        P0_LOG(L"[p0] failed to hook GetProcAddress; aborting");
+        Wh_Log(L"[p0] failed to hook GetProcAddress; aborting");
+        g_p1Lifecycle.store(P1Lifecycle::Stopped, std::memory_order_release);
+        P0FreeDepthTlsIfUnloadable();
         return FALSE;
     }
 
-    P0_LOG(L"hook GetProcAddress installed");
-    P0_LOG(L"[p0] GetProcAddress hooked; waiting for WebView2 environment "
+    Wh_Log(L"[p0] GetProcAddress hooked; waiting for WebView2 environment "
            L"creation");
-
-    if (!P0StartHeartbeat()) {
-        P0_LOG(L"heartbeat not running");
-    }
     return TRUE;
 }
 
 void Wh_ModSettingsChanged() {
+    if (!P1IsRunning()) {
+        return;
+    }
     try {
-        P0_LOG(L"[p1] mod settings changed");
+        Wh_Log(L"[p1] mod settings changed");
         // Settings are read fresh for every push and request; the generation
         // only invalidates the cached credential lookup.
         g_p1SettingsGeneration.fetch_add(1, std::memory_order_acq_rel);
         P1ClearKeyCache();
         P1RequestSettingsPush();
     } catch (...) {
-        P0_LOG(L"[p1] exception in Wh_ModSettingsChanged");
+        Wh_Log(L"[p1] exception in Wh_ModSettingsChanged");
     }
 }
 
 void Wh_ModBeforeUninit() {
-    P0_LOG(L"mod before uninit");
-    P0_LOG(L"[p0] Wh_ModBeforeUninit");
+    Wh_Log(L"[p0] Wh_ModBeforeUninit");
 
-    try {
-        // Order matters: stop our own threads first, then drop the UI
-        // dispatcher, then stop callbacks into this DLL, then restore the
-        // environment vtable so the app cannot jump into unloaded code later.
-        P0StopHeartbeat();
-        P1StopHttpWorkers();
-        P1DestroyDispatchWindow();
-        P1ClearKeyCache();
-        P0CleanupWebView();
-        P0RestoreEnvironment();
-    } catch (...) {
-        P0_LOG(L"[p0] exception during cleanup");
+    // First thing: no new work may be admitted from here on. Every entry point
+    // checks this state and returns unless it is Running.
+    P1Lifecycle previous =
+        g_p1Lifecycle.exchange(P1Lifecycle::Stopping,
+                               std::memory_order_acq_rel);
+    if (previous == P1Lifecycle::Stopped) {
+        Wh_Log(L"[p0] already stopped; nothing to do");
+        // This is the only early return that does not reach the decision below.
+        // It is reachable only when the lifecycle never became Running: init
+        // was disabled, or it failed before Wh_SetFunctionHook installed the
+        // GetProcAddress hook. No wrapper entry point can exist without that
+        // hook, so quiescence holds by construction and no reference is needed.
+        // A second Wh_ModBeforeUninit call lands here too, after the first one
+        // already ran the decision.
+        P0FreeDepthTlsIfUnloadable();
+        return;
     }
 
-    P0_LOG(L"[p0] cleanup done");
+    // 0) If a dispatch-window creation is in flight, wait for it to settle
+    //    before deciding what to tear down. The creator either publishes the
+    //    window (Ready) or sees Stopping, destroys its own window and reports
+    //    None. This is what keeps the unloader from setting Stopped while a
+    //    window whose WndProc points into this image is still being created.
+    P1WaitForDispatchCreation();
+
+    // 1) Stop the worker pool and the cache saver, both joined with INFINITE.
+    //    A request is bounded by timeoutMs, so the wait ends; after it, no
+    //    worker can return into this image. A failure here is a DEFECT and is
+    //    passed to the decision below: a worker may still be running.
+    bool threadsStopped = false;
+    try {
+        P1StopHttpWorkers();
+        P1StopCacheSaver();
+        threadsStopped = true;
+    } catch (...) {
+        Wh_Log(L"[p0] DEFECT: exception while stopping the mod's threads; "
+               L"quiescence cannot be proven");
+    }
+
+    // 2) The WebView2 teardown runs on the UI thread that owns the objects.
+    //    SendMessageW returns only after that thread left our WndProc with
+    //    every callback object released and the window gone, or with a
+    //    recorded failure. Every failure path inside it records a verdict; an
+    //    exception here leaves the verdict NotRun.
+    try {
+        P1TeardownUiThread();
+    } catch (...) {
+        Wh_Log(L"[p0] DEFECT: exception in the UI-thread teardown");
+    }
+
+    // 3) The single unload decision. It re-reads the counters, combines them
+    //    with the recorded teardown verdict, the sticky non-UI wrapper call
+    //    flag and the thread-stop result, and either proves the unload or takes
+    //    a loader reference that keeps this image resident.
+    P1UnloadDecision decision = P1DecideUnload(threadsStopped);
+
+    // 4) Drop the key material.
+    try {
+        P1ClearKeyCache();
+    } catch (...) {
+        Wh_Log(L"[p0] exception while clearing the key cache");
+    }
+
+    g_p1Lifecycle.store(P1Lifecycle::Stopped, std::memory_order_release);
+
+    // Only a proven unload is allowed to free the depth slot. In the Resident
+    // and Unresolved cases the image stays mapped (or is about to unmap with
+    // callers possibly still inside it), so the slot is kept: g_p0StayResident
+    // makes P0FreeDepthTlsIfUnloadable a no-op.
+    P0FreeDepthTlsIfUnloadable();
+
+    switch (decision) {
+        case P1UnloadDecision::ProvenSafe:
+            Wh_Log(L"[p0] cleanup done; unload proven safe");
+            break;
+        case P1UnloadDecision::Resident:
+            Wh_Log(L"[p0] cleanup done; a module reference is held, so this "
+                   L"image stays resident (deliberate leak)");
+            break;
+        case P1UnloadDecision::Unresolved:
+            Wh_Log(L"[p0] cleanup done; DEFECT: unload was not proven and no "
+                   L"module reference could be taken, so this image unloads "
+                   L"with callers that may still point into it");
+            break;
+    }
 }

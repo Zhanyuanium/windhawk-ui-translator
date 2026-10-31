@@ -60,6 +60,7 @@
     <button id="btn-leave">Simulate pointer out</button>
     <button id="btn-toggle">Toggle engine (Alt+Q)</button>
     <button id="btn-clear">Clear cache + reload</button>
+    <button id="btn-teardown">Simulate teardown</button>
     <button id="btn-rescan">Rescan</button>
   </div>
   <pre id="stats">engine not started</pre>
@@ -147,6 +148,9 @@
   const SEP = '\x1f';
   const listeners = [];
   const logEl = document.getElementById('stub-log');
+  // The mod's cache store: `cache-get` reads it, `cache-put` writes it.
+  const cache = new Map();
+  let tornDown = false;
 
   const log = (line) => {
     const stamp = new Date().toISOString().slice(11, 23);
@@ -159,6 +163,24 @@
     for (const fn of listeners.slice()) {
       try { fn({ data: data }); } catch (e) { log('listener threw: ' + e); }
     }
+  };
+
+  // Last field may contain separators: split the leading fields by indexOf and
+  // keep the remainder as the last field.
+  const splitFields = (text, count) => {
+    const out = [];
+    let at = 0;
+    for (let i = 0; i < count - 1; i++) {
+      const next = text.indexOf(SEP, at);
+      if (next === -1) {
+        if (at < text.length || out.length) out.push(text.slice(at));
+        return out;
+      }
+      out.push(text.slice(at, next));
+      at = next + 1;
+    }
+    out.push(text.slice(at));
+    return out;
   };
 
   const settings = {
@@ -182,8 +204,7 @@
     timeoutMs: 30000,
     cacheEnabled: true,
     cacheTtlDays: 30,
-    clearCache: false,
-    debug: true
+    clearCache: false
   };
 
   const DICT = {
@@ -254,25 +275,45 @@
     },
     postMessage(message) {
       const text = String(message);
+      if (tornDown) {
+        log('page -> mod after teardown (dropped): ' + text.slice(0, 80));
+        return;
+      }
       if (text === 'whtr1' + SEP + 'settings?') {
         log('page -> mod: settings?');
         setTimeout(replySettings, 15);
         return;
       }
       if (text.indexOf('whtr1' + SEP + 'log' + SEP) === 0) {
-        log('mod log: ' + text.split(SEP, 3)[2]);
+        log('mod log: ' + (splitFields(text, 3)[2] || ''));
+        return;
+      }
+      if (text.indexOf('whtr1' + SEP + 'cache-get' + SEP) === 0) {
+        const fields = splitFields(text, 4);
+        const id = fields[2];
+        const key = fields[3];
+        log('page -> mod: cache-get #' + id + ' ' + key);
+        setTimeout(() => {
+          if (cache.has(key)) send('whtr1' + SEP + 'cache-hit' + SEP + id + SEP + key + SEP + cache.get(key));
+          else send('whtr1' + SEP + 'cache-miss' + SEP + id + SEP + key);
+        }, 5);
+        return;
+      }
+      if (text.indexOf('whtr1' + SEP + 'cache-put' + SEP) === 0) {
+        const rest = text.slice(('whtr1' + SEP + 'cache-put' + SEP).length);
+        const at = rest.indexOf(SEP);
+        const key = at === -1 ? rest : rest.slice(0, at);
+        const value = at === -1 ? '' : rest.slice(at + 1);
+        cache.set(key, value);
+        log('page -> mod: cache-put ' + key);
         return;
       }
       if (text.indexOf('whtr1' + SEP + 'http' + SEP) === 0) {
-        const head = text.split(SEP, 6);
-        const id = head[2];
-        const count = Number(head[5]);
-        const fields = text.split(SEP, 6 + count * 2 + 1);
-        const body = fields[6 + count * 2] == null ? '' : fields[6 + count * 2];
-        const headerNames = [];
-        for (let i = 0; i < count; i++) headerNames.push(fields[6 + i * 2]);
-        log('page -> mod: http #' + id + ' ' + head[3] + ' ' + head[4] +
-          ' headers=[' + headerNames.join(', ') + ']');
+        // Protocol v2: tag, kind, id, method, url, body — no headers.
+        const fields = splitFields(text, 6);
+        const id = fields[2];
+        const body = fields[5] == null ? '' : fields[5];
+        log('page -> mod: http #' + id + ' ' + fields[3] + ' ' + fields[4]);
         handleHttp(id, body);
         return;
       }
@@ -284,9 +325,15 @@
   // Debug handle used by the headless harness and the buttons below.
   window.__WHTR_DEV__ = {
     settings: settings,
+    cache: cache,
     send: send,
     pushSettings: function () {
       send('whtr1' + SEP + 'settings' + SEP + JSON.stringify(settings));
+    },
+    teardown: function () {
+      tornDown = true;
+      send('whtr1' + SEP + 'teardown');
+      log('mod -> page: teardown');
     }
   };
 })();
@@ -389,15 +436,16 @@
   });
 
   document.getElementById('btn-clear').addEventListener('click', () => {
+    // The stub owns the cache in memory; a reload gives it an empty store.
     try {
-      const keys = [];
-      for (let i = 0; i < localStorage.length; i++) {
-        const key = localStorage.key(i);
-        if (key && key.indexOf('whtr1|') === 0) keys.push(key);
-      }
-      for (const key of keys) localStorage.removeItem(key);
+      if (window.__WHTR_DEV__ && window.__WHTR_DEV__.cache) window.__WHTR_DEV__.cache.clear();
     } catch (_) { /* ignore */ }
     location.reload();
+  });
+
+  document.getElementById('btn-teardown').addEventListener('click', () => {
+    if (window.__WHTR_DEV__) window.__WHTR_DEV__.teardown();
+    setTimeout(showStats, 100);
   });
 
   setInterval(showStats, 500);

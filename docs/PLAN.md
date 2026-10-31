@@ -1,8 +1,8 @@
 # Implementation plan
 
-Status: P0, P1, P2, P4 and P5 complete; P3 open (the Google provider is not
-implemented); P6 optional. This document is the agreed scope — update it when
-decisions change.
+Status: P0, P1, P2, P4 and P5 complete; P3 is dropped (the Google provider is
+not implemented and not planned); P6 optional. This document is the agreed
+scope — update it when decisions change.
 
 ## Problem
 
@@ -40,6 +40,7 @@ windhawk-ui.exe (Tauri/wry, STA UI thread)
                    +- add_WebMessageReceived(bridge)
   settings (Wh_GetStringSetting) + Wh_ModSettingsChanged
   worker threads: WinHTTP requests; results marshalled back with PostMessage
+  saver thread: debounced cache persistence (the UI thread never serializes it)
 ```
 
 * The page cannot reach translation APIs — its CSP `connect-src` blocks them —
@@ -93,22 +94,27 @@ windhawk-ui.exe (Tauri/wry, STA UI thread)
   retry 2× with backoff on 429/5xx.
 * Default target language follows the app: `document.documentElement.lang`,
   falling back to `navigator.language` (the Windows display language).
-* Cache: `localStorage` (`http://tauri.localhost` is a secure context). The
-  key includes provider and model (v3 prefix), the target language and a text
-  hash; 30-day TTL, LRU trim at 3 MB.
+* Cache: the mod owns the store, not the page (the page's origin storage is
+  not used). An in-memory map under `Wh_GetModStoragePath()` is persisted by a
+  single saver thread with a 2 s debounce; entries expire after
+  `cacheTtlDays` and the store is capped at 8 MB, oldest entries evicted first
+  only while over the cap. The key includes provider and model (v4 prefix),
+  the target language and a text hash; any non-empty key and value is accepted,
+  so an LLM→Edge fallback result can be stored.
 
 ## Providers
 
 The `provider` setting resolves as follows:
 
 * `edge` — Microsoft's free endpoint; never the LLM.
-* `google` — Google's free endpoint. **Not implemented yet**; it currently
-  resolves to Edge like `auto` without a key.
+* `google` — not implemented and not planned. The value is still accepted by
+  the setting for compatibility; it resolves to Edge with one log line.
 * `llm` — the OpenAI-compatible endpoint. A missing key is not a reason to
   switch: the request goes out without `Authorization` and the endpoint
   decides.
-* `auto` — the LLM only when a key is configured and `llmBaseUrl` plus
-  `llmModel` are set; otherwise Edge. "A key is configured" means
+* `auto` — the LLM only when a key is configured and `llmBaseUrl` is set
+  (`llmModel` is optional: the endpoint's default applies); otherwise Edge.
+  "A key is configured" means
   `llmKeySource` is `credential` (a credential was actually read) or `setting`
   (the plaintext field is non-empty). A missing credential with an empty
   plaintext field reports `none`, so `auto` stays on Edge.
@@ -161,7 +167,7 @@ page.
 | P0 ✅ | hook chain, script injection, message bridge, logging | log shows hook + injection + `p0:ack` round trip |
 | P1 ✅ | bridge, settings, one provider (Edge) | hovering a block on the details page yields Chinese |
 | P2 ✅ | scanner coverage (README, settings, mod names, summaries, changelog) and the OpenAI-compatible LLM provider: chat completions, glossary, credential-backed key injection | all five surfaces covered, code blocks untouched; LLM translations work with a configured key |
-| P3 🚧 | Google provider and remaining polish | the Google backend is still idle |
+| P3 ❌ | Google provider | dropped; `google` resolves to Edge with one log line |
 | P4 ✅ | interaction: in-place swap, hover-revert, tap toggle, two-finger double tap, shortcut | implemented; no React errors seen when switching tabs or mods |
 | P5 ✅ | unload safety, long documents, docs, screenshots, release checklist | safe mode recovers; docs complete |
 | P6 (optional) | source-tab comments (CodeMirror decorations) | — |
@@ -182,8 +188,26 @@ root instead of the real installation. README.md has the command table.
 2. A crash in `windhawk-ui.exe` locks the user out of the UI that disables the
    mod. Mitigation: kill switch, safe mode, CLI, fail-soft defaults.
 3. COM lifetime/threading mistakes. Mitigation: all WebView2 calls on the UI
-   thread, strict reference counting, cleanup in `Wh_ModBeforeUninit`.
+   thread, strict reference counting, a single `Init → Running → Stopping →
+   Stopped` lifecycle, and a teardown that waits for every callback object
+   handed to WebView2 to reach its final Release.
 4. React reconciliation undoing the swap. Mitigation: never move React nodes;
    re-apply from a MutationObserver.
 5. Privacy: page text leaves the machine. Mitigation: README disclosure,
    per-surface toggles, no telemetry.
+
+## Unload policy
+
+Normal unload is prove-or-pin. The UI-thread teardown pumps WebView2's message
+queue until every wrapper handed to WebView2 has reached its final `Release`
+and every held `AddScript` reference has come back, then unloads only if the
+decrement that reached zero happened on the UI thread itself and the teardown
+was not entered from inside one of our own callbacks, and no wrapper call was
+ever observed on a thread other than the UI thread. If quiescence cannot be
+proven — a completion that never fires, a release on another thread, a nested
+teardown, an exception during the pump, or a teardown step that failed — the mod
+takes a loader reference to itself (`GetModuleHandleExW` with `FROM_ADDRESS` and
+no `PIN`, never released), logs a `DEFECT` and finishes the cleanup. The DLL
+then stays resident for the rest of the process: a deliberate leak instead of
+executing code from an unmapped image. A later enable loads a second copy.
+

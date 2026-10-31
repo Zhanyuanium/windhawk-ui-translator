@@ -17,7 +17,7 @@
 | `@id` | `windhawk-ui-translator` (checked against `ramensoftware/windhawk-mods`) |
 | `@name` | Windhawk UI Translator, plus `@name:zh-CN` |
 | `@description` | one sentence, plus `@description:zh-CN` |
-| `@include` | `windhawk-ui.exe` |
+| `@include` | `windhawk-ui.exe` (flagged by the validator as a tool-mod host — see below) |
 | `@architecture` | `x86-64` |
 | `@license` | GPL-3.0 |
 | `@compilerOptions` | `-lole32 -luuid -ladvapi32 -lshell32 -lwinhttp -fms-extensions` |
@@ -28,6 +28,18 @@ A pull request to `ramensoftware/windhawk-mods` must contain **exactly one
 file**, `mods/windhawk-ui-translator.wh.cpp`, built from this repository's
 `mods/windhawk-ui-translator.wh.cpp` — the engine is inlined, so the single
 file is self-contained.
+
+**Known validator conflict.** `.github/pr_validation.py` treats any bare
+`windhawk-*.exe` include as a request for a tool-mod host, so `@include
+windhawk-ui.exe` raises "must be one of the host combinations" and "no
+`@architecture`", and the `Test changed files` check fails. The UI process is
+not a host: it owns the WebView2 the mod hooks, while a host
+(`windhawk-mod.exe`) has no WebView2. The include therefore stays as it is and
+the PR asks for a manual review of that one check. Writing the include as a path
+(`?:\Program Files\Windhawk\windhawk-ui.exe`) does pass, because the wiki says a
+host request must name the executable outright, but that hides the disagreement
+instead of settling it — use it only if the maintainers prefer it.
+
 
 * The in-mod readme (`// ==WindhawkModReadme==`) may only reference images at
   `https://i.imgur.com/...` or `https://raw.githubusercontent.com/...`. The

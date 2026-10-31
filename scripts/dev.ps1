@@ -5,10 +5,12 @@ Development helper for the Windhawk UI Translator mod.
 
 .DESCRIPTION
 One entry point for the local development loop: compile and install the mod,
-restart Windhawk's UI, read the mod's own log, and flip the debug setting.
+restart Windhawk's UI, and watch Wh_Log output.
 
-Every path (Windhawk install, mod source, mod id, log directory) lives in the
-$Paths table below; change it there and nowhere else.
+The mod logs through Wh_Log only; there is no file log. `log` starts
+scripts/dbwin-log.ps1, which captures OutputDebugString from the UI process.
+Only one DBWIN listener can exist at a time: close DebugView or any attached
+debugger first.
 
 Subcommands and elevation:
 
@@ -19,17 +21,32 @@ Subcommands and elevation:
   restart   Kill windhawk-ui.exe and start windhawk.exe again so a freshly
             installed mod is loaded. Does NOT need elevation; run it from a
             normal shell.
-  log       Print the tail of p0.log (or follow it). Does NOT need elevation.
-  trace     Turn debug logging on, restart, open a mod's details page and dump
-            the log. Needs elevation (mod settings live in HKLM).
-  debug     "debug on" or "debug off": set the debug setting and let the mod
-            push it to the running page. Needs elevation.
+  log       Capture OutputDebugString from windhawk-ui.exe. Does NOT need
+            elevation.
 
 .PARAMETER Command
-install | restart | log | trace | debug
+install | restart | log
 
-.PARAMETER Argument
-Only for "debug": on or off.
+.PARAMETER Source
+install: mod source file, defaults to the repository copy.
+
+.PARAMETER Disabled
+install: install in disabled state.
+
+.PARAMETER Restart
+install: restart Windhawk after a successful install (off by default).
+
+.PARAMETER Cdp
+restart: also expose the WebView2 DevTools port (DOM inspection).
+
+.PARAMETER AppRoot
+install: portable Windhawk app root (the directory holding windhawk.ini).
+
+.PARAMETER Seconds
+log: stop after this many seconds; 0 runs until Ctrl+C.
+
+.PARAMETER ShowPid
+log: prefix every line with the source process id.
 
 .EXAMPLE
 pwsh -NoProfile -File scripts/dev.ps1 install -Disabled
@@ -45,21 +62,14 @@ pwsh -NoProfile -File scripts/dev.ps1 restart
 Restart the UI so the installed mod is picked up.
 
 .EXAMPLE
-pwsh -NoProfile -File scripts/dev.ps1 log -Tail 40 -Follow
-Watch the mod log while using the app.
-
-.EXAMPLE
-pwsh -NoProfile -File scripts/dev.ps1 trace -Mod alt-tab-flip-3d
-Enable debug logging, restart, open that mod and print the trace.
+pwsh -NoProfile -File scripts/dev.ps1 log
+Watch Wh_Log output until Ctrl+C.
 #>
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('install', 'restart', 'log', 'trace', 'debug')]
+    [ValidateSet('install', 'restart', 'log')]
     [string]$Command,
-
-    [Parameter(Position = 1)]
-    [string]$Argument,
 
     # install: mod source file, defaults to the repository copy.
     [string]$Source,
@@ -76,17 +86,11 @@ param(
     # install: portable Windhawk app root (the directory holding windhawk.ini).
     [string]$AppRoot,
 
-    # log/trace: number of trailing lines.
-    [int]$Tail = 60,
+    # log: stop after this many seconds; 0 runs until Ctrl+C.
+    [int]$Seconds = 0,
 
-    # log: keep the file open and print new lines.
-    [switch]$Follow,
-
-    # trace: mod id to open after the restart.
-    [string]$Mod = 'alt-tab-flip-3d',
-
-    # trace: seconds to let the page settle before dumping the log.
-    [int]$WaitSeconds = 14
+    # log: prefix every line with the source process id.
+    [switch]$ShowPid
 )
 
 $ErrorActionPreference = 'Stop'
@@ -101,11 +105,11 @@ if (-not $Command) {
 # ---------------------------------------------------------------------------
 
 $Paths = @{
-    Cli     = 'C:\Program Files\Windhawk\windhawk-cli.exe'
-    App     = 'C:\Program Files\Windhawk\windhawk.exe'
-    ModId   = 'local@windhawk-ui-translator'
-    Source  = Join-Path $PSScriptRoot '..\mods\windhawk-ui-translator.wh.cpp'
-    Storage = Join-Path $env:ProgramData 'Windhawk\Engine\ModsWritable\mod-storage\local@windhawk-ui-translator'
+    Cli    = 'C:\Program Files\Windhawk\windhawk-cli.exe'
+    App    = 'C:\Program Files\Windhawk\windhawk.exe'
+    ModId  = 'local@windhawk-ui-translator'
+    Source = Join-Path $PSScriptRoot '..\mods\windhawk-ui-translator.wh.cpp'
+    Dbwin  = Join-Path $PSScriptRoot 'dbwin-log.ps1'
 }
 
 # ---------------------------------------------------------------------------
@@ -121,39 +125,6 @@ function Test-Elevated {
 function Assert-Elevated([string]$What) {
     if (Test-Elevated) { return }
     throw "$What needs an elevated shell (Windhawk lives in Program Files and its mod settings live in HKLM). Re-run from an administrator PowerShell."
-}
-
-function Get-ModLogPath {
-    $candidates = @(
-        (Join-Path $Paths.Storage 'p0.log'),
-        (Join-Path $Paths.Storage 'p0.old.log')
-    )
-    foreach ($candidate in $candidates) {
-        if (Test-Path -LiteralPath $candidate) { return $candidate }
-    }
-
-    # The storage folder is named after the installed mod id, which differs
-    # between a local build and a repository install; fall back to a search.
-    $storageRoot = Split-Path -Parent $Paths.Storage
-    $found = Get-ChildItem -LiteralPath $storageRoot -Recurse -Filter 'p0.log' -ErrorAction SilentlyContinue |
-        Sort-Object LastWriteTime -Descending |
-        Select-Object -First 1
-    if ($found) { return $found.FullName }
-    return $null
-}
-
-function Show-ModLog([int]$Lines, [switch]$Wait) {
-    $log = Get-ModLogPath
-    if (-not $log) {
-        Write-Host 'no p0.log found; looked in:'
-        Write-Host "  $($Paths.Storage)\p0.log"
-        Get-ChildItem -LiteralPath (Split-Path -Parent $Paths.Storage) -Recurse -Filter '*.log' -ErrorAction SilentlyContinue |
-            Select-Object FullName, Length, LastWriteTime | Format-Table -AutoSize
-        exit 1
-    }
-
-    Write-Host "==> $log"
-    if ($Wait) { Get-Content -LiteralPath $log -Tail $Lines -Wait } else { Get-Content -LiteralPath $log -Tail $Lines }
 }
 
 function Restart-WindhawkUi {
@@ -222,29 +193,9 @@ switch ($Command) {
     }
 
     'log' {
-        Show-ModLog -Lines $Tail -Wait:$Follow
-    }
-
-    'trace' {
-        Assert-Elevated 'trace'
-        & $Paths.Cli mod settings set $Paths.ModId debug=1 | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "setting debug=1 failed (exit $LASTEXITCODE)" }
-        Write-Host '==> debug=1 set'
-        Restart-WindhawkUi
-        Start-Process "windhawk://mods/$Mod"
-        Start-Sleep -Seconds $WaitSeconds
-        Show-ModLog -Lines 120
-    }
-
-    'debug' {
-        $value = switch ($Argument) {
-            'on' { '1' }
-            'off' { '0' }
-            default { throw "debug needs 'on' or 'off', got '$Argument'" }
-        }
-        Assert-Elevated 'debug'
-        & $Paths.Cli mod settings set $Paths.ModId "debug=$value" | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "setting debug=$value failed (exit $LASTEXITCODE)" }
-        Write-Host "==> debug=$value set; the mod pushes it to the running page"
+        if (-not (Test-Path -LiteralPath $Paths.Dbwin)) { throw "dbwin-log.ps1 not found: $($Paths.Dbwin)" }
+        $dbwinArgs = @('-ProcessName', 'windhawk-ui', '-Seconds', $Seconds)
+        if ($ShowPid) { $dbwinArgs += '-ShowPid' }
+        & $Paths.Dbwin @dbwinArgs
     }
 }

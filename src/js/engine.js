@@ -51,8 +51,27 @@
   // form; the DOM keeps its own whitespace for restoring the original.
   const normalizeSource = (s) => String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
 
+  // Protocol fields: every field but the last is separator-free, so split the
+  // leading fields with indexOf and leave the remainder (which may contain
+  // separators) as the last field.
+  const splitFields = (s, count) => {
+    const out = [];
+    let at = 0;
+    for (let i = 0; i < count - 1; i++) {
+      const next = s.indexOf(SEP, at);
+      if (next === -1) {
+        if (at < s.length || out.length) out.push(s.slice(at));
+        return out;
+      }
+      out.push(s.slice(at, next));
+      at = next + 1;
+    }
+    out.push(s.slice(at));
+    return out;
+  };
+
   const hash32 = (s) => {
-    // FNV-1a, 32 bit; the cache key also carries the length against collisions.
+    // FNV-1a, 32 bit; used for in-session source identity.
     let h = 0x811c9dc5;
     for (let i = 0; i < s.length; i++) {
       h ^= s.charCodeAt(i);
@@ -61,6 +80,18 @@
     h ^= s.length;
     return (h >>> 0).toString(16).padStart(8, '0');
   };
+
+  const hash32b = (s) => {
+    // djb2-xor, 32 bit; independent of hash32, so the pair is 64 bits.
+    let h = 5381;
+    for (let i = 0; i < s.length; i++) {
+      h = Math.imul(h, 33) ^ s.charCodeAt(i);
+    }
+    h ^= s.length;
+    return (h >>> 0).toString(16).padStart(8, '0');
+  };
+
+  const hash64 = (s) => hash32(s) + hash32b(s);
 
   const idle = (fn) => {
     if (typeof window.requestIdleCallback === 'function') {
@@ -104,8 +135,7 @@
       timeoutMs: 30000,
       cacheEnabled: true,
       cacheTtlDays: 30,
-      clearCache: false,
-      debug: false
+      clearCache: false
     };
   }
 
@@ -115,6 +145,8 @@
     settingsCount: 0,
     connected: false,
     enabled: true,
+    // Set by `teardown`: the mod is unloading, so nothing may be sent to it.
+    dead: false,
     targetLang: '',
     provider: 'edge',
     // Set once an LLM batch failed: the rest of the session stays on Edge.
@@ -130,6 +162,16 @@
     nextUnitId: 1,
     nextRequestId: 1,
     pending: new Map(),
+    // Request id -> { id, key, entry, timer } whose `cache-get` reply is still
+    // outstanding. Matching on the id as well as the key keeps a late reply
+    // from resolving a newer lookup for the same string. The deadline turns a
+    // silent mod into a normal miss.
+    cacheLookups: new Map(),
+    // Keys with an outstanding lookup; a second string with the same key is
+    // translated normally instead of sharing an ambiguous request.
+    cacheLookupKeys: new Set(),
+    // One warning per session when the cache stops answering.
+    cacheWarned: false,
     // Normalised source -> shared translation entry, so a distinct string is
     // requested once per epoch.
     textEntries: new Map(),
@@ -137,7 +179,9 @@
     inflight: 0,
     flushTimer: 0,
     scanTimer: 0,
+    settingsTimer: 0,
     observer: null,
+    messageListener: null,
     renderQueue: new Set(),
     renderScheduled: false,
     scanQueue: null,
@@ -158,17 +202,20 @@
     }
   };
 
+  // The object exposed as window.__WHTR__; teardown deletes it so a later
+  // injection in the same document can build a fresh engine.
+  let publicApi = null;
+
   function log(msg) {
-    if (!state.settings.debug) return;
     send(TAG + SEP + 'log' + SEP + clean(msg).slice(0, 500));
   }
 
   function problem(msg) {
-    // Errors go to p0.log even when verbose logging is off.
-    send(TAG + SEP + 'log' + SEP + ('whtr: ' + clean(msg)).slice(0, 500));
+    log('whtr: ' + clean(msg));
   }
 
   function send(text) {
+    if (state.dead) return false;
     const wv = CHANNEL();
     if (!wv) return false;
     try {
@@ -223,6 +270,10 @@
         resolve(v);
       };
       try {
+        if (state.dead) {
+          done({ status: 0, body: '', error: -1 });
+          return;
+        }
         const wv = CHANNEL();
         if (!wv) {
           done({ status: 0, body: '', error: -1 });
@@ -234,28 +285,8 @@
           done({ status: 0, body: '', error: -1 });
           return;
         }
-        const headers = [];
-        const raw = opts && opts.headers;
-        if (Array.isArray(raw)) {
-          for (const pair of raw) {
-            if (Array.isArray(pair) && pair.length >= 2) headers.push([pair[0], pair[1]]);
-          }
-        } else if (raw && typeof raw === 'object') {
-          for (const name of Object.keys(raw)) headers.push([name, raw[name]]);
-        }
-        const cleanHeaders = [];
-        for (const [name, value] of headers) {
-          const n = String(name);
-          const v = String(value == null ? '' : value);
-          if (!n || n.indexOf(SEP) !== -1 || v.indexOf(SEP) !== -1) continue;
-          if (cleanHeaders.length >= 32) break;
-          cleanHeaders.push([n, v]);
-        }
         const body = String(opts && opts.body != null ? opts.body : '');
         const id = state.nextRequestId++;
-        const fields = [TAG, 'http', String(id), method, url, String(cleanHeaders.length)];
-        for (const pair of cleanHeaders) fields.push(pair[0], pair[1]);
-        fields.push(body);
 
         const ms = clamp(state.settings.timeoutMs, 1000, 120000) || 30000;
         const timer = setTimeout(() => {
@@ -267,7 +298,9 @@
 
         state.pending.set(id, { resolve: done, timer: timer });
         state.stats.requests++;
-        wv.postMessage(fields.join(SEP));
+        // Protocol v2: no headers. The mod sets Content-Type and, for the LLM
+        // host only, Authorization (docs/PROTOCOL.md).
+        wv.postMessage([TAG, 'http', String(id), method, url, body].join(SEP));
       } catch (e) {
         state.stats.errors++;
         done({ status: 0, body: '', error: -3 });
@@ -435,7 +468,6 @@
     '.ant-select-selection-item',
     '.ant-select-selection-placeholder'
   ];
-  const SELECT_HOST_SET = new Set(SELECT_HOST_SELECTORS);
   // A setting description. Inside the compact title row it belongs to the
   // tooltip, not the title unit; the visible portal copy translates normally.
   const DESC_TEXT_SEL = '[data-testid="mod-setting-description-text"]';
@@ -580,109 +612,6 @@
       return (el.textContent || '').trim().length >= 2;
     } catch (_) {
       return false;
-    }
-  }
-
-  // Debug-only trail for skipped select hosts, capped per scan.
-  let debugSelectBudget = 0;
-
-  function debugSelectReject(el, sel, reason) {
-    if (!state.settings.debug || debugSelectBudget <= 0) return;
-    debugSelectBudget--;
-    let name = '?';
-    let text = '';
-    try {
-      name = String(el.tagName || '?').toLowerCase();
-      const cls = String(el.className || '').trim().split(/\s+/).slice(0, 2).join('.');
-      if (cls) name += '.' + cls;
-      text = String(el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40);
-    } catch (_) {
-      /* ignore */
-    }
-    log('select host rejected (' + reason + '): ' + sel + ' <' + name + '> "' + text + '"');
-  }
-
-  // Debug-only diagnosis for an untranslated setting title: one line per row,
-  // six rows per scan, tag/class skeleton only, never text.
-  const DEBUG_ROW_BUDGET = 6;
-
-  function elementSignature(el) {
-    if (!el || el.nodeType !== 1) return '?';
-    let out = String(el.tagName || '?').toLowerCase();
-    try {
-      const cls = String(el.className || '').trim();
-      if (cls) out += '.' + cls.split(/\s+/).filter(Boolean).slice(0, 4).join('.');
-      const testid = el.getAttribute('data-testid');
-      if (testid) out += '[data-testid=' + testid + ']';
-    } catch (_) {
-      /* ignore */
-    }
-    return out;
-  }
-
-  function shallowSkeleton(el, depth) {
-    if (!el || el.nodeType !== 1 || depth < 0) return '';
-    let out = elementSignature(el);
-    const kids = [];
-    try {
-      for (let c = el.firstElementChild; c; c = c.nextElementSibling) {
-        const s = shallowSkeleton(c, depth - 1);
-        if (s) kids.push(s);
-      }
-    } catch (_) {
-      /* ignore */
-    }
-    if (kids.length) out += '>' + kids.join(',');
-    return out;
-  }
-
-  function debugSettingsRows(claimed) {
-    if (!state.settings.debug) return;
-    let rows = [];
-    try {
-      rows = Array.from(document.querySelectorAll('[data-testid="mod-setting"]'));
-      if (!rows.length) rows = Array.from(document.querySelectorAll('.windhawk-row'));
-    } catch (_) {
-      rows = [];
-    }
-    let lines = 0;
-    for (const row of rows) {
-      if (lines >= DEBUG_ROW_BUDGET) break;
-      let testid = '';
-      let key = '';
-      try {
-        testid = row.getAttribute('data-testid') || '';
-        key = row.getAttribute('data-setting-key') || '';
-      } catch (_) {
-        testid = '';
-        key = '';
-      }
-      let title = null;
-      try {
-        title = row.querySelector('.windhawk-row-meta-title') || row.querySelector('h4');
-      } catch (_) {
-        title = null;
-      }
-      const index = title ? claimed.indexOf(title) : -1;
-      let claimedBy = '';
-      if (title && index === -1) {
-        for (const host of claimed) {
-          if (host !== title && title.contains(host)) {
-            claimedBy = elementSignature(host);
-            break;
-          }
-        }
-      }
-      log(
-        'row ' + lines +
-        ' testid=' + (testid || '-') +
-        ' key=' + (key || '-') +
-        ' title=' + (title ? elementSignature(title) : '-') +
-        ' claimed=' + (index !== -1 ? 'true' : 'false') +
-        (claimedBy ? ' claimedBy=' + claimedBy : '') +
-        ' skeleton=' + (title ? shallowSkeleton(title, 2).slice(0, 220) : '-')
-      );
-      lines++;
     }
   }
 
@@ -914,6 +843,7 @@
   }
 
   function scanAll() {
+    if (state.dead) return;
     // The document-created injection may run before <head> exists.
     installCss();
     if (!state.enabled || !state.settingsSeen) return;
@@ -1010,7 +940,6 @@
 
     // Settings surfaces: text-node swap, never a clone.
     if (state.settings.scopeSettings) {
-      debugSelectBudget = state.settings.debug ? 5 : 0;
       for (const sel of SETTINGS_SELECTORS) {
         let list = [];
         try {
@@ -1018,23 +947,16 @@
         } catch (_) {
           list = [];
         }
-        const selectHost = SELECT_HOST_SET.has(sel);
         for (const el of list) {
           // A hidden copy nested in a title is never its own unit; the visible
           // tooltip portal outside the title is claimed like any description.
           if (sel === DESC_TEXT_SEL && el.closest(TITLE_SEL)) continue;
           const reason = settingsRejectReason(el);
-          if (reason) {
-            if (selectHost) debugSelectReject(el, sel, reason);
-            continue;
-          }
+          if (reason) continue;
           // A title with no text but the excluded copy gets no unit.
           if (isTitleHost(el) && !isTranslatable(normalizeSource(titleHostText(el, claimed)))) continue;
           const atomic = claimSwap(el);
-          if (!atomic) {
-            if (selectHost) debugSelectReject(el, sel, 'already claimed');
-            continue;
-          }
+          if (!atomic) continue;
           candidates.push({ el: el, mode: 'swap', surface: 'settings', atomic: atomic });
         }
       }
@@ -1085,15 +1007,13 @@
       }
     }
 
-    if (state.settings.debug) safe(() => debugSettingsRows(claimed), 'debug-rows');
-
     state.stats.scannedHosts += candidates.length;
     state.scanQueue = { items: candidates, at: 0, epoch: state.epoch };
     scheduleScanChunk();
   }
 
   function scheduleScanChunk() {
-    if (state.scanScheduled) return;
+    if (state.scanScheduled || state.dead) return;
     state.scanScheduled = true;
     idle((deadline) => {
       state.scanScheduled = false;
@@ -1127,6 +1047,7 @@
   }
 
   function scheduleScan(delay) {
+    if (state.dead) return;
     if (state.scanTimer) clearTimeout(state.scanTimer);
     state.scanTimer = setTimeout(() => {
       state.scanTimer = 0;
@@ -1672,6 +1593,7 @@
     state.queue.length = 0;
     // The dedupe map is keyed by language/provider, so a rebuild must not reuse it.
     state.textEntries.clear();
+    clearCacheLookups();
     state.renderQueue.clear();
     if (state.flushTimer) {
       clearTimeout(state.flushTimer);
@@ -1691,7 +1613,8 @@
 
   function llmConfigured() {
     const s = state.settings;
-    return !!(String(s.llmBaseUrl || '').trim() && String(s.llmModel || '').trim());
+    // The model is optional: the endpoint's default applies when it is empty.
+    return !!String(s.llmBaseUrl || '').trim();
   }
 
   // Settings JSON has no glossary key yet; read it when a build adds one.
@@ -1767,14 +1690,17 @@
       segments: entries.map((entry, index) => ({ id: index + 1, text: entry.text }))
     };
     if (glossary.length) user.glossary = glossaryObject(glossary);
-    return JSON.stringify({
-      model: String(state.settings.llmModel || '').trim(),
+    const body = {
       temperature: 0,
       messages: [
         { role: 'system', content: buildLlmSystemPrompt(glossary) },
         { role: 'user', content: JSON.stringify(user) }
       ]
-    });
+    };
+    // An empty model omits the key entirely so the endpoint's default applies.
+    const model = String(state.settings.llmModel || '').trim();
+    if (model) body.model = model;
+    return JSON.stringify(body);
   }
 
   function warnLlmOnce(why) {
@@ -1804,12 +1730,13 @@
     return (u.leadTokens || '') + u.parts.map((p) => partOutput(p) || '').join('') + (u.trailTokens || '');
   }
 
-  // A string already known this session (completed entry, then the persistent
-  // cache); used so a reset label never disagrees with the option label.
+  // A string already known this session; used so a reset label never disagrees
+  // with the option label. The mod's store is only reachable asynchronously, so
+  // a reset label composes from this session's completed entries.
   function lookupTranslation(text) {
     const entry = state.textEntries.get(text);
     if (entry && entry.state === 3 && typeof entry.translated === 'string') return entry.translated;
-    return cacheGet(text);
+    return undefined;
   }
 
   function attachPart(entry, u, part) {
@@ -1818,7 +1745,6 @@
       // Already translated: fan the result out, no request and no bookkeeping.
       part.translated = entry.translated;
       part.state = 3;
-      state.stats.cacheHits++;
       maybeFinishUnit(u);
       return;
     }
@@ -1827,11 +1753,11 @@
       return;
     }
     entry.parts.push(part);
-    part.state = 1;
+    part.state = entry.state === 0 ? 0 : 1;
   }
 
   function enqueuePart(u, part) {
-    if (!state.enabled) return;
+    if (!state.enabled || state.dead) return;
     if (!state.targetLang) {
       part.state = 4;
       return;
@@ -1844,23 +1770,24 @@
       attachPart(existing, u, part);
       return;
     }
-    const cached = cacheGet(text, provider);
-    if (cached !== undefined) {
-      const hit = { text: text, state: 3, translated: cached, parts: [], provider: provider };
-      state.textEntries.set(text, hit);
-      attachPart(hit, u, part);
-      return;
-    }
-    state.stats.cacheMisses++;
-    const entry = { text: text, state: 1, translated: null, parts: [], provider: provider };
+    // state 0: waiting for the mod's cache reply; 1: queued/in flight.
+    const entry = { text: text, state: 0, translated: null, parts: [], provider: provider };
     state.textEntries.set(text, entry);
     attachPart(entry, u, part);
+    if (state.settings.cacheEnabled) requestCached(entry);
+    else queueEntry(entry);
+  }
+
+  function queueEntry(entry) {
+    if (state.dead || entry.state !== 0) return;
+    entry.state = 1;
+    for (const p of entry.parts) p.state = 1;
     state.queue.push(entry);
     scheduleFlush();
   }
 
   function scheduleFlush() {
-    if (state.flushTimer) return;
+    if (state.flushTimer || state.dead) return;
     const ms = clamp(state.settings.batchIntervalMs, 0, 10000);
     state.flushTimer = setTimeout(() => {
       state.flushTimer = 0;
@@ -1869,7 +1796,7 @@
   }
 
   function flushQueue() {
-    if (!state.enabled || !state.targetLang) return;
+    if (state.dead || !state.enabled || !state.targetLang) return;
     const s = state.settings;
     // The LLM protocol is capped harder than Edge: 12 segments / 6000 chars.
     const llm = activeProvider() === 'llm';
@@ -1900,12 +1827,12 @@
     if (state.queue.length) scheduleFlush();
   }
 
-  function finishEntry(entry, translated, provider) {
+  // Fan a finished translation out to every part that still belongs to a live
+  // unit. Used for both a cache hit and a provider reply.
+  function completeEntry(entry, translated, provider) {
     entry.translated = translated;
     entry.state = 3;
     entry.provider = provider || activeProvider();
-    cacheSet(entry.text, translated, entry.provider);
-    state.stats.translations++;
     const units = new Set();
     const live = [];
     for (const p of entry.parts) {
@@ -1919,6 +1846,15 @@
     }
     entry.parts = live;
     for (const u of units) maybeFinishUnit(u);
+  }
+
+  function finishEntry(entry, translated, provider) {
+    const produced = provider || activeProvider();
+    completeEntry(entry, translated, produced);
+    // Store under the provider that actually produced the text: an Edge result
+    // from an LLM fallback is an Edge cache entry, never an LLM one.
+    cacheSet(entry.text, translated, produced);
+    state.stats.translations++;
   }
 
   function failEntry(entry) {
@@ -1995,7 +1931,6 @@
       const res = await httpRequest({
         method: 'POST',
         url: url,
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(texts)
       });
       if (!state.enabled || state.epoch !== epoch) return null;
@@ -2020,22 +1955,16 @@
     const url = llmUrl();
     if (!url) return { why: 'no LLM endpoint configured', texts: null };
     const body = buildLlmBody(entries);
-    if (state.settings.debug) {
-      // Debug only, truncated; the API key never exists on this side. Strip a
-      // query string so a key embedded in the base URL cannot leak either.
-      const logUrl = url.replace(/[?#].*$/, '');
-      log('llm POST ' + logUrl + ' body=' + body.slice(0, 240) + (body.length > 240 ? '...' : ''));
-    }
     let why = '';
     for (let attempt = 0; attempt <= 1; attempt++) {
       if (!state.enabled || state.epoch !== epoch) return null;
       if (state.llmFallback) return { why: 'fallback active', texts: null };
-      // No Authorization header here: the page never sees the key; the mod
-      // injects it for the llmBaseUrl host (docs/PROTOCOL.md).
+      // No headers here: the page never sees the key; the mod sets
+      // Content-Type and Authorization for the llmBaseUrl host
+      // (docs/PROTOCOL.md).
       const res = await httpRequest({
         method: 'POST',
         url: url,
-        headers: { 'Content-Type': 'application/json' },
         body: body
       });
       if (!state.enabled || state.epoch !== epoch) return null;
@@ -2055,7 +1984,6 @@
         res.error === -2 || res.error === 12002 ||
         res.status === 429 || (res.status >= 500 && res.status <= 599);
       if (!retryable || attempt >= 1) break;
-      log('llm retry after ' + why);
       await sleep(400 + Math.random() * 200);
     }
     return { why: why, texts: null };
@@ -2142,253 +2070,154 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Cache (localStorage, keyed by provider|model|lang|hash, 3 MB LRU)
+  // Cache (the mod owns the store; the page only looks keys up and stores)
+  //
+  // Key format:
+  //   whtr1|v4|<provider>|<model>|<lang>|<baseUrl>|<glossaryHash>|<hash64>|<length>
+  // The endpoint and the effective glossary are part of the identity, so
+  // changing either cannot serve a translation produced under the old config.
+  // A lookup is one `cache-get` carrying a per-page request id and resolves on
+  // a `cache-hit` / `cache-miss` that echoes both that id and the key; a store
+  // is one `cache-put` that is never awaited.
   // ---------------------------------------------------------------------------
 
-  // v1 keys were keyed by raw whitespace and may hold a different wording, so
-  // they are purged rather than read. v3 adds provider and model to every key.
-  const CACHE_ROOT = 'whtr1|';
-  const CACHE_VERSION = 'v3';
-  const CACHE_PREFIX = CACHE_ROOT + CACHE_VERSION + '|';
-  const CACHE_LIMIT = 3 * 1024 * 1024;
-  const CACHE_TARGET = Math.floor(CACHE_LIMIT * 0.8);
-  let cacheIndex = null;
-  let cacheTotal = 0;
-  let cacheWarned = false;
+  const CACHE_VERSION = 'v4';
+  const CACHE_PREFIX = 'whtr1|' + CACHE_VERSION + '|';
+  const CACHE_LOOKUP_TIMEOUT_MS = 5000;
 
-  function storage() {
-    try {
-      return window.localStorage || null;
-    } catch (_) {
-      return null;
-    }
+  // The endpoint is part of the key: two LLM hosts may answer differently.
+  function cacheBaseUrl() {
+    return String(state.settings.llmBaseUrl || '').trim().replace(/\/+$/, '');
+  }
+
+  // A stable fingerprint of the effective glossary, normalised and deduped the
+  // same way the prompt builds it.
+  function cacheGlossaryHash() {
+    const entries = glossaryEntries();
+    if (!entries.length) return '';
+    return hash32(entries.map(([src, dst]) => src + '=' + dst).join('\n'));
   }
 
   function cacheKey(text, provider) {
     const p = provider || activeProvider();
     return (
       CACHE_PREFIX + p + '|' + String(state.settings.llmModel || '').trim() + '|' + state.targetLang + '|' +
-      hash32(text) + '|' + text.length
+      cacheBaseUrl() + '|' + cacheGlossaryHash() + '|' + hash64(text) + '|' + text.length
     );
   }
 
-  function cacheTtlMs() {
-    const days = clamp(state.settings.cacheTtlDays, 0, 3650);
-    return days > 0 ? days * 86400000 : 0;
+  // Fire-and-forget: the mod owns the store, the page keeps only this session's
+  // registry. No reply is expected.
+  function cacheSet(text, translated, provider) {
+    if (!state.settings.cacheEnabled || state.dead) return;
+    if (typeof translated !== 'string') return;
+    send(TAG + SEP + 'cache-put' + SEP + cacheKey(text, provider) + SEP + translated);
   }
 
-  function cacheEnsureIndex() {
-    if (cacheIndex) return;
-    cacheIndex = new Map();
-    cacheTotal = 0;
-    const ls = storage();
-    if (!ls) return;
-    const keys = [];
-    const stale = [];
+  function warnCacheOnce() {
+    if (state.cacheWarned) return;
+    state.cacheWarned = true;
+    log(
+      'cache: no reply within ' + CACHE_LOOKUP_TIMEOUT_MS / 1000 +
+      ' s; the cache is not answering, translating without it'
+    );
+  }
+
+  // Remove one pending lookup and stop its deadline. Both the id and the key
+  // must match: a reply for an id nobody is waiting for, or one whose key
+  // disagrees with the record, returns null and is ignored.
+  function forgetLookup(id, key) {
+    const pending = state.cacheLookups.get(id);
+    if (!pending || pending.key !== key) return null;
+    state.cacheLookups.delete(id);
+    state.cacheLookupKeys.delete(pending.key);
     try {
-      for (let i = 0; i < ls.length; i++) {
-        const key = ls.key(i);
-        if (!key || key.indexOf(CACHE_ROOT) !== 0) continue;
-        if (key.indexOf(CACHE_PREFIX) === 0) keys.push(key);
-        else stale.push(key);
-      }
+      clearTimeout(pending.timer);
     } catch (_) {
+      /* ignore */
+    }
+    return pending.entry;
+  }
+
+  // Drop every outstanding lookup. With `retry`, entries still waiting are
+  // counted as misses and translated normally (a cache clear invalidated the
+  // store); otherwise their units are being torn down and nothing is queued.
+  function clearCacheLookups(retry) {
+    const pendingList = Array.from(state.cacheLookups.values());
+    state.cacheLookups.clear();
+    state.cacheLookupKeys.clear();
+    for (const pending of pendingList) {
+      try {
+        clearTimeout(pending.timer);
+      } catch (_) {
+        /* ignore */
+      }
+      if (retry && !state.dead && pending.entry.state === 0) {
+        state.stats.cacheMisses++;
+        queueEntry(pending.entry);
+      }
+    }
+  }
+
+  function requestCached(entry) {
+    // No channel (or a dead engine): skip the cache and translate normally.
+    if (state.dead || !CHANNEL()) {
+      queueEntry(entry);
       return;
     }
-    for (const key of stale) {
-      try {
-        ls.removeItem(key);
-      } catch (_) {
-        /* ignore */
-      }
+    const key = cacheKey(entry.text, entry.provider);
+    if (state.cacheLookupKeys.has(key)) {
+      // A hash collision on a key that is already being looked up: do not
+      // overwrite the pending record, just translate this string normally.
+      queueEntry(entry);
+      return;
     }
-    for (const key of keys) {
-      let value = null;
-      try {
-        value = ls.getItem(key);
-      } catch (_) {
-        value = null;
-      }
-      if (value == null) continue;
-      let rec = null;
-      try {
-        rec = JSON.parse(value);
-      } catch (_) {
-        rec = null;
-      }
-      if (!rec || typeof rec.t !== 'string' || typeof rec.at !== 'number') {
-        try {
-          ls.removeItem(key);
-        } catch (_) {
-          /* ignore */
-        }
-        continue;
-      }
-      const bytes = (key.length + value.length) * 2;
-      cacheIndex.set(key, { bytes: bytes, at: rec.at, used: rec.used || rec.at });
-      cacheTotal += bytes;
+    // The id is monotonic for the page and shared with http requests, so no
+    // reply can ever be mistaken for a later lookup.
+    const id = state.nextRequestId++;
+    const timer = setTimeout(() => {
+      const pending = state.cacheLookups.get(id);
+      if (!pending || pending.entry !== entry) return;
+      forgetLookup(id, key);
+      if (state.dead || entry.state !== 0) return;
+      warnCacheOnce();
+      state.stats.cacheMisses++;
+      queueEntry(entry);
+    }, CACHE_LOOKUP_TIMEOUT_MS);
+    state.cacheLookups.set(id, { id: id, key: key, entry: entry, timer: timer });
+    state.cacheLookupKeys.add(key);
+    if (!send(TAG + SEP + 'cache-get' + SEP + String(id) + SEP + key)) {
+      // The channel vanished between the check and the send: no reply will
+      // ever come, so translate now.
+      forgetLookup(id, key);
+      queueEntry(entry);
     }
   }
 
-  function cacheGet(text, provider) {
-    if (!state.settings.cacheEnabled) return undefined;
-    const ls = storage();
-    if (!ls) return undefined;
-    cacheEnsureIndex();
-    const key = cacheKey(text, provider);
-    let raw = null;
-    try {
-      raw = ls.getItem(key);
-    } catch (_) {
-      return undefined;
-    }
-    if (raw == null) return undefined;
-    let rec = null;
-    try {
-      rec = JSON.parse(raw);
-    } catch (_) {
-      rec = null;
-    }
-    if (!rec || typeof rec.t !== 'string' || typeof rec.at !== 'number') {
-      try {
-        ls.removeItem(key);
-      } catch (_) {
-        /* ignore */
-      }
-      const old = cacheIndex.get(key);
-      if (old) {
-        cacheTotal -= old.bytes;
-        cacheIndex.delete(key);
-      }
-      return undefined;
-    }
-    const ttl = cacheTtlMs();
-    if (ttl > 0 && Date.now() - rec.at > ttl) {
-      try {
-        ls.removeItem(key);
-      } catch (_) {
-        /* ignore */
-      }
-      const old = cacheIndex.get(key);
-      if (old) {
-        cacheTotal -= old.bytes;
-        cacheIndex.delete(key);
-      }
-      return undefined;
-    }
-    // LRU touch at most once an hour to keep writes rare.
-    const used = rec.used || rec.at;
-    if (Date.now() - used > 3600000) {
-      rec.used = Date.now();
-      try {
-        ls.setItem(key, JSON.stringify(rec));
-      } catch (_) {
-        /* ignore */
-      }
-    }
-    const info = cacheIndex.get(key);
-    if (info) info.used = Date.now();
-    return rec.t;
+  function onCacheHit(parts) {
+    // parts: [tag, 'cache-hit', requestId, key, text]
+    const entry = forgetLookup(Number(parts[2]), parts[3]);
+    if (!entry || entry.state !== 0) return;
+    state.stats.cacheHits++;
+    completeEntry(entry, parts[4] == null ? '' : parts[4], entry.provider);
   }
 
-  function cacheSet(text, translated, provider) {
-    if (!state.settings.cacheEnabled) return;
-    if (typeof translated !== 'string') return;
-    const ls = storage();
-    if (!ls) return;
-    cacheEnsureIndex();
-    const key = cacheKey(text, provider);
-    const value = JSON.stringify({ t: translated, at: Date.now(), used: Date.now() });
-    try {
-      ls.setItem(key, value);
-    } catch (e) {
-      if (!cacheWarned) {
-        cacheWarned = true;
-        log('cache write failed: ' + (e && e.message ? e.message : e));
-      }
-      cacheTrimHard();
-      try {
-        ls.setItem(key, value);
-      } catch (_) {
-        return;
-      }
-    }
-    const old = cacheIndex.get(key);
-    if (old) cacheTotal -= old.bytes;
-    const bytes = (key.length + value.length) * 2;
-    cacheIndex.set(key, { bytes: bytes, at: Date.now(), used: Date.now() });
-    cacheTotal += bytes;
-    if (cacheTotal > CACHE_LIMIT) cacheTrim(CACHE_TARGET);
+  function onCacheMiss(parts) {
+    // parts: [tag, 'cache-miss', requestId, key]
+    const entry = forgetLookup(Number(parts[2]), parts[3]);
+    if (!entry || entry.state !== 0) return;
+    state.stats.cacheMisses++;
+    queueEntry(entry);
   }
 
-  function cacheTrim(limit) {
-    if (!cacheIndex) return;
-    const ls = storage();
-    if (!ls) return;
-    const ttl = cacheTtlMs();
-    const now = Date.now();
-    const entries = Array.from(cacheIndex.entries()).sort((a, b) => {
-      return (a[1].used || a[1].at) - (b[1].used || b[1].at);
-    });
-    for (const [key, info] of entries) {
-      const expired = ttl > 0 && now - info.at > ttl;
-      if (!expired && cacheTotal <= limit) break;
-      try {
-        ls.removeItem(key);
-      } catch (_) {
-        /* ignore */
-      }
-      cacheIndex.delete(key);
-      cacheTotal -= info.bytes;
-    }
-  }
-
-  function cacheTrimHard() {
-    if (!cacheIndex) return;
-    const ls = storage();
-    if (!ls) return;
-    const entries = Array.from(cacheIndex.entries()).sort((a, b) => {
-      return (a[1].used || a[1].at) - (b[1].used || b[1].at);
-    });
-    const target = Math.floor(cacheTotal / 2);
-    for (const [key, info] of entries) {
-      if (cacheTotal <= target) break;
-      try {
-        ls.removeItem(key);
-      } catch (_) {
-        /* ignore */
-      }
-      cacheIndex.delete(key);
-      cacheTotal -= info.bytes;
-    }
-  }
-
+  // The engine forgets its in-session map; the mod clears its own store when it
+  // applies the clearCache setting. Outstanding lookups were answered from the
+  // old store, so they are dropped and their strings translated normally.
   function cacheClear() {
-    const ls = storage();
-    cacheIndex = new Map();
-    cacheTotal = 0;
-    // Completed in-session entries are part of the cache; in-flight ones stay.
+    clearCacheLookups(true);
     for (const [text, entry] of Array.from(state.textEntries)) {
       if (entry.state === 3) state.textEntries.delete(text);
     }
-    if (!ls) return;
-    const keys = [];
-    try {
-      for (let i = 0; i < ls.length; i++) {
-        const key = ls.key(i);
-        if (key && key.indexOf(CACHE_ROOT) === 0) keys.push(key);
-      }
-    } catch (_) {
-      return;
-    }
-    for (const key of keys) {
-      try {
-        ls.removeItem(key);
-      } catch (_) {
-        /* ignore */
-      }
-    }
-    log('cache cleared');
   }
 
   // ---------------------------------------------------------------------------
@@ -2645,7 +2474,7 @@
   // ---------------------------------------------------------------------------
 
   function scheduleRender(u) {
-    if (!u) return;
+    if (!u || state.dead) return;
     state.renderQueue.add(u);
     if (state.renderScheduled) return;
     state.renderScheduled = true;
@@ -2668,7 +2497,7 @@
   }
 
   function scheduleRenderIdle() {
-    if (state.renderScheduled) return;
+    if (state.renderScheduled || state.dead) return;
     state.renderScheduled = true;
     idle(() => {
       state.renderScheduled = false;
@@ -3075,7 +2904,7 @@
       observer.observe(target, { childList: true, subtree: true, characterData: true });
       state.observer = observer;
     } catch (e) {
-      log('observer unavailable: ' + (e && e.message ? e.message : e));
+      problem('observer unavailable: ' + (e && e.message ? e.message : e));
     }
   }
 
@@ -3171,7 +3000,6 @@
     next.cacheTtlDays = clamp(next.cacheTtlDays, 0, 3650);
     next.gestureToggle = next.gestureToggle !== false;
     if (!next.gestureToggle) lastTwoFingerTapAt = 0;
-    next.debug = !!next.debug;
 
     state.settings = next;
     state.settingsSeen = true;
@@ -3190,20 +3018,14 @@
     state.shortcuts.toggle = parseShortcut(next.shortcutToggle);
 
     if (next.clearCache) {
+      // The mod clears its own store; the page forgets this session's map.
       cacheClear();
       next.clearCache = false;
     }
-    if (next.cacheEnabled) cacheEnsureIndex();
 
     const isFirst = state.settingsCount === 0;
     state.settingsCount++;
     const changed = isFirst || prevProvider !== provider || rebuildKeysChanged(prev, next);
-
-    log(
-      'settings: lang=' + state.targetLang + ' provider=' + state.provider +
-      ' scopes=' + [next.scopeReadme, next.scopeSettings, next.scopeModName, next.scopeModSummary, next.scopeChangelog].join('') +
-      ' debug=' + next.debug
-    );
 
     if (!state.targetLang) problem('no target language resolved; idle');
 
@@ -3218,6 +3040,7 @@
   }
 
   function setEnabled(on) {
+    if (state.dead) return;
     on = !!on;
     resetPointerState();
     if (state.enabled === on) {
@@ -3231,7 +3054,6 @@
     state.epoch++;
     teardownAll();
     if (on) {
-      log('enabled');
       // Recovery from any state: without settings there is nothing to scan.
       if (!state.settingsSeen) {
         if (!state.connected) connect();
@@ -3239,22 +3061,24 @@
       } else {
         scheduleScan(0);
       }
-    } else {
-      log('disabled');
     }
   }
 
   function onMessage(e) {
+    if (state.dead) return;
     try {
       const data = e && e.data;
       if (typeof data !== 'string' || data.indexOf(TAG + SEP) !== 0) return;
+      if (data === TAG + SEP + 'teardown') {
+        teardown();
+        return;
+      }
       if (data.indexOf(TAG + SEP + 'http' + SEP) === 0) {
-        const parts = data.split(SEP, 6);
-        onHttpReply(parts);
+        onHttpReply(splitFields(data, 6));
         return;
       }
       if (data.indexOf(TAG + SEP + 'settings' + SEP) === 0) {
-        const parts = data.split(SEP, 3);
+        const parts = splitFields(data, 3);
         let json = null;
         try {
           json = JSON.parse(parts[2]);
@@ -3262,6 +3086,14 @@
           json = null;
         }
         if (json && typeof json === 'object') applySettings(json);
+        return;
+      }
+      if (data.indexOf(TAG + SEP + 'cache-hit' + SEP) === 0) {
+        onCacheHit(splitFields(data, 5));
+        return;
+      }
+      if (data.indexOf(TAG + SEP + 'cache-miss' + SEP) === 0) {
+        onCacheMiss(splitFields(data, 4));
       }
     } catch (err) {
       problem('message: ' + (err && err.message ? err.message : err));
@@ -3269,27 +3101,31 @@
   }
 
   function requestSettings() {
+    if (state.dead) return;
     state.settingsAttempts++;
     send(TAG + SEP + 'settings?');
     if (!state.settingsSeen && state.settingsAttempts < 3) {
-      setTimeout(() => {
+      state.settingsTimer = setTimeout(() => {
+        state.settingsTimer = 0;
         if (!state.settingsSeen) safe(requestSettings, 'settings-retry');
       }, 1500 * state.settingsAttempts);
     }
   }
 
   function connect() {
+    if (state.dead) return false;
     const wv = CHANNEL();
     if (!wv) return false;
     if (!state.connected) {
       try {
-        wv.addEventListener('message', (e) => safe(() => onMessage(e), 'message'));
+        const listener = (e) => safe(() => onMessage(e), 'message');
+        wv.addEventListener('message', listener);
+        state.messageListener = listener;
         state.connected = true;
       } catch (e) {
         problem('message listener: ' + (e && e.message ? e.message : e));
         return false;
       }
-      log('engine ' + VERSION + ' connected; href=' + location.href);
       requestSettings();
       scheduleScan(250);
     }
@@ -3311,26 +3147,116 @@
     }
   }
 
-  function installInputHandlers() {
+  const inputHandlers = [];
+
+  function listen(target, type, fn, options) {
+    const wrapped = (e) => safe(() => fn(e), type);
     try {
-      document.addEventListener('pointerover', (e) => safe(() => onPointerOver(e), 'pointerover'), true);
-      document.addEventListener('pointerout', (e) => safe(() => onPointerOut(e), 'pointerout'), true);
-      document.addEventListener('pointerdown', (e) => safe(() => onPointerDown(e), 'pointerdown'), true);
-      document.addEventListener('pointermove', (e) => safe(() => onPointerMove(e), 'pointermove'), true);
-      document.addEventListener('pointerup', (e) => safe(() => onPointerUp(e), 'pointerup'), true);
-      document.addEventListener('pointercancel', (e) => safe(() => onPointerCancel(e), 'pointercancel'), true);
-      window.addEventListener('keydown', (e) => safe(() => onKeyDown(e), 'keydown'));
-      window.addEventListener('load', () => {
-        safe(() => {
-          if (state.settingsSeen) scheduleScan(200);
-        }, 'load');
-      });
+      target.addEventListener(type, wrapped, options);
+      inputHandlers.push([target, type, wrapped, options]);
     } catch (e) {
       problem('listeners: ' + (e && e.message ? e.message : e));
     }
   }
 
+  function removeInputHandlers() {
+    for (const [target, type, fn, options] of inputHandlers) {
+      try {
+        target.removeEventListener(type, fn, options);
+      } catch (_) {
+        /* ignore */
+      }
+    }
+    inputHandlers.length = 0;
+  }
+
+  function installInputHandlers() {
+    listen(document, 'pointerover', onPointerOver, true);
+    listen(document, 'pointerout', onPointerOut, true);
+    listen(document, 'pointerdown', onPointerDown, true);
+    listen(document, 'pointermove', onPointerMove, true);
+    listen(document, 'pointerup', onPointerUp, true);
+    listen(document, 'pointercancel', onPointerCancel, true);
+    listen(window, 'keydown', onKeyDown, false);
+    listen(window, 'load', () => {
+      if (state.settingsSeen) scheduleScan(200);
+    }, false);
+  }
+
+  function detachChannel() {
+    const wv = CHANNEL();
+    if (!wv || !state.messageListener) return;
+    try {
+      wv.removeEventListener('message', state.messageListener);
+    } catch (_) {
+      /* ignore */
+    }
+    state.messageListener = null;
+  }
+
+  // `teardown`: the mod is unloading. Run the disable path synchronously and
+  // never talk to the mod again. No reply.
+  function teardown() {
+    if (state.dead) return;
+    state.dead = true;
+    state.enabled = false;
+    state.epoch++;
+    try {
+      if (state.observer) state.observer.disconnect();
+    } catch (_) {
+      /* ignore */
+    }
+    state.observer = null;
+    detachChannel();
+    removeInputHandlers();
+    resetPointerState();
+    state.scanQueue = null;
+    state.scanScheduled = false;
+    state.renderScheduled = false;
+    if (state.scanTimer) {
+      clearTimeout(state.scanTimer);
+      state.scanTimer = 0;
+    }
+    if (state.settingsTimer) {
+      clearTimeout(state.settingsTimer);
+      state.settingsTimer = 0;
+    }
+    for (const entry of Array.from(state.pending.values())) {
+      try {
+        clearTimeout(entry.timer);
+      } catch (_) {
+        /* ignore */
+      }
+      try {
+        entry.resolve({ status: 0, body: '', error: -1 });
+      } catch (_) {
+        /* ignore */
+      }
+    }
+    state.pending.clear();
+    clearCacheLookups();
+    teardownAll();
+    try {
+      const style = document.getElementById('whtr-style');
+      if (style && style.parentNode) style.parentNode.removeChild(style);
+    } catch (_) {
+      /* ignore */
+    }
+    // A later injection in the same document must build a fresh engine, not
+    // revive this dead one.
+    try {
+      if (window.__WHTR__ === publicApi) delete window.__WHTR__;
+    } catch (_) {
+      try {
+        window.__WHTR__ = undefined;
+      } catch (_) {
+        /* ignore */
+      }
+    }
+  }
+
   function revivify() {
+    if (state.dead) return;
     if (!state.connected) connect();
     if (!state.settingsSeen) requestSettings();
     if (state.enabled && state.settingsSeen) scheduleScan(0);
@@ -3341,14 +3267,27 @@
   // ---------------------------------------------------------------------------
 
   try {
-    if (window.__WHTR__ && window.__WHTR__.__engine) {
-      // The navigation-completed injection must not build a second engine.
-      try {
-        window.__WHTR__.__engine.revive();
-      } catch (_) {
-        /* ignore */
+    const prev = window.__WHTR__;
+    const engine = prev && prev.__engine;
+    if (engine && typeof engine.revive === 'function') {
+      // A leftover handle from a dead engine is replaced; only a live engine
+      // makes this the navigation-completed re-injection.
+      let alive = true;
+      if (typeof engine.alive === 'function') {
+        try {
+          alive = !!engine.alive();
+        } catch (_) {
+          alive = false;
+        }
       }
-      return;
+      if (alive) {
+        try {
+          engine.revive();
+        } catch (_) {
+          /* ignore */
+        }
+        return;
+      }
     }
   } catch (_) {
     /* ignore */
@@ -3361,20 +3300,21 @@
 
     const deadline = Date.now() + 5000;
     const boot = () => {
+      if (state.dead) return;
       if (connect()) return;
       if (Date.now() < deadline) setTimeout(() => safe(boot, 'boot'), 50);
     };
     boot();
 
-    window.__WHTR__ = {
-      __engine: { revive: revivify },
+    publicApi = {
+      __engine: { revive: revivify, alive: () => !state.dead },
       version: VERSION,
       enable: () => safe(() => setEnabled(true), 'api.enable'),
       disable: () => safe(() => setEnabled(false), 'api.disable'),
       stats: () => safe(snapshot, 'api.stats') || {},
       rescan: () => safe(() => scheduleScan(0), 'api.rescan')
     };
-    log('engine armed ' + VERSION);
+    window.__WHTR__ = publicApi;
   } catch (e) {
     try {
       problem('boot: ' + (e && e.message ? e.message : e));

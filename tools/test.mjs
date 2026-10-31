@@ -12,7 +12,7 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(process.env.WHTR_JSDOM || import.meta.url);
 const { JSDOM } = require('jsdom');
-const { mount, fixture, defaultTranslate } = await import('./jsdom-harness.mjs');
+const { mount, fixture, defaultTranslate, TAG, SEP } = await import('./jsdom-harness.mjs');
 
 const allRequests = (env) => env.requests.reduce((all, batch) => all.concat(batch), []);
 const exactCount = (texts, value) => texts.filter((text) => text === value).length;
@@ -23,6 +23,69 @@ const counts = (...envs) => ({
   checks: envs.reduce((n, env) => n + env.checks, 0),
   failures: envs.reduce((n, env) => n + env.failures.length, 0)
 });
+
+// The engine's persistent cache key (docs/PROTOCOL.md): the mod stores the
+// value under this string, so the page and the tests build it identically.
+function hash32(value) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < value.length; i++) {
+    h ^= value.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  h ^= value.length;
+  return (h >>> 0).toString(16).padStart(8, '0');
+}
+
+// The second, independent 32-bit hash; the pair is 64 bits.
+function hash32b(value) {
+  let h = 5381;
+  for (let i = 0; i < value.length; i++) {
+    h = Math.imul(h, 33) ^ value.charCodeAt(i);
+  }
+  h ^= value.length;
+  return (h >>> 0).toString(16).padStart(8, '0');
+}
+
+function hash64(value) {
+  return hash32(value) + hash32b(value);
+}
+
+// Mirrors the engine's effective glossary: trimmed, `source=target`, deduped by
+// lower-cased source, first entry wins.
+function glossaryHash(glossary) {
+  const entries = [];
+  const seen = new Set();
+  const add = (src, dst) => {
+    const a = String(src == null ? '' : src).trim();
+    const b = String(dst == null ? '' : dst).trim();
+    if (!a || !b) return;
+    const key = a.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    entries.push([a, b]);
+  };
+  if (Array.isArray(glossary)) {
+    for (const item of glossary) {
+      const line = String(item == null ? '' : item).trim();
+      if (!line) continue;
+      const at = line.indexOf('=');
+      if (at <= 0) continue;
+      add(line.slice(0, at), line.slice(at + 1));
+    }
+  } else if (glossary && typeof glossary === 'object') {
+    for (const key of Object.keys(glossary)) add(key, glossary[key]);
+  }
+  if (!entries.length) return '';
+  return hash32(entries.map(([src, dst]) => src + '=' + dst).join('\n'));
+}
+
+function cacheKey(provider, model, lang, text, baseUrl, glossary) {
+  const base = String(baseUrl == null ? '' : baseUrl).trim().replace(/\/+$/, '');
+  return (
+    'whtr1|v4|' + provider + '|' + model + '|' + lang + '|' + base + '|' +
+    glossaryHash(glossary) + '|' + hash64(text) + '|' + text.length
+  );
+}
 
 // ---------------------------------------------------------------------------
 // coverage: names, summaries, settings and closed select values
@@ -415,29 +478,11 @@ async function selectCase() {
   env.check('dropdown option translated', env.hasCJK(env.text(option)), env.text(option));
 
   env.check('no engine problems logged', env.problems.length === 0, env.problems.join(' | '));
+  env.check('normal operation logs nothing', env.logs.length === 0, env.logs.join(' | '));
   env.report();
   env.window.close();
 
-  // Debug diagnostic: rejected select hosts report why, and stay silent when
-  // debug is off.
-  const debugEnv = mount(JSDOM, { html: fixture.debugSelects(), settings: { debug: true } });
-  await debugEnv.wait(1200);
-  const debugLog = debugEnv.logs.join('\n');
-  debugEnv.check('debug logs already-claimed select host', debugLog.indexOf('select host rejected (already claimed)') !== -1);
-  debugEnv.check('debug logs denied-ancestor select host', debugLog.indexOf('select host rejected (denied ancestor)') !== -1);
-  debugEnv.check('debug logs no-text select host', debugLog.indexOf('select host rejected (no direct text)') !== -1);
-  debugEnv.report();
-  debugEnv.window.close();
-
-  const quietEnv = mount(JSDOM, { html: fixture.antd6Selects(), settings: { debug: false } });
-  await quietEnv.wait(1200);
-  const quietLog = quietEnv.logs.join('\n');
-  quietEnv.check('debug off logs nothing', quietEnv.logs.length === 0, quietLog.slice(0, 200));
-  quietEnv.check('debug off still translates the select', quietEnv.hasCJK(quietEnv.text(quietEnv.doc.getElementById('real-content'))), quietEnv.text(quietEnv.doc.getElementById('real-content')));
-  quietEnv.report();
-  quietEnv.window.close();
-
-  return counts(env, debugEnv, quietEnv);
+  return counts(env);
 }
 
 // ---------------------------------------------------------------------------
@@ -688,90 +733,61 @@ async function consistencyCase() {
   env.report();
   env.window.close();
 
-  // Debug diagnosis: a compact title whose description host is nested inside
-  // it is claimed by the title itself now. The dump must report the title as
-  // claimed with no nested claimant, show its skeleton, and stay within six
-  // lines per scan. The hidden copy is an atomic placeholder, not a unit.
-  const debugEnv = mount(JSDOM, { html: fixture.compactTitleConflict(), settings: { debug: true } });
-  await debugEnv.wait(1200);
-  const debugLog = debugEnv.logs.join('\n');
-  const debugRow = debugLog.split('\n').filter((line) => line.indexOf('row ') === 0).slice(0, 1).join('');
-
-  debugEnv.check(
-    'debug dump names the row and its setting key',
-    /row 0 testid=mod-setting key=monitor /.test(debugLog),
-    debugLog.split('\n').filter((line) => line.indexOf('row ') === 0).slice(0, 2).join(' | ')
+  // A compact title whose description host is nested inside it: the title
+  // claims its own text, and the hidden copy is an atomic placeholder, never
+  // a unit of its own.
+  const nested = mount(JSDOM, { html: fixture.compactTitleConflict() });
+  await nested.wait(1200);
+  nested.check(
+    'conflicting compact title translates',
+    nested.hasCJK(nested.text(nested.doc.getElementById('conflict-title-text-0'))),
+    nested.text(nested.doc.getElementById('conflict-title-text-0'))
   );
-  debugEnv.check('debug dump reports the title host as claimed', /key=monitor .* claimed=true/.test(debugRow), debugRow);
-  debugEnv.check('debug dump names no nested claimant', debugRow.indexOf('claimedBy=') === -1, debugRow);
-  debugEnv.check('debug dump shows the title host skeleton', /skeleton=h4\.windhawk-row-meta-title/.test(debugLog), debugRow);
-  debugEnv.check('debug dump is capped at six rows per scan', !/row 6 /.test(debugLog));
-  debugEnv.check(
-    'conflicting compact title now translates',
-    debugEnv.hasCJK(debugEnv.text(debugEnv.doc.getElementById('conflict-title-text-0'))),
-    debugEnv.text(debugEnv.doc.getElementById('conflict-title-text-0'))
-  );
-  debugEnv.check(
+  nested.check(
     'the nested screen-reader copy is not a unit',
-    !debugEnv.doc.getElementById('conflict-desc-0').hasAttribute('data-wh-unit') &&
-      !debugEnv.doc.getElementById('conflict-desc-0').hasAttribute('data-wh-swapped'),
-    debugEnv.doc.getElementById('conflict-desc-0').outerHTML
+    !nested.doc.getElementById('conflict-desc-0').hasAttribute('data-wh-unit') &&
+      !nested.doc.getElementById('conflict-desc-0').hasAttribute('data-wh-swapped'),
+    nested.doc.getElementById('conflict-desc-0').outerHTML
   );
-  debugEnv.check(
+  nested.check(
     'the nested screen-reader copy is not requested on its own',
-    debugEnv.requestCount("Only the windows on the switcher's monitor") === 0,
-    String(debugEnv.requestCount("Only the windows on the switcher's monitor"))
+    nested.requestCount("Only the windows on the switcher's monitor") === 0,
+    String(nested.requestCount("Only the windows on the switcher's monitor"))
   );
-  debugEnv.report();
-  debugEnv.window.close();
+  nested.check('no nested engine problems logged', nested.problems.length === 0, nested.problems.join(' | '));
+  nested.report();
+  nested.window.close();
 
-  // Cache version: a v1 entry is purged rather than reused, and v2 keys are
-  // built from the normalised string.
-  function hash32(value) {
-    let h = 0x811c9dc5;
-    for (let i = 0; i < value.length; i++) {
-      h ^= value.charCodeAt(i);
-      h = Math.imul(h, 0x01000193);
-    }
-    h ^= value.length;
-    return (h >>> 0).toString(16).padStart(8, '0');
-  }
-
+  // Cache keys: built from provider, model, language, endpoint, glossary,
+  // the 64-bit text hash and the length of the normalised source, looked up
+  // and stored through the channel.
   const cacheEnv = mount(JSDOM, {
     html: fixture.antd6Selects(),
     settings: { cacheEnabled: true },
     translate: (text) => 'NEW:' + text
   });
-  const ls = cacheEnv.window.localStorage;
   const plain = 'Where the mouse cursor is';
   const raw = 'Where the  mouse cursor is';
-  const v1Key = 'whtr1|edge|zh-Hans|' + hash32(plain) + '|' + plain.length;
-  ls.setItem(v1Key, JSON.stringify({ t: 'OLD-V1', at: Date.now(), used: Date.now() }));
+  const expectedKey = cacheKey('edge', '', 'zh-Hans', plain);
 
   await cacheEnv.wait(1400);
-  const cacheKeys = [];
-  for (let i = 0; i < ls.length; i++) cacheKeys.push(ls.key(i));
-  const v1Keys = cacheKeys.filter((key) => key.indexOf('whtr1|') === 0 && key.indexOf('whtr1|v3|') !== 0);
-  const v3Keys = cacheKeys.filter((key) => key.indexOf('whtr1|v3|') === 0);
+  const lookedUp = cacheEnv.cacheLookups.slice();
   const cacheValue = cacheEnv.text(cacheEnv.doc.getElementById('real-content'));
 
-  cacheEnv.check('v1 cache entries are purged', v1Keys.length === 0, v1Keys.join(' | '));
-  cacheEnv.check('v3 cache entries are written', v3Keys.length > 0, String(v3Keys.length));
-  cacheEnv.check('v1 translation is not reused', cacheValue.indexOf('OLD-V1') === -1, cacheValue);
+  cacheEnv.check('cache: the lookup uses the provider|model|lang|endpoint|glossary|hash key', lookedUp.indexOf(expectedKey) !== -1, lookedUp.join(' | '));
+  cacheEnv.check('cache: the translation is stored under that key', cacheEnv.cache.get(expectedKey) === 'NEW:' + plain, String(cacheEnv.cache.get(expectedKey)));
+  cacheEnv.check('cache: the stored translation is rendered', cacheValue === 'NEW:' + plain, cacheValue);
   cacheEnv.check(
-    'normalised key is the one written',
-    v3Keys.some((key) => key === 'whtr1|v3|edge||zh-Hans|' + hash32(plain) + '|' + plain.length),
-    v3Keys.join(' | ')
+    'cache: the raw-whitespace key is never looked up',
+    lookedUp.every((key) => key !== cacheKey('edge', '', 'zh-Hans', raw)),
+    lookedUp.join(' | ')
   );
-  cacheEnv.check(
-    'raw-whitespace key is not written',
-    v3Keys.every((key) => key !== 'whtr1|v3|edge||zh-Hans|' + hash32(raw) + '|' + raw.length),
-    v3Keys.join(' | ')
-  );
+  cacheEnv.check('cache: no localStorage entries', cacheEnv.window.localStorage.length === 0, String(cacheEnv.window.localStorage.length));
+  cacheEnv.check('no cache engine problems logged', cacheEnv.problems.length === 0, cacheEnv.problems.join(' | '));
   cacheEnv.report();
   cacheEnv.window.close();
 
-  return counts(env, debugEnv, cacheEnv);
+  return counts(env, nested, cacheEnv);
 }
 
 // ---------------------------------------------------------------------------
@@ -1065,21 +1081,26 @@ async function llmCase() {
 
   const requests = env.llmRequests();
   env.check('llm: exactly one chat request for the batch', requests.length === 1, String(requests.length));
-  const request = requests[0] || { url: '', headers: [], body: '{}' };
+  const request = requests[0] || { url: '', fields: [], fieldCount: 0, body: '{}' };
   env.check(
     'llm: base URL ending in /v1 joins without a doubled slash',
     request.url === 'https://llm.local/v1/chat/completions',
     request.url
   );
+  // Protocol v2: whtr1, http, id, method, url, body — no header fields at all.
   env.check(
-    'llm: the page never adds Authorization',
-    request.headers.every((pair) => String(pair[0]).toLowerCase() !== 'authorization'),
-    JSON.stringify(request.headers)
+    'llm: the http message carries exactly six fields',
+    request.fieldCount === 6 && request.fields.length === 6,
+    String(request.fieldCount) + ': ' + JSON.stringify(request.fields.slice(0, 5))
   );
   env.check(
-    'llm: request carries JSON content type',
-    request.headers.some((pair) => String(pair[0]).toLowerCase() === 'content-type' && pair[1] === 'application/json'),
-    JSON.stringify(request.headers)
+    'llm: the page sends no Authorization or Content-Type',
+    request.fields.every(
+      (field) =>
+        String(field).toLowerCase().indexOf('authorization') === -1 &&
+        String(field).toLowerCase().indexOf('content-type') === -1
+    ),
+    JSON.stringify(request.fields)
   );
 
   const payload = llmPayload(request) || { body: {}, user: {} };
@@ -1162,6 +1183,37 @@ async function llmCase() {
   );
   bare.report();
   bare.window.close();
+
+  // An empty model omits the key entirely: the endpoint's default applies.
+  const noModel = mount(JSDOM, {
+    html: fixture.tileGrid(),
+    settings: Object.assign({}, LLM_SETTINGS, { llmModel: '' }),
+    respond: (record) => {
+      if (!isLlmRequest(record)) return null;
+      return llmReply(record, llmSegments(record).map((segment) => ({ id: segment.id, text: '无' + segment.id })));
+    }
+  });
+  await noModel.wait(1400);
+  const noModelRequests = noModel.llmRequests();
+  const noModelPayload = noModelRequests.length === 1 ? llmPayload(noModelRequests[0]) : null;
+  noModel.check(
+    'llm model: an empty model still sends the request',
+    noModelRequests.length === 1,
+    String(noModelRequests.length)
+  );
+  noModel.check(
+    'llm model: an empty model omits the model key',
+    !!noModelPayload && !Object.prototype.hasOwnProperty.call(noModelPayload.body, 'model'),
+    JSON.stringify(noModelPayload && noModelPayload.body)
+  );
+  noModel.check(
+    'llm model: the default-model reply still renders',
+    noModel.text(noModel.doc.getElementById('tile-name')) === '无1',
+    noModel.text(noModel.doc.getElementById('tile-name'))
+  );
+  noModel.check('llm model: no engine problems', noModel.problems.length === 0, noModel.problems.join(' | '));
+  noModel.report();
+  noModel.window.close();
 
   // 12 segments and 6000 characters per LLM request, larger queues split.
   const segmentCap = mount(JSDOM, {
@@ -1344,6 +1396,40 @@ async function llmCase() {
   autoKey.report();
   autoKey.window.close();
 
+  // auto picks the LLM with a base URL and a key even when no model is set.
+  const autoNoModel = mount(JSDOM, {
+    html: fixture.tileGrid(),
+    settings: Object.assign({}, LLM_SETTINGS, {
+      provider: 'auto',
+      llmKeySource: 'credential',
+      llmModel: ''
+    }),
+    respond: (record) => {
+      if (!isLlmRequest(record)) return null;
+      return llmReply(record, llmSegments(record).map((segment) => ({ id: segment.id, text: '默' + segment.id })));
+    }
+  });
+  await autoNoModel.wait(1400);
+  const autoNoModelRequests = autoNoModel.llmRequests();
+  const autoNoModelPayload = autoNoModelRequests.length === 1 ? llmPayload(autoNoModelRequests[0]) : null;
+  autoNoModel.check(
+    'llm auto: a key source without a model resolves to LLM',
+    autoNoModel.api().stats().provider === 'llm',
+    JSON.stringify(autoNoModel.api().stats())
+  );
+  autoNoModel.check(
+    'llm auto: the model-less request omits the model key',
+    !!autoNoModelPayload && !Object.prototype.hasOwnProperty.call(autoNoModelPayload.body, 'model'),
+    JSON.stringify(autoNoModelPayload && autoNoModelPayload.body)
+  );
+  autoNoModel.check(
+    'llm auto: the model-less reply renders',
+    autoNoModel.text(autoNoModel.doc.getElementById('tile-name')) === '默1',
+    autoNoModel.text(autoNoModel.doc.getElementById('tile-name'))
+  );
+  autoNoModel.report();
+  autoNoModel.window.close();
+
   // google stays a one-line warning and behaves like Edge.
   const google = mount(JSDOM, {
     html: fixture.tileGrid(),
@@ -1357,7 +1443,7 @@ async function llmCase() {
   google.window.close();
 
   // Cache keys carry provider and model: Edge text is never reused by the LLM,
-  // and a model change is a miss.
+  // and a model change is a miss. The mod's store survives settings changes.
   const cacheEnv = mount(JSDOM, {
     html: fixture.tileGrid(),
     settings: { provider: 'edge', cacheEnabled: true },
@@ -1371,14 +1457,9 @@ async function llmCase() {
       );
     }
   });
-  const cacheKeys = () => {
-    const ls = cacheEnv.window.localStorage;
-    const out = [];
-    for (let i = 0; i < ls.length; i++) out.push(ls.key(i));
-    return out;
-  };
+  const cacheKeys = () => Array.from(cacheEnv.cache.keys());
   await cacheEnv.wait(1400);
-  const edgeKeys = cacheKeys().filter((key) => key.indexOf('whtr1|v3|edge|') === 0);
+  const edgeKeys = cacheKeys().filter((key) => key.indexOf('whtr1|v4|edge|') === 0);
   cacheEnv.check('llm cache: Edge key is written', edgeKeys.length > 0, cacheKeys().join(' | '));
 
   cacheEnv.pushSettings(
@@ -1394,12 +1475,12 @@ async function llmCase() {
   cacheEnv.check('llm cache: Edge text is not reused for the LLM', afterA.indexOf('Lmodel-a:') === 0, afterA);
   cacheEnv.check(
     'llm cache: model-a key is written',
-    cacheKeys().some((key) => key.indexOf('whtr1|v3|llm|model-a|') === 0),
+    cacheKeys().some((key) => key.indexOf('whtr1|v4|llm|model-a|') === 0),
     cacheKeys().join(' | ')
   );
   cacheEnv.check(
     'llm cache: Edge key stays separate',
-    cacheKeys().some((key) => key.indexOf('whtr1|v3|edge|') === 0),
+    cacheKeys().some((key) => key.indexOf('whtr1|v4|edge|') === 0),
     cacheKeys().join(' | ')
   );
 
@@ -1409,19 +1490,502 @@ async function llmCase() {
   cacheEnv.check('llm cache: a model change misses the cache', afterB.indexOf('Lmodel-b:') === 0, afterB);
   cacheEnv.check(
     'llm cache: model-b key is written',
-    cacheKeys().some((key) => key.indexOf('whtr1|v3|llm|model-b|') === 0),
+    cacheKeys().some((key) => key.indexOf('whtr1|v4|llm|model-b|') === 0),
     cacheKeys().join(' | ')
   );
   cacheEnv.check(
     'llm cache: the model-a key is kept',
-    cacheKeys().some((key) => key.indexOf('whtr1|v3|llm|model-a|') === 0),
+    cacheKeys().some((key) => key.indexOf('whtr1|v4|llm|model-a|') === 0),
     cacheKeys().join(' | ')
   );
   cacheEnv.check('llm cache: no engine problems', cacheEnv.problems.length === 0, cacheEnv.problems.join(' | '));
   cacheEnv.report();
   cacheEnv.window.close();
 
-  return counts(env, dedupe, bare, segmentCap, charCap, missing, empty, failing, slow, autoNone, autoKey, google, cacheEnv);
+  // A failed LLM batch falls back to Edge: the result belongs to the Edge key
+  // even though the session asked the LLM. A rebuild in the same session (the
+  // provider stays on Edge after the fallback) and a later Edge visit read that
+  // key back without another request.
+  const fallback = mount(JSDOM, {
+    html: fixture.tileGrid(),
+    settings: Object.assign({}, LLM_SETTINGS, { cacheEnabled: true }),
+    respond: (record) => (isLlmRequest(record) ? { status: 500, error: 0, body: 'down' } : null)
+  });
+  await fallback.waitFor(
+    () => {
+      const stats = fallback.api() ? fallback.api().stats() : null;
+      return !!stats && stats.translated === 4 && fallback.hasCJK(fallback.text(fallback.doc.getElementById('tile-name')));
+    },
+    5000
+  );
+  const fallbackPlain = 'Better Dialogs';
+  const fallbackEdgeKey = cacheKey('edge', 'test-model', 'zh-Hans', fallbackPlain, LLM_SETTINGS.llmBaseUrl);
+  const fallbackKeys = Array.from(fallback.cache.keys());
+  fallback.check(
+    'llm fallback cache: the Edge result is stored under the Edge key',
+    fallback.cache.get(fallbackEdgeKey) === defaultTranslate(fallbackPlain),
+    fallbackEdgeKey + ' => ' + fallback.cache.get(fallbackEdgeKey)
+  );
+  fallback.check(
+    'llm fallback cache: every fallback string is an Edge entry',
+    fallbackKeys.length === 4 && fallbackKeys.every((item) => item.indexOf('whtr1|v4|edge|') === 0),
+    fallbackKeys.join(' | ')
+  );
+  const fallbackRequests = fallback.httpRequests.length;
+  fallback.pushSettings(Object.assign({}, fallback.settings, { scopeChangelog: false }));
+  const fallbackRebuilt = await fallback.waitFor(
+    () =>
+      fallback.api().stats().cacheHits >= 4 &&
+      fallback.text(fallback.doc.getElementById('tile-name')) === defaultTranslate(fallbackPlain),
+    3000
+  );
+  fallback.check(
+    'llm fallback cache: a rebuild reads the Edge key without another request',
+    fallbackRebuilt &&
+      fallback.httpRequests.length === fallbackRequests &&
+      fallback.text(fallback.doc.getElementById('tile-name')) === defaultTranslate(fallbackPlain),
+    fallback.httpRequests.length + ' requests, ' + fallback.text(fallback.doc.getElementById('tile-name'))
+  );
+  fallback.check('llm fallback cache: no engine problems', fallback.problems.length === 0, fallback.problems.join(' | '));
+  fallback.report();
+  fallback.window.close();
+
+  const revisit = mount(JSDOM, {
+    html: fixture.tileGrid(),
+    settings: {
+      provider: 'edge',
+      llmBaseUrl: LLM_SETTINGS.llmBaseUrl,
+      llmModel: LLM_SETTINGS.llmModel,
+      cacheEnabled: true
+    },
+    cache: Object.fromEntries(fallback.cache)
+  });
+  await revisit.wait(1200);
+  revisit.check(
+    'llm fallback cache: a second visit hits the Edge key',
+    revisit.httpRequests.length === 0 &&
+      revisit.text(revisit.doc.getElementById('tile-name')) === defaultTranslate(fallbackPlain),
+    revisit.httpRequests.length + ' requests, ' + revisit.text(revisit.doc.getElementById('tile-name'))
+  );
+  revisit.check(
+    'llm fallback cache: the second visit counts the hits',
+    revisit.api().stats().cacheHits >= 4,
+    JSON.stringify(revisit.api().stats())
+  );
+  revisit.check('llm fallback cache: no engine problems on the second visit', revisit.problems.length === 0, revisit.problems.join(' | '));
+  revisit.report();
+  revisit.window.close();
+
+  return counts(env, dedupe, bare, noModel, segmentCap, charCap, missing, empty, failing, slow, autoNone, autoKey, autoNoModel, google, cacheEnv, fallback, revisit);
+}
+
+// ---------------------------------------------------------------------------
+// cache: the mod owns the store; lookups and stores go through the channel
+// ---------------------------------------------------------------------------
+async function cacheCase() {
+  const plain = 'Better Dialogs';
+  const key = cacheKey('edge', '', 'zh-Hans', plain);
+
+  // A hit resolves through the channel: one lookup, no request for the string.
+  const hit = mount(JSDOM, {
+    html: fixture.tileGrid(),
+    settings: { cacheEnabled: true },
+    cache: { [key]: '已缓存' }
+  });
+  await hit.wait(1400);
+  const hitName = hit.doc.getElementById('tile-name');
+  hit.check('cache hit: the engine looks the key up', hit.cacheLookups.indexOf(key) !== -1, hit.cacheLookups.join(' | '));
+  hit.check('cache hit: the cached text is rendered', hit.text(hitName) === '已缓存', hit.text(hitName));
+  hit.check('cache hit: the cached string is never requested', hit.requestCount(plain) === 0, String(hit.requestCount(plain)));
+  hit.check('cache hit: the hit is counted', hit.api().stats().cacheHits >= 1, JSON.stringify(hit.api().stats()));
+  hit.check('cache hit: no engine problems', hit.problems.length === 0, hit.problems.join(' | '));
+  hit.report();
+  hit.window.close();
+
+  // A miss resolves through the channel, goes to the provider, and the result
+  // is put back without waiting for a reply.
+  const miss = mount(JSDOM, {
+    html: fixture.tileGrid(),
+    settings: { cacheEnabled: true },
+    translate: (text) => 'M:' + text
+  });
+  await miss.wait(1400);
+  miss.check('cache miss: the key is looked up', miss.cacheLookups.indexOf(key) !== -1, miss.cacheLookups.join(' | '));
+  miss.check('cache miss: the miss is counted', miss.api().stats().cacheMisses >= 1, JSON.stringify(miss.api().stats()));
+  miss.check('cache miss: the provider is asked', miss.requestCount(plain) === 1, String(miss.requestCount(plain)));
+  miss.check('cache miss: the result is put back', miss.cache.get(key) === 'M:' + plain, String(miss.cache.get(key)));
+  miss.check('cache miss: the result is rendered', miss.text(miss.doc.getElementById('tile-name')) === 'M:' + plain, miss.text(miss.doc.getElementById('tile-name')));
+  miss.check('cache miss: every string is stored', miss.cache.size === 4, String(miss.cache.size));
+  miss.check(
+    'protocol: every http message is exactly six fields',
+    miss.httpRequests.every((request) => request.fieldCount === 6 && request.fields.length === 6),
+    miss.httpRequests.map((request) => request.fieldCount).join(',')
+  );
+  miss.check('cache miss: no engine problems', miss.problems.length === 0, miss.problems.join(' | '));
+  miss.report();
+  miss.window.close();
+
+  // Cache off: no cache traffic at all.
+  const off = mount(JSDOM, { html: fixture.tileGrid() });
+  await off.wait(1400);
+  off.check('cache off: no cache lookups', off.cacheLookups.length === 0, off.cacheLookups.join(' | '));
+  off.check('cache off: nothing is stored', off.cache.size === 0, String(off.cache.size));
+  off.check('cache off: Edge still translates', off.hasCJK(off.text(off.doc.getElementById('tile-name'))), off.text(off.doc.getElementById('tile-name')));
+  off.report();
+  off.window.close();
+
+  // clearCache: the mod clears its own store; the page only forgets its
+  // in-session map and sends nothing.
+  const clear = mount(JSDOM, {
+    html: fixture.tileGrid(),
+    settings: { cacheEnabled: true },
+    translate: (text) => 'C:' + text
+  });
+  await clear.wait(1400);
+  const lookupsBefore = clear.cacheLookups.length;
+  const storeBefore = clear.cache.size;
+  clear.pushSettings(Object.assign({}, clear.settings, { clearCache: true }));
+  await clear.wait(400);
+  clear.check('cache clear: the engine sends no lookup', clear.cacheLookups.length === lookupsBefore, lookupsBefore + ' -> ' + clear.cacheLookups.length);
+  clear.check('cache clear: the engine leaves the mod store alone', clear.cache.size === storeBefore, storeBefore + ' -> ' + clear.cache.size);
+  clear.check('cache clear: no engine problems', clear.problems.length === 0, clear.problems.join(' | '));
+  clear.report();
+  clear.window.close();
+
+  // No reply to cache-get: after the 5 s deadline every waiting string is a
+  // miss, the provider translates it, and the silence is logged once.
+  const silent = mount(JSDOM, {
+    html: fixture.tileGrid(),
+    settings: { cacheEnabled: true },
+    dropCache: true,
+    translate: (text) => 'S:' + text
+  });
+  await silent.waitFor(() => {
+    const stats = silent.api() ? silent.api().stats() : null;
+    return !!stats && stats.translated === 4 && silent.text(silent.doc.getElementById('tile-name')) === 'S:' + plain;
+  }, 9000);
+  const silentName = silent.doc.getElementById('tile-name');
+  silent.check(
+    'cache timeout: every string was looked up',
+    silent.cacheLookups.length === 4,
+    String(silent.cacheLookups.length)
+  );
+  silent.check(
+    'cache timeout: the provider translates the string',
+    silent.text(silentName) === 'S:' + plain,
+    silent.text(silentName)
+  );
+  silent.check(
+    'cache timeout: every lookup is counted as a miss',
+    silent.api().stats().cacheMisses === 4,
+    JSON.stringify(silent.api().stats())
+  );
+  silent.check(
+    'cache timeout: the silence is logged once',
+    silent.logs.filter((line) => line.indexOf('cache is not answering') !== -1).length === 1,
+    silent.logs.join(' | ')
+  );
+  const lateKey = cacheKey('edge', '', 'zh-Hans', plain);
+  silent.check(
+    'cache timeout: the translation is stored normally',
+    silent.cache.get(lateKey) === 'S:' + plain,
+    String(silent.cache.get(lateKey))
+  );
+  const timedOut = silent.cacheRequests.find((item) => item.key === lateKey);
+  silent.emitCache('cache-hit', timedOut.id, lateKey, 'LATE');
+  await silent.wait(300);
+  silent.check(
+    'cache timeout: a late reply for nobody is ignored',
+    silent.text(silentName) === 'S:' + plain && silent.api().stats().cacheHits === 0,
+    silent.text(silentName) + ' hits=' + silent.api().stats().cacheHits
+  );
+  silent.check('cache timeout: no engine problems', silent.problems.length === 0, silent.problems.join(' | '));
+  silent.report();
+  silent.window.close();
+
+  // The endpoint and the effective glossary are part of the key, and the text
+  // hash is two 32-bit halves (64 bits) plus the length.
+  const keyEnv = mount(JSDOM, {
+    html: fixture.tileGrid(),
+    settings: {
+      cacheEnabled: true,
+      provider: 'llm',
+      llmBaseUrl: 'https://llm.one/v1',
+      llmModel: 'm',
+      llmKeySource: 'credential'
+    }
+  });
+  await keyEnv.wait(1600);
+  const baseKey = cacheKey('llm', 'm', 'zh-Hans', plain, 'https://llm.one/v1');
+  keyEnv.check(
+    'cache key: the endpoint is part of the key',
+    keyEnv.cacheLookups.indexOf(baseKey) !== -1,
+    keyEnv.cacheLookups.join(' | ')
+  );
+  keyEnv.check('cache key: the text hash is 64 bits plus the length', /\|[0-9a-f]{16}\|\d+$/.test(baseKey), baseKey);
+
+  keyEnv.pushSettings(Object.assign({}, keyEnv.settings, { llmBaseUrl: 'https://llm.two/v1' }));
+  await keyEnv.wait(1600);
+  const otherKey = cacheKey('llm', 'm', 'zh-Hans', plain, 'https://llm.two/v1');
+  keyEnv.check(
+    'cache key: a different base URL changes the key',
+    otherKey !== baseKey && keyEnv.cacheLookups.indexOf(otherKey) !== -1,
+    baseKey + ' vs ' + otherKey
+  );
+
+  keyEnv.pushSettings(Object.assign({}, keyEnv.settings, { glossary: ['mod=模组'] }));
+  await keyEnv.wait(1600);
+  const glossaryKey = cacheKey('llm', 'm', 'zh-Hans', plain, 'https://llm.two/v1', ['mod=模组']);
+  keyEnv.check(
+    'cache key: a different glossary changes the key',
+    glossaryKey !== otherKey && keyEnv.cacheLookups.indexOf(glossaryKey) !== -1,
+    otherKey + ' vs ' + glossaryKey
+  );
+  keyEnv.check('cache key: no engine problems', keyEnv.problems.length === 0, keyEnv.problems.join(' | '));
+  keyEnv.report();
+  keyEnv.window.close();
+
+  // A translation containing U+001F survives both cache directions: the
+  // provider result is stored whole, and a cache-hit is not truncated.
+  const sepText = 'A\x1fB';
+  const sepEnv = mount(JSDOM, {
+    html: fixture.tileGrid(),
+    settings: { cacheEnabled: true },
+    translate: (text) => (text === plain ? sepText : defaultTranslate(text))
+  });
+  await sepEnv.wait(1400);
+  const sepKey = cacheKey('edge', '', 'zh-Hans', plain);
+  sepEnv.check(
+    'separator: the provider translation keeps U+001F',
+    sepEnv.text(sepEnv.doc.getElementById('tile-name')) === sepText,
+    JSON.stringify(sepEnv.text(sepEnv.doc.getElementById('tile-name')))
+  );
+  sepEnv.check(
+    'separator: cache-put keeps the whole translation',
+    sepEnv.cache.get(sepKey) === sepText,
+    JSON.stringify(sepEnv.cache.get(sepKey))
+  );
+  sepEnv.report();
+  sepEnv.window.close();
+
+  const sepHit = mount(JSDOM, {
+    html: fixture.tileGrid(),
+    settings: { cacheEnabled: true },
+    cache: { [sepKey]: sepText }
+  });
+  await sepHit.wait(1400);
+  sepHit.check(
+    'separator: cache-hit keeps the whole translation',
+    sepHit.text(sepHit.doc.getElementById('tile-name')) === sepText,
+    JSON.stringify(sepHit.text(sepHit.doc.getElementById('tile-name')))
+  );
+  sepHit.check(
+    'separator: the hit is used instead of a request',
+    sepHit.requestCount(plain) === 0 && sepHit.api().stats().cacheHits >= 1,
+    sepHit.requestCount(plain) + ' requests, ' + JSON.stringify(sepHit.api().stats())
+  );
+  sepHit.check('separator: no engine problems', sepHit.problems.length === 0, sepHit.problems.join(' | '));
+  sepHit.report();
+  sepHit.window.close();
+
+  // Request ids: a reply resolves only the lookup that carried its id. A
+  // rebuild drops every pending lookup, so an old reply with the right key
+  // cannot resolve the new lookup for that key; a mismatched key is ignored
+  // even when the id matches.
+  const ids = mount(JSDOM, {
+    html: fixture.tileGrid(),
+    settings: { cacheEnabled: true },
+    dropCache: true,
+    translate: (text) => 'R:' + text
+  });
+  await ids.waitFor(() => ids.cacheRequests.length >= 4, 3000);
+  const stale = ids.cacheRequests.find((item) => item.key === key);
+  const staleId = stale ? stale.id : '0';
+  ids.check('cache id: the lookup carries a request id', !!stale && /^\d+$/.test(String(stale.id)), stale && stale.id);
+  ids.check(
+    'cache id: cache-get carries exactly tag, kind, id and key',
+    ids.cacheRequests.length > 0 && ids.cacheRequests.every((item) => item.raw.split(SEP).length === 4),
+    ids.cacheRequests.map((item) => item.raw.split(SEP).length).join(',')
+  );
+
+  ids.pushSettings(Object.assign({}, ids.settings, { scopeChangelog: false }));
+  const rebuilt = await ids.waitFor(
+    () => ids.cacheRequests.some((item) => item.key === key && item.id !== staleId),
+    3000
+  );
+  const fresh = ids.cacheRequests.filter((item) => item.key === key).slice(-1)[0];
+  const freshId = fresh ? fresh.id : '1';
+  ids.check('cache id: a rebuild sends a new id for the same key', rebuilt && !!fresh, JSON.stringify(ids.cacheRequests));
+  const staleHits = ids.api().stats().cacheHits;
+  ids.emitCache('cache-hit', staleId, key, 'STALE');
+  await ids.wait(200);
+  const nameEl = ids.doc.getElementById('tile-name');
+  ids.check(
+    'cache id: a stale id is ignored even when the key matches',
+    ids.text(nameEl) === 'Better Dialogs' && ids.api().stats().cacheHits === staleHits,
+    ids.text(nameEl) + ' hits=' + ids.api().stats().cacheHits
+  );
+  ids.emitCache('cache-hit', freshId, key, 'FRESH');
+  await ids.wait(200);
+  ids.check('cache id: the current id resolves its own lookup', ids.text(nameEl) === 'FRESH', ids.text(nameEl));
+
+  const descKey = cacheKey('edge', '', 'zh-Hans', 'Improves Windows dialog boxes.');
+  const wrong = ids.cacheRequests.filter((item) => item.key === descKey).slice(-1)[0];
+  const wrongId = wrong ? wrong.id : '2';
+  const wrongHits = ids.api().stats().cacheHits;
+  ids.emitCache('cache-hit', wrongId, key, 'WRONG');
+  await ids.wait(200);
+  const descEl = ids.doc.getElementById('tile-desc');
+  ids.check(
+    'cache id: the right id with a different key is ignored',
+    ids.text(descEl) === 'Improves Windows dialog boxes.' && ids.api().stats().cacheHits === wrongHits,
+    ids.text(descEl) + ' hits=' + ids.api().stats().cacheHits
+  );
+  ids.emitCache('cache-miss', wrongId, descKey);
+  await ids.wait(300);
+  ids.check(
+    'cache id: the matching miss resolves after a mismatched reply',
+    ids.text(descEl) === 'R:Improves Windows dialog boxes.',
+    ids.text(descEl)
+  );
+  ids.check('cache id: no engine problems', ids.problems.length === 0, ids.problems.join(' | '));
+  ids.report();
+  ids.window.close();
+
+  // A cache clear invalidates the store and drops every outstanding lookup; the
+  // waiting strings are translated normally, and the old reply resolves nothing.
+  const cleared = mount(JSDOM, {
+    html: fixture.tileGrid(),
+    settings: { cacheEnabled: true },
+    dropCache: true,
+    translate: (text) => 'C:' + text
+  });
+  await cleared.waitFor(() => cleared.cacheRequests.length >= 4, 3000);
+  const clearedLookup = cleared.cacheRequests.find((item) => item.key === key);
+  const clearedId = clearedLookup ? clearedLookup.id : '0';
+  cleared.pushSettings(Object.assign({}, cleared.settings, { clearCache: true }));
+  const clearedOk = await cleared.waitFor(
+    () => cleared.text(cleared.doc.getElementById('tile-name')) === 'C:Better Dialogs',
+    3000
+  );
+  const clearedHits = cleared.api().stats().cacheHits;
+  cleared.emitCache('cache-hit', clearedId, key, 'LATE');
+  await cleared.wait(200);
+  cleared.check(
+    'cache clear: waiting strings are translated after the clear',
+    clearedOk,
+    cleared.text(cleared.doc.getElementById('tile-name'))
+  );
+  cleared.check(
+    'cache clear: a late reply cannot resolve anything',
+    cleared.text(cleared.doc.getElementById('tile-name')) === 'C:Better Dialogs' &&
+      cleared.api().stats().cacheHits === clearedHits,
+    cleared.text(cleared.doc.getElementById('tile-name')) + ' hits=' + cleared.api().stats().cacheHits
+  );
+  cleared.check('cache clear: no engine problems', cleared.problems.length === 0, cleared.problems.join(' | '));
+  cleared.report();
+  cleared.window.close();
+
+  return counts(hit, miss, off, clear, silent, keyEnv, sepEnv, sepHit, ids, cleared);
+}
+
+// ---------------------------------------------------------------------------
+// teardown: the mod is unloading; restore everything and go silent
+// ---------------------------------------------------------------------------
+async function teardownCase() {
+  const env = mount(JSDOM, { html: fixture.all() });
+  await env.wait(1800);
+  const { doc } = env;
+
+  const name = doc.getElementById('tile-name');
+  const titleText = doc.getElementById('compact-title-text');
+  const prose = doc.getElementById('details-body');
+  const clone = prose ? prose.previousElementSibling : null;
+  const requestsBefore = env.httpRequests.length;
+  const api = env.api();
+
+  env.check('teardown: the page is translated first', env.hasCJK(env.text(name)), env.text(name));
+  env.check(
+    'teardown: a prose clone is present first',
+    !!clone && clone.getAttribute('data-wh-clone') === '1',
+    clone && clone.outerHTML
+  );
+
+  env.teardown();
+  // The disable path runs synchronously inside the message handler.
+  env.check('teardown: the swapped name is restored', env.text(name) === 'Better Dialogs', env.text(name));
+  env.check('teardown: the settings title is restored', env.text(titleText) === 'Monitor', env.text(titleText));
+  env.check('teardown: the clone is removed', !doc.querySelector('[data-wh-clone="1"]'));
+  env.check('teardown: the original prose is visible again', prose.getAttribute('data-wh-orig') === null, prose.outerHTML);
+  env.check(
+    'teardown: no unit marks remain',
+    doc.querySelectorAll('[data-wh-unit],[data-wh-swapped],[data-wh-orig]').length === 0,
+    String(doc.querySelectorAll('[data-wh-unit],[data-wh-swapped],[data-wh-orig]').length)
+  );
+  env.check('teardown: the engine reports disabled', api.stats().enabled === false, JSON.stringify(api.stats()));
+  env.check('teardown: the public handle is removed', env.api() === undefined, String(env.api()));
+  env.check('teardown: the injected style is removed', !doc.getElementById('whtr-style'));
+  env.check('teardown: nothing is sent', env.postTeardown.length === 0, env.postTeardown.join(' | '));
+
+  // The observer is disconnected: a late host is left alone and asks for nothing.
+  const late = doc.createElement('h4');
+  late.className = 'windhawk-row-meta-title';
+  late.id = 'late-name';
+  late.textContent = 'Late title';
+  doc.getElementById('tile-grid').appendChild(late);
+  await env.wait(700);
+  env.check('teardown: the observer is disconnected', env.text(late) === 'Late title', env.text(late));
+  env.check(
+    'teardown: no request after a late mutation',
+    env.httpRequests.length === requestsBefore,
+    requestsBefore + ' -> ' + env.httpRequests.length
+  );
+
+  // Input handlers are gone: a shortcut or a tap changes nothing.
+  shortcut(env);
+  touch(env, 'pointerdown', 1);
+  touch(env, 'pointerup', 1);
+  await env.wait(300);
+  env.check(
+    'teardown: the shortcut does nothing',
+    env.text(name) === 'Better Dialogs' && api.stats().enabled === false,
+    env.text(name)
+  );
+
+  // The message listener is gone: a late settings push must not revive anything.
+  env.pushSettings(Object.assign({}, env.settings, { targetLang: 'ja' }));
+  await env.wait(300);
+  env.check(
+    'teardown: a settings push does not revive the engine',
+    api.stats().enabled === false && env.text(name) === 'Better Dialogs',
+    env.text(name)
+  );
+  env.check('teardown: nothing is sent after teardown', env.postTeardown.length === 0, env.postTeardown.join(' | '));
+
+  // A new injection in the same document must replace the dead handle and
+  // translate again, even when the dead engine's __WHTR__ was left behind.
+  env.window.__WHTR__ = api;
+  env.reinject();
+  await env.waitFor(
+    () => {
+      const revived = env.api();
+      return !!revived && revived !== api && revived.stats().translated > 0 && env.hasCJK(env.text(name));
+    },
+    4000
+  );
+  const revived = env.api();
+  env.check(
+    'teardown: a fresh injection replaces the dead engine',
+    !!revived && revived !== api && revived.__engine.alive() === true,
+    String(revived && revived.version)
+  );
+  env.check('teardown: a fresh injection translates again', env.hasCJK(env.text(name)), env.text(name));
+  env.check('teardown: the fresh injection reinstalls its style', !!doc.getElementById('whtr-style'));
+  env.check('teardown: the dead handle stays disabled', api.stats().enabled === false, JSON.stringify(api.stats()));
+  env.check('teardown: no engine problems after re-injection', env.problems.length === 0, env.problems.join(' | '));
+  env.report();
+  env.window.close();
+  return counts(env);
 }
 
 // ---------------------------------------------------------------------------
@@ -1567,6 +2131,8 @@ const CASES = [
   ['title: settings title units', titleCase],
   ['consistency: one source, one translation', consistencyCase],
   ['llm: OpenAI-compatible provider', llmCase],
+  ['cache: mod-owned cache through the channel', cacheCase],
+  ['teardown: restore and silence', teardownCase],
   ['claim: claim rules and hidden copies', claimCase],
   ['gesture: two-finger double tap and shortcut cycles', gestureCase]
 ];

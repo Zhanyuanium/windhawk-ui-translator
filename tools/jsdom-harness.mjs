@@ -12,9 +12,11 @@
  *   env.check('name translated', env.hasCJK(env.text(env.doc.getElementById('table-name'))));
  *   env.report();
  *
- * The stub channel answers `settings?` with a settings object and every `http`
- * request with a deterministic "every Latin word becomes 文" translation, so
- * tests need no network and no mod.
+ * The stub channel answers `settings?` with a settings object, `cache-get` from
+ * an in-memory store (fed by `cache-put`, echoing the request id in its reply),
+ * and every `http` request with a deterministic "every Latin word becomes 文"
+ * translation, so tests need no network and no mod. It can also emit `teardown`
+ * and records anything the page sends afterwards.
  */
 
 import { readFileSync } from 'node:fs';
@@ -47,8 +49,7 @@ export const DEFAULT_SETTINGS = {
   timeoutMs: 30000,
   cacheEnabled: false,
   cacheTtlDays: 30,
-  clearCache: false,
-  debug: true
+  clearCache: false
 };
 
 export function engineSource() {
@@ -63,6 +64,25 @@ export function defaultTranslate(text) {
 
 const page = (body) =>
   '<!doctype html><html lang="en"><head></head><body>' + body + '</body></html>';
+
+// Protocol fields: every field but the last is separator-free, so split the
+// leading fields with indexOf and leave the remainder (which may contain
+// separators) as the last field.
+const splitFields = (text, count) => {
+  const out = [];
+  let at = 0;
+  for (let i = 0; i < count - 1; i++) {
+    const next = text.indexOf(SEP, at);
+    if (next === -1) {
+      if (at < text.length || out.length) out.push(text.slice(at));
+      return out;
+    }
+    out.push(text.slice(at, next));
+    at = next + 1;
+  }
+  out.push(text.slice(at));
+  return out;
+};
 
 export const fixture = {
   /** Tile grid: RowMeta title and description. */
@@ -387,33 +407,6 @@ export const fixture = {
   },
 
   /**
-   * Select hosts that the settings pass must skip, one per rejection reason:
-   * already claimed by the description host, denied ancestor (`<pre>`), and no
-   * text at all.
-   */
-  debugSelects() {
-    return page(`
-      <section data-testid="mod-details">
-        <div class="ant-card"><div class="ant-card-body">
-          <div class="ant-form">
-            <div class="windhawk-row" data-testid="mod-setting">
-              <div class="windhawk-row-meta">
-                <h4 class="windhawk-row-meta-title" id="debug-title"><span class="SettingTitleText-sc-4">Monitor</span></h4>
-                <div data-testid="mod-setting-description-text" id="debug-desc">Only the windows on the switcher's monitor
-                  <span class="ant-select ant-select-single"><span class="ant-select-content" id="debug-claimed">Where the mouse cursor is</span></span>
-                </div>
-              </div>
-              <div class="sc-control">
-                <pre><span class="ant-select ant-select-single"><span class="ant-select-content" id="debug-denied">Where the mouse cursor is</span></span></pre>
-                <span class="ant-select ant-select-single"><span class="ant-select-content" id="debug-empty"></span></span>
-              </div>
-            </div>
-          </div>
-        </div></div>
-      </section>`);
-  },
-
-  /**
    * The same strings on every surface at once: one compact and one comfortable
    * settings row, two closed select values and a reset label whose tail is the
    * option label shown by one of them. The comfortable description carries
@@ -514,8 +507,7 @@ export const fixture = {
   /**
    * Compact density where the description host sits inside the title host. The
    * title still claims and translates its own text; the hidden copy is
-   * excluded from the title source and never a unit. The debug dump must show
-   * the title as claimed.
+   * excluded from the title source and never a unit.
    */
   compactTitleConflict() {
     const rows = [];
@@ -810,6 +802,19 @@ export function mount(JSDOM, options) {
   const httpRequests = [];
   const logs = [];
   const problems = [];
+  // The mod's cache store: `cache-get` reads it, `cache-put` writes it.
+  const cache = new Map();
+  // Keys the page looked up, in order; `cacheRequests` keeps the id and key.
+  const cacheLookups = [];
+  const cacheRequests = [];
+  // Messages the engine sent after `teardown`; must stay empty.
+  const postTeardown = [];
+  let tornDown = false;
+  const seedCache = options && options.cache;
+  if (seedCache) {
+    if (typeof seedCache.forEach === 'function') seedCache.forEach((value, key) => cache.set(key, value));
+    else for (const key of Object.keys(seedCache)) cache.set(key, seedCache[key]);
+  }
   const emit = (data) => {
     for (const fn of listeners) fn({ data: data });
   };
@@ -872,12 +877,49 @@ export function mount(JSDOM, options) {
       addEventListener(type, fn) {
         if (type === 'message') listeners.push(fn);
       },
-      removeEventListener() {},
+      removeEventListener(type, fn) {
+        if (type !== 'message') return;
+        const at = listeners.indexOf(fn);
+        if (at !== -1) listeners.splice(at, 1);
+      },
       postMessage(msg) {
+        if (tornDown) {
+          postTeardown.push(msg);
+          return;
+        }
         if (msg === TAG + SEP + 'settings?') {
           setTimeout(() => {
+            if (tornDown) return;
             emit(TAG + SEP + 'settings' + SEP + JSON.stringify(settings));
           }, 5);
+          return;
+        }
+        if (msg.indexOf(TAG + SEP + 'cache-get' + SEP) === 0) {
+          // Protocol v2: tag, kind, request id, key. The reply echoes the id so
+          // a late answer cannot resolve a newer lookup for the same key.
+          const fields = splitFields(msg, 4);
+          const id = fields[2];
+          const key = fields[3];
+          cacheLookups.push(key);
+          cacheRequests.push({ id: id, key: key, raw: msg });
+          // `dropCache` simulates a mod that never answers the lookup; the test
+          // may then emit a reply (or a stale one) itself.
+          if (options && options.dropCache) return;
+          // Answer through the channel, as the mod does: the lookup is async.
+          setTimeout(() => {
+            if (tornDown) return;
+            if (cache.has(key)) emit(TAG + SEP + 'cache-hit' + SEP + id + SEP + key + SEP + cache.get(key));
+            else emit(TAG + SEP + 'cache-miss' + SEP + id + SEP + key);
+          }, 2);
+          return;
+        }
+        if (msg.indexOf(TAG + SEP + 'cache-put' + SEP) === 0) {
+          // No reply: the mod stores it and the page moves on.
+          const rest = msg.slice((TAG + SEP + 'cache-put' + SEP).length);
+          const at = rest.indexOf(SEP);
+          const key = at === -1 ? rest : rest.slice(0, at);
+          const text = at === -1 ? '' : rest.slice(at + 1);
+          cache.set(key, text);
           return;
         }
         if (msg.indexOf(TAG + SEP + 'http' + SEP) !== 0) {
@@ -888,22 +930,23 @@ export function mount(JSDOM, options) {
           }
           return;
         }
-        const fields = msg.split(SEP);
+        // Protocol v2: exactly six fields, no headers; the body is the last one
+        // and may itself contain separators.
+        const fields = splitFields(msg, 6);
         const id = fields[2];
-        const count = Number(fields[5]);
-        const headers = [];
-        for (let i = 0; i < count; i++) headers.push([fields[6 + i * 2], fields[7 + i * 2]]);
-        const body = fields[6 + count * 2];
+        const body = fields[5] == null ? '' : fields[5];
         const record = {
           id: id,
           method: fields[3],
           url: fields[4],
-          headers: headers,
-          body: body
+          body: body,
+          fields: fields,
+          fieldCount: msg.split(SEP).length
         };
         httpRequests.push(record);
         requests.push(bodyTexts(body));
         setTimeout(() => {
+          if (tornDown) return;
           let reply = null;
           try {
             reply = respond ? respond(record) : null;
@@ -934,8 +977,43 @@ export function mount(JSDOM, options) {
     httpRequests: httpRequests,
     logs: logs,
     problems: problems,
+    // The mod-side cache store and the keys the page looked up.
+    cache: cache,
+    cacheLookups: cacheLookups,
+    // Full `cache-get` records: { id, key } in the order the page sent them.
+    cacheRequests: cacheRequests,
+    // Anything the engine sent after `teardown`; must stay empty.
+    postTeardown: postTeardown,
     api() {
       return window.__WHTR__;
+    },
+    /** Inject a raw protocol message, as the mod would. */
+    emit(data) {
+      emit(data);
+    },
+    /**
+     * Emit a cache reply as the mod would. `id` and `key` are the ones the page
+     * sent (or deliberately stale ones); a hit carries `text`.
+     */
+    emitCache(kind, id, key, text) {
+      if (kind === 'cache-hit') {
+        emit(TAG + SEP + 'cache-hit' + SEP + String(id) + SEP + key + SEP + (text == null ? '' : text));
+      } else {
+        emit(TAG + SEP + 'cache-miss' + SEP + String(id) + SEP + key);
+      }
+    },
+    /**
+     * Inject the engine again in the same document, as a mod re-inject would
+     * after a teardown. Replies are enabled again for the new session.
+     */
+    reinject() {
+      tornDown = false;
+      window.eval(engineSource());
+    },
+    /** Emit the mod's `teardown` message; nothing may be sent afterwards. */
+    teardown() {
+      tornDown = true;
+      emit(TAG + SEP + 'teardown');
     },
     /** Send one settings payload exactly as given (old protocol included). */
     pushSettings(payload) {

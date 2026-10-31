@@ -44,9 +44,9 @@ localized by Windhawk itself.
 * `Alt+Q` toggles translation on or off, as does a two-finger double-tap on
   touch screens. Both are configurable, and the toggle works in both
   directions.
-* Translations are cached in the page's `localStorage` for 30 days, LRU
-  trimmed at 3 MB. The cache key includes the provider and model, so
-  switching providers does not serve stale text.
+* Translations are cached by the mod (not in the page's storage) for 30 days,
+  capped at 8 MB with the oldest entries evicted first. The cache key includes
+  the provider and model, so switching providers does not serve stale text.
 * The default target language follows Windhawk's UI language, then the
   Windows display language.
 
@@ -56,8 +56,8 @@ localized by Windhawk itself.
   requests with a glossary and placeholder preservation. Recommended.
 * **Microsoft Edge** — the free endpoint; no key needed, and the fallback
   whenever the LLM is unavailable.
-* **Google** — listed in the settings but **not implemented yet**; selecting
-  it currently behaves like the Edge fallback.
+* **Google** — listed in the settings for compatibility but **not implemented
+  and not planned**; selecting it behaves like the Edge fallback.
 * `auto` prefers the LLM only when a key is configured; after one retry a
   failing LLM batch falls back to Edge for the rest of the session.
 
