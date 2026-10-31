@@ -45,7 +45,8 @@ README 和更新日志则完全没有本地化机制。本模组补上的就是�
 * **兼容 OpenAI 的大模型**——任意 `/chat/completions` 接口。批量 JSON 请求，支持
   术语表与占位符保护，推荐使用。
 * **微软 Edge**——免费接口，无需密钥，也是大模型不可用时的兜底。
-* **Google**——设置里为兼容而保留，但**未实现且不计划实现**；选中后等同于走 Edge。
+* **Google**——设置中已不再提供，也**未实现**；旧配置里若仍是 `provider: google`，
+  会回落到 Edge。
 * `auto` 只在配置了密钥时优先用大模型；大模型请求重试一次仍失败后，本次会话余下
   时间回落到 Edge。
 
@@ -62,7 +63,8 @@ cmdkey /generic:windhawk-ui-translator /user:translator /pass:<你的密钥>
 ## 安装
 
 需要 Windhawk 2.0.0-alpha.8（Tauri 界面）。请在界面关闭时启用模组，或启用后重启
-Windhawk——运行中的界面进程里 WebView2 环境已经创建好了，模组只能挂钩它的创建。
+界面进程（`windhawk-ui.exe`）——运行中的界面进程里 WebView2 环境已经创建好了，模组
+只能挂钩它的创建。只重启托盘图标不算。
 
 ```powershell
 # 从仓库源码编译安装
@@ -77,17 +79,14 @@ windhawk.exe -safe-mode
 & "C:\Program Files\Windhawk\windhawk-cli.exe" mod disable windhawk-ui-translator
 ```
 
-设置环境变量 `WH_TRANSLATOR_DISABLE=1` 可以在不改配置的情况下停用本模组。
-
 ## 开发
 
 ```powershell
 bun tools/build.ts          # 把 src/js/engine.js 内联进模组源码
-bun tools/test.mjs          # jsdom 测试（340 项断言）
+bun tools/test.mjs          # jsdom 测试（须全部通过）
 scripts\dev.ps1 install     # 编译并安装（需管理员，不重启）
 scripts\dev.ps1 restart     # 重启 windhawk-ui.exe
-scripts\dev.ps1 log -Tail 40
-scripts\dev.ps1 debug on    # 把调试追踪写入 p0.log
+scripts\dev.ps1 log -Seconds 60
 ```
 
 `docs/PLAN.md` 记录设计所依赖的、已实测的 WebView2 事实与注入链路，
@@ -97,7 +96,7 @@ scripts\dev.ps1 debug on    # 把调试追踪写入 p0.log
 ## 隐私
 
 译文文本会发送给你配置的翻译服务。没有遥测、没有统计，除该服务外不访问网络。
-密钥由 Windows 保存，不由本模组保存。
+密钥从 Windows 凭据管理器读取；可选的明文设置是兜底路径，保存在 Windhawk 自己的设置里。
 
 ## 许可证
 

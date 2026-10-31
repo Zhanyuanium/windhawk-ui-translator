@@ -57,8 +57,8 @@ localized by Windhawk itself.
   requests with a glossary and placeholder preservation. Recommended.
 * **Microsoft Edge** — the free endpoint; no key needed, and the fallback
   whenever the LLM is unavailable.
-* **Google** — listed in the settings for compatibility but **not implemented
-  and not planned**; selecting it behaves like the Edge fallback.
+* **Google** — not offered in the settings and **not implemented**; a configuration
+  that still says `provider: google` falls back to Edge.
 * `auto` prefers the LLM only when a key is configured; after one retry a
   failing LLM batch falls back to Edge for the rest of the session.
 
@@ -78,8 +78,9 @@ cmdkey /generic:windhawk-ui-translator /user:translator /pass:<your key>
 ## Install
 
 Requires Windhawk 2.0.0-alpha.8 (the Tauri UI). Enable the mod while the UI
-is closed, or restart Windhawk afterwards — in a running UI process the
-WebView2 environment already exists, and the mod can only hook its creation.
+is closed, or restart the UI process (`windhawk-ui.exe`) afterwards — in a
+running UI process the WebView2 environment already exists, and the mod can
+only hook its creation. Restarting only the Windhawk tray icon is not enough.
 
 ```powershell
 # compile and install from the repository source
@@ -94,18 +95,14 @@ windhawk.exe -safe-mode
 & "C:\Program Files\Windhawk\windhawk-cli.exe" mod disable windhawk-ui-translator
 ```
 
-Setting `WH_TRANSLATOR_DISABLE=1` disables the mod without touching its
-settings.
-
 ## Development
 
 ```powershell
 bun tools/build.ts          # inline src/js/engine.js into the mod source
-bun tools/test.mjs          # jsdom suites (340 checks)
+bun tools/test.mjs          # jsdom suites (all checks must pass)
 scripts\dev.ps1 install     # compile + install (admin, no restart)
 scripts\dev.ps1 restart     # restart windhawk-ui.exe
-scripts\dev.ps1 log -Tail 40
-scripts\dev.ps1 debug on    # debug tracing into p0.log
+scripts\dev.ps1 log -Seconds 60
 ```
 
 `docs/PLAN.md` records the verified WebView2 facts the design depends on and
@@ -116,8 +113,9 @@ release checklist.
 ## Privacy
 
 Translated text is sent to the provider you configure. No telemetry, no
-analytics, no other network access. The API key is stored by Windows, not by
-this mod.
+analytics, no other network access. The API key is read from Windows Credential
+Manager; the optional plaintext setting is the fallback and is stored in
+Windhawk's own settings.
 
 ## License
 

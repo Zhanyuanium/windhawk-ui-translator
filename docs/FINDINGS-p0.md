@@ -3,9 +3,14 @@
 Environment: Windhawk 2.0.0-alpha.8, WebView2 runtime 156.0.4314.50, Windows 11.
 Everything below was observed on this machine, not inferred from documentation.
 
+This is a historical record of the injection proof. The file logger and the
+`p0:` probe protocol mentioned below were removed later; the evidence was
+captured through `Wh_Log` (and its then-current file mirror) at the time. The
+vtable slot numbers and the behaviour notes still apply.
+
 ## What works
 
-| Step | Evidence in `p0.log` |
+| Step | Evidence (log excerpt) |
 | --- | --- |
 | Mod loads into `windhawk-ui.exe` | `mod init: pid=… exe=C:\Program Files\Windhawk\windhawk-ui.exe` |
 | `GetProcAddress` hook installed | `hook GetProcAddress installed` |

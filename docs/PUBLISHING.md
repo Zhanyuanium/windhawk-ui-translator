@@ -3,7 +3,7 @@
 ## Before every release
 
 1. `bun tools/build.ts` — regenerate the engine block inside the mod source.
-2. `bun tools/test.mjs` — all 340 jsdom checks green.
+2. `bun tools/test.mjs` — all jsdom checks green.
 3. `scripts\dev.ps1 install`, then `scripts\dev.ps1 restart`, and check on a
    real Windhawk: details page, settings page in **both** densities, installed
    list, explore tiles, changelog.
@@ -20,7 +20,7 @@
 | `@include` | `windhawk-ui.exe` (flagged by the validator as a tool-mod host — see below) |
 | `@architecture` | `x86-64` |
 | `@license` | GPL-3.0 |
-| `@compilerOptions` | `-lole32 -luuid -ladvapi32 -lshell32 -lwinhttp -fms-extensions` |
+| `@compilerOptions` | `-lole32 -luuid -ladvapi32 -lwinhttp -fms-extensions` |
 
 ## Publishing to the Windhawk mod collection
 
@@ -61,7 +61,7 @@ installing the repository version, otherwise both run.
 ## Privacy check
 
 * No key in any file, log line, or trace. `git grep -I "sk-"` must stay empty.
-* `debug` logging writes request/response bodies to `p0.log`; it is off by
-  default and rate limited to 40 lines per minute.
+* No request or response bodies are logged; `Wh_Log` lines carry ids, counts,
+  hosts and errors only.
 * The page never receives the key: the mod injects `Authorization` only for
   the `llmBaseUrl` host, only over HTTPS, never for the free endpoints.

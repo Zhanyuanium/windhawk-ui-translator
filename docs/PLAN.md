@@ -51,8 +51,8 @@ windhawk-ui.exe (Tauri/wry, STA UI thread)
   parses no JSON; request bodies, prompts and response parsing all live in
   JavaScript.
 * Fail-soft everywhere: a hook that does not match the expected shape logs and
-  does nothing. `WH_TRANSLATOR_DISABLE=1` short-circuits the mod; safe mode and
-  `windhawk-cli mod disable` are documented recovery paths.
+  does nothing. Safe mode and `windhawk-cli mod disable` are the documented
+  recovery paths.
 
 ## Interaction
 
@@ -87,7 +87,8 @@ windhawk-ui.exe (Tauri/wry, STA UI thread)
 
 * Scanning is restricted to known content containers, with a generic fallback
   for English block hosts and a deny list (code, editors, our own nodes, URLs,
-  identifiers, versions, numbers, text that already contains CJK).
+  identifiers, versions, numbers, and text that already contains CJK when the
+  target language is itself CJK).
 * Inline markup is protected with the placeholder scheme ported from
   kiss-translator.
 * Batching: ≤20 segments / ≤10000 chars / 400 ms window, concurrency 4–6,
@@ -186,7 +187,7 @@ root instead of the real installation. README.md has the command table.
    Evergreen WebView2 update can change it. Mitigation: validate the module
    and vtable slot addresses at runtime, log the WebView2 version, fail soft.
 2. A crash in `windhawk-ui.exe` locks the user out of the UI that disables the
-   mod. Mitigation: kill switch, safe mode, CLI, fail-soft defaults.
+   mod. Mitigation: safe mode, CLI disable, fail-soft defaults.
 3. COM lifetime/threading mistakes. Mitigation: all WebView2 calls on the UI
    thread, strict reference counting, a single `Init → Running → Stopping →
    Stopped` lifecycle, and a teardown that waits for every callback object
@@ -198,16 +199,26 @@ root instead of the real installation. README.md has the command table.
 
 ## Unload policy
 
-Normal unload is prove-or-pin. The UI-thread teardown pumps WebView2's message
-queue until every wrapper handed to WebView2 has reached its final `Release`
-and every held `AddScript` reference has come back, then unloads only if the
-decrement that reached zero happened on the UI thread itself and the teardown
-was not entered from inside one of our own callbacks, and no wrapper call was
-ever observed on a thread other than the UI thread. If quiescence cannot be
-proven — a completion that never fires, a release on another thread, a nested
-teardown, an exception during the pump, or a teardown step that failed — the mod
-takes a loader reference to itself (`GetModuleHandleExW` with `FROM_ADDRESS` and
-no `PIN`, never released), logs a `DEFECT` and finishes the cleanup. The DLL
-then stays resident for the rest of the process: a deliberate leak instead of
-executing code from an unmapped image. A later enable loads a second copy.
+Unload happens only after WebView2 has released everything it was given.
+
+`Wh_ModBeforeUninit` runs on Windhawk's engine thread. It stops the HTTP workers
+and the cache saver (both joined with `INFINITE`), posts a teardown request to
+the message-only window on the WebView2 UI thread, and waits on an event. The
+handler runs on the UI thread: it tells the page to restore its text, removes
+the document-created script, removes the event handlers, restores the
+environment vtable and releases the webview reference. The event is signalled
+only after that cleanup completed and the two outstanding counters — wrappers
+handed to WebView2 and held `AddScript` references — both reached zero on the
+UI thread. The UI thread keeps running Tauri's own message loop while the
+engine thread waits, so the completions arrive without a nested message pump.
+A final blocking `SendMessageW` destroys the dispatch window and unregisters its
+class; it returns after the UI thread came back through its own message loop,
+and the module's entry points never pump messages, so it cannot be inside one
+when that happens. A cleanup step that fails is not treated as success: the
+unload does not return rather than unload code that may still be reachable.
+
+There is no deadline and no self-pin: the mod never takes a loader reference to
+keep itself resident. A completion that never fires, or a release on a thread
+other than the UI thread, leaves the unload waiting instead of leaving code
+pointers into an unmapped image.
 
