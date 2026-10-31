@@ -2646,6 +2646,82 @@ async function detachedReplyCase() {
 }
 
 // ---------------------------------------------------------------------------
+// target: a CJK source is only "already in the target script" for CJK targets
+// ---------------------------------------------------------------------------
+async function cjkTargetCase() {
+  const source = '更好的对话框';
+  const html = fixture.tileGrid().replace('Better Dialogs', source);
+
+  // zh-CN (the harness default) normalises to zh-Hans: CJK-only text must not
+  // be requested.
+  const zh = mount(JSDOM, { html: html, settings: { targetLang: 'zh-Hans' } });
+  await zh.wait(1200);
+  const zhName = zh.doc.getElementById('tile-name');
+  zh.check(
+    'target zh-Hans: CJK-only text is skipped',
+    zh.requestCount(source) === 0 && zh.text(zhName) === source,
+    zh.text(zhName) + ', requests ' + zh.requestCount(source)
+  );
+  zh.check('target zh-Hans: no engine problems', zh.problems.length === 0, zh.problems.join(' | '));
+  zh.report();
+  zh.window.close();
+
+  // The same host under an English target must be requested and translated.
+  const en = mount(JSDOM, {
+    html: html,
+    settings: { targetLang: 'en' },
+    translate: (text) => (text === source ? 'Better dialogs' : defaultTranslate(text))
+  });
+  await en.waitFor(() => en.text(en.doc.getElementById('tile-name')) === 'Better dialogs', 4000);
+  const enName = en.doc.getElementById('tile-name');
+  en.check('target en: CJK text is requested', en.requestCount(source) === 1, String(en.requestCount(source)));
+  en.check('target en: CJK text is translated', en.text(enName) === 'Better dialogs', en.text(enName));
+  en.check('target en: no engine problems', en.problems.length === 0, en.problems.join(' | '));
+  en.report();
+  en.window.close();
+
+  return counts(zh, en);
+}
+
+// ---------------------------------------------------------------------------
+// timeout: the page-side default matches the mod's 20000 ms setting default
+// ---------------------------------------------------------------------------
+// `defaultSettings()` is private to the engine closure, so record the delays
+// the engine passes to the window's setTimeout: with a settings payload that
+// omits `timeoutMs`, the http request timer must be the 20 s default.
+class TimeoutRecordingJSDOM extends JSDOM {
+  constructor(html, options) {
+    super(html, options);
+    this.timeoutDelays = [];
+    const win = this.window;
+    const original = win.setTimeout;
+    win.setTimeout = (fn, ms, ...rest) => {
+      this.timeoutDelays.push(Number(ms));
+      return original.call(win, fn, ms, ...rest);
+    };
+  }
+}
+
+async function timeoutDefaultCase() {
+  const env = mount(TimeoutRecordingJSDOM, {
+    html: fixture.tileGrid(),
+    // JSON.stringify drops the undefined value, so the mod sends no key at all.
+    settings: { timeoutMs: undefined }
+  });
+  await env.waitFor(() => env.httpRequests.length > 0, 4000);
+  await env.wait(100);
+  const delays = env.dom.timeoutDelays || [];
+  env.check(
+    'timeout: an unset value schedules the 20000 ms default',
+    delays.indexOf(20000) !== -1,
+    delays.join(',')
+  );
+  env.report();
+  env.window.close();
+  return counts(env);
+}
+
+// ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------
 const CASES = [
@@ -2660,7 +2736,9 @@ const CASES = [
   ['claim: claim rules and hidden copies', claimCase],
   ['updates: update wizard and changelog dialog', updateSurfacesCase],
   ['detached: a reply that lands while its host is out of the document', detachedReplyCase],
-  ['gesture: two-finger double tap and shortcut cycles', gestureCase]
+  ['gesture: two-finger double tap and shortcut cycles', gestureCase],
+  ['target: CJK sources under CJK and Latin targets', cjkTargetCase],
+  ['timeout: the page-side default', timeoutDefaultCase]
 ];
 
 const totals = { checks: 0, failures: 0 };

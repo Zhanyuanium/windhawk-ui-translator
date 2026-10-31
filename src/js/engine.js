@@ -132,7 +132,7 @@
       batchChars: 10000,
       batchIntervalMs: 400,
       concurrency: 4,
-      timeoutMs: 30000,
+      timeoutMs: 20000,
       cacheEnabled: true,
       cacheTtlDays: 30,
       clearCache: false
@@ -292,7 +292,7 @@
         const body = String(opts && opts.body != null ? opts.body : '');
         const id = state.nextRequestId++;
 
-        const ms = clamp(state.settings.timeoutMs, 1000, 120000) || 30000;
+        const ms = clamp(state.settings.timeoutMs, 1000, 120000) || 20000;
         const timer = setTimeout(() => {
           if (!state.pending.has(id)) return;
           state.pending.delete(id);
@@ -571,11 +571,17 @@
     'gi'
   );
 
+  // A CJK source is already in the target script only when the target itself is
+  // CJK; for en/de/fr/... a Chinese README or changelog must still be translated.
+  function cjkTarget() {
+    return /^(zh|ja|ko)\b/i.test(state.targetLang || '');
+  }
+
   function isTranslatable(src) {
     if (typeof src !== 'string') return false;
     const t = src.replace(/\s+/g, ' ').trim();
     if (t.length < 2) return false;
-    if (CJK_RE.test(t)) return false;
+    if (cjkTarget() && CJK_RE.test(t)) return false;
     if (!LETTER_RE.test(t)) return false;
     if (URL_RE.test(t)) return false;
     if (EMAIL_RE.test(t)) return false;
