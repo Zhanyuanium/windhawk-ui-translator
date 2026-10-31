@@ -21,6 +21,7 @@ this one works from inside the UI process instead.
 | Details page | README, changelog | `scopeReadme`, `scopeChangelog` |
 | Details page, explore grid, installed table | mod name and one-line summary | `scopeModName`, `scopeModSummary` |
 | Settings page | titles, descriptions, tooltips, dropdown values and options, reset labels | `scopeSettings` |
+| Update dialog | mod names, and the changelog of each offered update | `scopeModName`, `scopeChangelog` |
 
 The settings page is the densest surface — it works in both densities:
 

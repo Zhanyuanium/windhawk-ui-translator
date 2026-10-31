@@ -221,6 +221,177 @@ export const fixture = {
       </div>`);
   },
 
+  /**
+   * The installed row the update wizard is opened from, a details-page
+   * changelog line (so a line already seen there must not be requested again),
+   * and the two portal slots the modals are mounted into.
+   */
+  updateSurfaces() {
+    return page(`
+      <div data-testid="mods-browser">
+        <div class="ant-table-wrapper" data-testid="installed-mods-table">
+          <table><tbody>
+            <tr class="ant-table-row" data-row-key="better-dialogs">
+              <td class="ant-table-cell">
+                <span class="sc-content"><span class="sc-box">
+                  <label class="ant-checkbox-wrapper"><span class="ant-checkbox"><input type="checkbox" data-testid="mod-row-select"></span></label>
+                </span><span class="sc-items">
+                  <a class="sc-link" id="table-name" href="#better-dialogs">Better Dialogs</a>
+                </span></span>
+              </td>
+              <td class="ant-table-cell">
+                <span class="ant-typography sc-ellipsis" id="table-desc"
+                      title="Improves Windows dialog boxes.">Improves Windows dialog boxes.</span>
+              </td>
+            </tr>
+          </tbody></table>
+        </div>
+      </div>
+      <section data-testid="mod-details">
+        <div class="ant-card"><div class="ant-card-body">
+          <div data-testid="mod-changelog">
+            <p id="details-changelog-p">Faster startup</p>
+          </div>
+        </div></div>
+      </section>
+      <div id="update-wizard-slot"></div>
+      <div id="update-dialog-slot"></div>`);
+  },
+
+  /**
+   * The aggregated update wizard exactly as the installed front end renders it
+   * (`ModUpdateWizard`): an antd modal whose body is a role="table" CSS grid.
+   * A row is the second cell's first div plus versions and a Changelog button;
+   * the row also carries a checkbox, so it must never be cloned.
+   */
+  updateWizardMarkup() {
+    return `
+      <div class="ant-modal-root" id="update-wizard-root">
+        <div class="ant-modal-mask"></div>
+        <div class="ant-modal-wrap" data-testid="mod-updates-modal">
+          <div class="ant-modal" role="dialog" aria-modal="true">
+            <div class="ant-modal-content">
+              <div class="ant-modal-header"><div class="ant-modal-title">Update mods</div></div>
+              <div class="ant-modal-body">
+                <div role="table" aria-label="Update mods" class="sc-update-grid">
+                  <div role="row">
+                    <div role="columnheader"><span class="ant-checkbox"><input type="checkbox" data-testid="mod-update-select-all"></span></div>
+                    <div role="columnheader">Mod</div>
+                    <div role="columnheader">Installed</div>
+                    <div role="columnheader">New</div>
+                    <div role="columnheader"></div>
+                  </div>
+                  <div role="row" data-testid="mod-update-row" data-mod-id="better-dialogs" data-status="ready">
+                    <div role="cell"><label class="ant-checkbox-wrapper"><span class="ant-checkbox"><input type="checkbox" data-testid="mod-update-include" checked></span></label></div>
+                    <div role="cell"><div class="sc-update-name" id="update-name-better">Better Dialogs</div></div>
+                    <div role="cell"><div class="sc-update-version" id="update-installed-better">1.0.0</div></div>
+                    <div role="cell"><div class="sc-update-version" data-testid="mod-update-new-version" id="update-new-better">1.1</div></div>
+                    <div role="cell"><div class="sc-update-actions"><button type="button" data-testid="mod-update-changelog" id="update-changelog-better">Changelog</button></div></div>
+                  </div>
+                  <div role="row" data-testid="mod-update-row" data-mod-id="taskbar-clock" data-status="ready">
+                    <div role="cell"><label class="ant-checkbox-wrapper"><span class="ant-checkbox"><input type="checkbox" data-testid="mod-update-include" checked></span></label></div>
+                    <div role="cell"><div class="sc-update-name" id="update-name-taskbar">Taskbar Clock</div></div>
+                    <div role="cell"><div class="sc-update-version" id="update-installed-taskbar">2.0.0</div></div>
+                    <div role="cell"><div class="sc-update-version" data-testid="mod-update-new-version" id="update-new-taskbar">2.1.0</div></div>
+                    <div role="cell"><div class="sc-update-actions"><button type="button" data-testid="mod-update-changelog" id="update-changelog-taskbar">Changelog</button></div></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>`;
+  },
+
+  /**
+   * The changelog dialog (`ModUpdateDetailsModal`): an antd modal with the mod
+   * name as title and two tabs. The active changelog tab holds the markdown
+   * renderer (`mod-update-changelog-content`); the sibling changes tab is a diff
+   * view and must stay untouched. The heading repeats the real changelog shape:
+   * a version and a date, plus one heading with prose after them.
+   */
+  changelogDialogMarkup() {
+    return `
+      <div class="ant-modal-root" id="update-dialog-root">
+        <div class="ant-modal-mask"></div>
+        <div class="ant-modal-wrap" data-testid="mod-update-details-modal">
+          <div class="ant-modal" role="dialog" aria-modal="true">
+            <div class="ant-modal-content">
+              <div class="ant-modal-header"><div class="ant-modal-title" id="update-dialog-title">Better Dialogs</div></div>
+              <div class="ant-modal-body">
+                <div class="ant-tabs ant-tabs-top">
+                  <div class="ant-tabs-nav"><div class="ant-tabs-nav-wrap"><div class="ant-tabs-nav-list">
+                    <div class="ant-tabs-tab ant-tabs-tab-active" id="rc-tabs-0-tab-changelog" role="tab"
+                         aria-controls="rc-tabs-0-panel-changelog" aria-selected="true" tabindex="0">
+                      <div class="ant-tabs-tab-btn" role="tab" aria-selected="true" tabindex="0"><span data-testid="mod-update-tab-changelog">Changelog</span></div>
+                    </div>
+                    <div class="ant-tabs-tab" id="rc-tabs-0-tab-changes" role="tab"
+                         aria-controls="rc-tabs-0-panel-changes" aria-selected="false" tabindex="0">
+                      <div class="ant-tabs-tab-btn" role="tab" aria-selected="false" tabindex="-1"><span data-testid="mod-update-tab-changes">Changes</span></div>
+                    </div>
+                  </div></div></div>
+                  <div class="ant-tabs-content-holder"><div class="ant-tabs-content ant-tabs-content-top">
+                    <div class="ant-tabs-tabpane ant-tabs-tabpane-active" role="tabpanel"
+                         aria-labelledby="rc-tabs-0-tab-changelog" id="rc-tabs-0-panel-changelog" tabindex="0">
+                      <div data-testid="mod-update-changelog-content">
+                        <div class="sc-markdown" dir="ltr">
+                          <h2 id="changelog-heading">2.1.1 (Oct 30, 2026)</h2>
+                          <h3 id="changelog-heading2">2.1.1 (<a href="https://github.com/ramensoftware/windhawk-mods/blob/main/mods/better-dialogs.wh.cpp">Oct 30, 2026</a>) - Performance improvements</h3>
+                          <p id="changelog-p">This release fixes <code>Taskbar</code> issues.</p>
+                          <ul>
+                            <li id="changelog-li">Faster startup</li>
+                            <li id="changelog-li2">Better dialogs</li>
+                          </ul>
+                          <div class="ant-collapse"><div class="ant-collapse-item">
+                            <div class="ant-collapse-header" role="button" tabindex="0">Older entries</div>
+                            <div class="ant-collapse-content"><div class="ant-collapse-content-box">
+                              <p id="changelog-old">Initial release.</p>
+                            </div></div>
+                          </div></div>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="ant-tabs-tabpane ant-tabs-tabpane-hidden" role="tabpanel"
+                         aria-labelledby="rc-tabs-0-tab-changes" id="rc-tabs-0-panel-changes" tabindex="0" style="display:none">
+                      <div data-testid="mod-update-changes-content"><div class="sc-diff" id="changes-diff">Old source line</div></div>
+                    </div>
+                  </div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>`;
+  },
+
+  /** Mount the update wizard into its portal slot; returns its root. */
+  openUpdateWizard(doc) {
+    const slot = doc.getElementById('update-wizard-slot');
+    if (!slot) return null;
+    slot.innerHTML = this.updateWizardMarkup();
+    return doc.getElementById('update-wizard-root');
+  },
+
+  /** Close the update wizard the way React does: the portal is removed. */
+  closeUpdateWizard(doc) {
+    const root = doc.getElementById('update-wizard-root');
+    if (root) root.remove();
+  },
+
+  /** Mount the changelog dialog into its portal slot; returns its root. */
+  openChangelogDialog(doc) {
+    const slot = doc.getElementById('update-dialog-slot');
+    if (!slot) return null;
+    slot.innerHTML = this.changelogDialogMarkup();
+    return doc.getElementById('update-dialog-root');
+  },
+
+  /** Close the changelog dialog the way React does: the portal is removed. */
+  closeChangelogDialog(doc) {
+    const root = doc.getElementById('update-dialog-root');
+    if (root) root.remove();
+  },
+
   /** Details header: name div, id chip, icon metadata line, Typography summary. */
   detailsHeader() {
     return page(`

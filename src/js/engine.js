@@ -157,6 +157,10 @@
     units: new Set(),
     unitByHost: new WeakMap(),
     unitByDisplay: new WeakMap(),
+    // Host -> (slot + text -> Text). A protected changelog token is rendered
+    // through the ordinary placeholder refs; keeping the text nodes stable
+    // means a rescan does not look like a changed unit.
+    literalRefs: new WeakMap(),
     written: new WeakMap(), // Text node -> value we wrote last
     origText: new WeakMap(), // Text node -> last known React-authored value
     nextUnitId: 1,
@@ -508,6 +512,17 @@
   ];
   const MODS_TABLE_SEL = '[data-testid="installed-mods-table"]';
   const ROW_SELECT_SEL = '[data-testid="mod-row-select"]';
+  // The aggregated update wizard and the changelog dialog it opens. Both are
+  // antd modals portaled to the document root, so they are scanned as their own
+  // surfaces rather than through the details page. The wizard table is a CSS
+  // grid with ARIA roles, not an antd table: the mod name is the first div in
+  // the second cell of a `mod-update-row`; the last cell holds the button. The
+  // dialog title repeats the mod name; the changelog body is the only prose
+  // container (the sibling "changes" tab is a diff view, not markdown).
+  const UPDATE_WIZARD_SEL = '[data-testid="mod-updates-modal"]';
+  const UPDATE_DETAILS_MODAL_SEL = '[data-testid="mod-update-details-modal"]';
+  const UPDATE_ROW_SEL = '[data-testid="mod-update-row"]';
+  const UPDATE_CHANGELOG_SEL = '[data-testid="mod-update-changelog-content"]';
 
   // Subtrees left alone; everything else is an inline wrapper or an atomic
   // placeholder (see serializeHost).
@@ -535,6 +550,23 @@
   const VERSION_RE = /^v?\d+(?:\.\d+){1,3}(?:[-+][\w.]+)?$/i;
   const NUMERIC_RE = /^[\d\s.,:;%+\-()[\]{}]+$/;
   const LETTER_RE = /\p{L}/u;
+  // Dates written the way changelog headings write them: "Oct 30, 2026",
+  // "30 October 2026", "2026-10-30". A standalone date is not prose.
+  const MONTH_SRC =
+    '(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|' +
+    'Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)';
+  const DATE_SRC =
+    '(?:' + MONTH_SRC + '\\s+\\d{1,2},?\\s+\\d{4}|' +
+    '\\d{1,2}\\s+' + MONTH_SRC + '\\s+\\d{4}|' +
+    '\\d{4}-\\d{2}-\\d{2})';
+  const DATE_RE = new RegExp('^' + DATE_SRC + '$', 'i');
+  // A changelog heading carries a version and a date beside its prose. These
+  // tokens are lifted out of the source as placeholders so a provider cannot
+  // reword or reorder them (see protectPieces).
+  const PROTECT_RE = new RegExp(
+    '\\b(?:' + DATE_SRC + ')\\b|\\bv?\\d+(?:\\.\\d+){1,3}(?:[-+][\\w.]+)?\\b',
+    'gi'
+  );
 
   function isTranslatable(src) {
     if (typeof src !== 'string') return false;
@@ -547,6 +579,7 @@
     if (WINPATH_RE.test(t)) return false;
     if (UNIXPATH_RE.test(t)) return false;
     if (VERSION_RE.test(t)) return false;
+    if (DATE_RE.test(t)) return false;
     if (NUMERIC_RE.test(t)) return false;
     return true;
   }
@@ -586,8 +619,19 @@
     return 'readme';
   }
 
+  function isUpdateModalHost(el) {
+    try {
+      return !!el.closest(UPDATE_WIZARD_SEL + ',' + UPDATE_DETAILS_MODAL_SEL);
+    } catch (_) {
+      return false;
+    }
+  }
+
   function compactSurface(el) {
     try {
+      // The update wizard is a list surface even though it is an antd modal:
+      // its table cells hold mod names and the dialog header repeats the name.
+      if (isUpdateModalHost(el)) return 'list';
       if (el.closest('[data-testid*="setting"], .ant-select-dropdown, .ant-modal, .ant-drawer, .ant-form')) {
         return 'settings';
       }
@@ -752,6 +796,35 @@
     return out;
   }
 
+  // The update wizard's table names and the changelog dialog title. The name is
+  // the first div in the row's second cell (a failed source adds a note after
+  // it); the dialog title is antd's `.ant-modal-title`. Both are swap hosts.
+  function updateNameHosts() {
+    const out = [];
+    let rows = [];
+    try {
+      rows = Array.from(document.querySelectorAll(UPDATE_ROW_SEL));
+    } catch (_) {
+      rows = [];
+    }
+    for (const row of rows) {
+      const cell = row.children && row.children[1];
+      const name = cell && cell.firstElementChild;
+      if (!name || name.tagName !== 'DIV') continue;
+      if (!nameHostClean(name) || !hasText(name)) continue;
+      out.push(name);
+    }
+    try {
+      for (const modal of document.querySelectorAll(UPDATE_DETAILS_MODAL_SEL)) {
+        const title = modal.querySelector('.ant-modal-title');
+        if (title && nameHostClean(title) && hasText(title)) out.push(title);
+      }
+    } catch (_) {
+      /* ignore */
+    }
+    return out;
+  }
+
   // Every name surface: tile/explore titles, table name link, details name div.
   // Settings titles share the row-title class and are kept out by compactSurface.
   function nameHosts() {
@@ -784,6 +857,7 @@
       }
     }
     for (const el of detailsNameHosts()) add(el);
+    for (const el of updateNameHosts()) add(el);
     return out;
   }
 
@@ -842,6 +916,55 @@
     return hasDirectText(el) && hasBlockChild(el);
   }
 
+  // Collect the prose blocks of one container. The details page uses it for
+  // README/changelog card bodies; the update wizard's changelog dialog uses it
+  // for `mod-update-changelog-content`, which is already known to be changelog
+  // prose (the sibling "changes" tab is a diff view and is never scanned).
+  function collectProseCandidates(body, surface, claim, claimSwap, candidates) {
+    if (!scopeEnabled(surface)) return;
+    let blocks = [];
+    try {
+      blocks = Array.from(body.querySelectorAll(PROSE_SEL));
+    } catch (_) {
+      blocks = [];
+    }
+    const mixed = [];
+    for (const block of blocks) {
+      if (block.closest('[' + ATTR_CLONE + '="1"]')) continue;
+      if (block.closest(DENY_ANCESTOR_SEL)) continue;
+      // A settings row inside the card body belongs to the swap pass, never a clone.
+      if (
+        block.closest('.windhawk-row') ||
+        block.matches('.windhawk-row-meta-title, .windhawk-row-meta-description')
+      ) {
+        continue;
+      }
+      if (!eligibleHost(block)) continue;
+      // Own sentence plus nested blocks: swap only the host's own text.
+      if (isMixedProseHost(block)) {
+        mixed.push(block);
+        continue;
+      }
+      // Keep only the innermost block so a <li><p> pair is not rendered twice.
+      try {
+        if (block.querySelector(PROSE_SEL)) continue;
+      } catch (_) {
+        /* ignore */
+      }
+      if (!hasText(block)) continue;
+      if (!claim(block)) continue;
+      candidates.push({ el: block, mode: 'clone', surface: surface });
+    }
+    // Deepest first: each keeps the nested blocks as atomic placeholders.
+    for (let i = mixed.length - 1; i >= 0; i--) {
+      const block = mixed[i];
+      if (!hasText(block)) continue;
+      const atomic = claimSwap(block);
+      if (!atomic) continue;
+      candidates.push({ el: block, mode: 'swap', surface: surface, atomic: atomic });
+    }
+  }
+
   function scanAll() {
     if (state.dead) return;
     // The document-created injection may run before <head> exists.
@@ -892,49 +1015,22 @@
         bodies = [];
       }
       for (const body of bodies) {
-        const surface = classifyProse(body);
-        if (!scopeEnabled(surface)) continue;
-        let blocks = [];
-        try {
-          blocks = Array.from(body.querySelectorAll(PROSE_SEL));
-        } catch (_) {
-          blocks = [];
-        }
-        const mixed = [];
-        for (const block of blocks) {
-          if (block.closest('[' + ATTR_CLONE + '="1"]')) continue;
-          if (block.closest(DENY_ANCESTOR_SEL)) continue;
-          // A settings row inside the card body belongs to the swap pass, never a clone.
-          if (
-            block.closest('.windhawk-row') ||
-            block.matches('.windhawk-row-meta-title, .windhawk-row-meta-description')
-          ) {
-            continue;
-          }
-          if (!eligibleHost(block)) continue;
-          // Own sentence plus nested blocks: swap only the host's own text.
-          if (isMixedProseHost(block)) {
-            mixed.push(block);
-            continue;
-          }
-          // Keep only the innermost block so a <li><p> pair is not rendered twice.
-          try {
-            if (block.querySelector(PROSE_SEL)) continue;
-          } catch (_) {
-            /* ignore */
-          }
-          if (!hasText(block)) continue;
-          if (!claim(block)) continue;
-          candidates.push({ el: block, mode: 'clone', surface: surface });
-        }
-        // Deepest first: each keeps the nested blocks as atomic placeholders.
-        for (let i = mixed.length - 1; i >= 0; i--) {
-          const block = mixed[i];
-          if (!hasText(block)) continue;
-          const atomic = claimSwap(block);
-          if (!atomic) continue;
-          candidates.push({ el: block, mode: 'swap', surface: surface, atomic: atomic });
-        }
+        collectProseCandidates(body, classifyProse(body), claim, claimSwap, candidates);
+      }
+    }
+
+    // The update wizard's changelog dialog lives in a portal outside the details
+    // page. Its container is explicit, so the surface is forced to changelog and
+    // the sibling "changes" diff tab is left alone.
+    if (scopeEnabled('changelog')) {
+      let contents = [];
+      try {
+        contents = Array.from(document.querySelectorAll(UPDATE_CHANGELOG_SEL));
+      } catch (_) {
+        contents = [];
+      }
+      for (const content of contents) {
+        collectProseCandidates(content, 'changelog', claim, claimSwap, candidates);
       }
     }
 
@@ -1177,13 +1273,49 @@
     return { text: text, refs: [], segs: segs };
   }
 
+  // Split a text run around version/date tokens. Only used for changelog
+  // headings: the tokens become ordinary `{{n}}` placeholders whose ref is a
+  // text node, so a provider never sees or rewrites them.
+  function protectPieces(text) {
+    const pieces = [];
+    let last = 0;
+    let m;
+    PROTECT_RE.lastIndex = 0;
+    while ((m = PROTECT_RE.exec(text))) {
+      if (m.index > last) pieces.push({ text: text.slice(last, m.index), token: false });
+      pieces.push({ text: m[0], token: true });
+      last = PROTECT_RE.lastIndex;
+    }
+    if (last < text.length) pieces.push({ text: text.slice(last), token: false });
+    return pieces;
+  }
+
+  // Stable text-node refs for protected tokens: the same host, slot and text
+  // reuse the same node, so refsEqual() does not force a rebuild on every scan.
+  function literalRef(host, text, slot) {
+    let map = state.literalRefs.get(host);
+    if (!map) {
+      map = new Map();
+      state.literalRefs.set(host, map);
+    }
+    const key = slot + '\u0000' + text;
+    let node = map.get(key);
+    if (!node) {
+      node = document.createTextNode(text);
+      map.set(key, node);
+    }
+    return node;
+  }
+
   // `atomic` descendants are emitted as placeholders and never walked;
   // `skipAria` drops the hidden description copy without a placeholder.
-  function serializeHost(host, mode, atomic, skipAria) {
+  // `protect` lifts version/date tokens out of a changelog heading's text.
+  function serializeHost(host, mode, atomic, skipAria, protect) {
     const atomics = atomic && atomic.length ? new Set(atomic) : null;
     const refs = [];
     const segs = [];
     let out = '';
+    let protectSlot = 0;
     const walk = (node) => {
       let child = node.firstChild;
       while (child) {
@@ -1193,7 +1325,19 @@
             segs.push({ kind: 'text', node: child, orig: value, out: value });
             state.origText.set(child, value);
           }
-          out += value;
+          if (protect && mode === 'clone') {
+            for (const piece of protectPieces(value)) {
+              if (!piece.token) {
+                out += piece.text;
+                continue;
+              }
+              const index = refs.length;
+              refs.push(literalRef(host, piece.text, protectSlot++));
+              out += '{{' + index + '}}';
+            }
+          } else {
+            out += value;
+          }
         } else if (child.nodeType === 1) {
           const el = child;
           if (!isSkippedElement(el) && !isAriaCopy(el, skipAria)) {
@@ -1510,9 +1654,12 @@
         return;
       }
       restoreSwapText(u);
-      serialized = titleUnit ? serializeTitleHost(el, atomics) : serializeHost(el, 'swap', atomics, false);
+      serialized = titleUnit ? serializeTitleHost(el, atomics) : serializeHost(el, 'swap', atomics, false, false);
     } else {
-      serialized = titleUnit ? serializeTitleHost(el, atomics) : serializeHost(el, mode, atomics, false);
+      // Version/date tokens in a changelog heading stay verbatim even when the
+      // heading also carries prose that must be translated.
+      const protect = mode === 'clone' && surface === 'changelog' && /^H[1-6]$/.test(el.tagName);
+      serialized = titleUnit ? serializeTitleHost(el, atomics) : serializeHost(el, mode, atomics, false, protect);
     }
 
     const hash = hash32(normalizeSource(serialized.text));

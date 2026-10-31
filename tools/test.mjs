@@ -2122,6 +2122,300 @@ async function gestureCase() {
 }
 
 // ---------------------------------------------------------------------------
+// updates: the aggregated update wizard and its changelog dialog
+// ---------------------------------------------------------------------------
+async function updateSurfacesCase() {
+  const env = mount(JSDOM, { html: fixture.updateSurfaces() });
+  const { doc } = env;
+  await env.wait(1500);
+
+  const api = env.api();
+  env.check('engine up', !!api && api.stats().settingsSeen, JSON.stringify(api && api.stats()));
+
+  const tableName = doc.getElementById('table-name');
+  const detailsChangelog = doc.getElementById('details-changelog-p');
+  const detailsClone = detailsChangelog.previousElementSibling;
+  env.check('installed name translated before the modal', env.hasCJK(env.text(tableName)), env.text(tableName));
+  env.check(
+    'details changelog line translated before the modal',
+    !!detailsClone && detailsClone.getAttribute('data-wh-clone') === '1' && env.hasCJK(env.text(detailsClone)),
+    detailsClone && detailsClone.outerHTML
+  );
+  env.check('the installed name was requested once', env.requestCount('Better Dialogs') === 1, String(env.requestCount('Better Dialogs')));
+  env.check('the details changelog line was requested once', env.requestCount('Faster startup') === 1, String(env.requestCount('Faster startup')));
+
+  const baseUnits = api.stats().units;
+  const baseClones = doc.querySelectorAll('[data-wh-clone="1"]').length;
+
+  // Open the aggregated update wizard: a portal added after the first scan.
+  fixture.openUpdateWizard(doc);
+  await env.wait(1000);
+
+  const modalName = doc.getElementById('update-name-better');
+  const modalName2 = doc.getElementById('update-name-taskbar');
+  const updateRow = doc.querySelector('[data-testid="mod-update-row"]');
+  const updateButton = doc.getElementById('update-changelog-better');
+  const wizardTitle = doc.querySelector('[data-testid="mod-updates-modal"] .ant-modal-title');
+  const headerTexts = Array.from(doc.querySelectorAll('[data-testid="mod-updates-modal"] [role="columnheader"]')).map((el) => env.text(el));
+
+  env.check('update table name translated under the name scope', env.hasCJK(env.text(modalName)), env.text(modalName));
+  env.check(
+    'update table name swaps a text node, not the div',
+    modalName.tagName === 'DIV' && modalName.childNodes.length === 1 && modalName.firstChild.nodeType === 3,
+    modalName.outerHTML
+  );
+  env.check('update table name is a swap unit', modalName.getAttribute('data-wh-swapped') === '1', modalName.outerHTML);
+  env.check('the second update table name is translated', env.hasCJK(env.text(modalName2)), env.text(modalName2));
+  env.check('the update row is never cloned', !updateRow.querySelector('[data-wh-clone="1"]'), updateRow.outerHTML.slice(0, 300));
+  env.check('the update row keeps its checkbox', !!updateRow.querySelector('input[data-testid="mod-update-include"]'));
+  env.check(
+    'the update row keeps its button and label',
+    updateButton.tagName === 'BUTTON' && env.text(updateButton) === 'Changelog',
+    updateButton.outerHTML
+  );
+  env.check(
+    'the changelog button claims no unit and is not swapped',
+    !updateButton.hasAttribute('data-wh-unit') && !updateButton.hasAttribute('data-wh-swapped'),
+    updateButton.outerHTML
+  );
+  env.check('installed version stays verbatim', env.text(doc.getElementById('update-installed-better')) === '1.0.0', env.text(doc.getElementById('update-installed-better')));
+  env.check('new version stays verbatim', env.text(doc.getElementById('update-new-better')) === '1.1', env.text(doc.getElementById('update-new-better')));
+  env.check(
+    'the update wizard title is app text, not translated',
+    env.text(wizardTitle) === 'Update mods' && !wizardTitle.hasAttribute('data-wh-unit'),
+    env.text(wizardTitle)
+  );
+  env.check(
+    'the update table headers are app text, not translated',
+    headerTexts.indexOf('Mod') !== -1 && headerTexts.indexOf('Installed') !== -1 && headerTexts.indexOf('New') !== -1,
+    headerTexts.join(' | ')
+  );
+  env.check(
+    'the update table name reuses the installed translation',
+    env.requestCount('Better Dialogs') === 1,
+    String(env.requestCount('Better Dialogs'))
+  );
+  env.check('the second table name was requested once', env.requestCount('Taskbar Clock') === 1, String(env.requestCount('Taskbar Clock')));
+  env.check(
+    'the changelog button issued no request',
+    !allRequests(env).some((text) => text.indexOf('Changelog') !== -1),
+    allRequests(env).join(' | ')
+  );
+
+  // Open the changelog dialog: the markdown body is a separate portal surface.
+  fixture.openChangelogDialog(doc);
+  await env.wait(1200);
+
+  const dialogTitle = doc.getElementById('update-dialog-title');
+  const heading = doc.getElementById('changelog-heading');
+  const heading2 = doc.getElementById('changelog-heading2');
+  const heading2Clone = heading2.previousElementSibling;
+  const changelogP = doc.getElementById('changelog-p');
+  const changelogPClone = changelogP.previousElementSibling;
+  const changelogLi = doc.getElementById('changelog-li');
+  const changelogLiClone = changelogLi.previousElementSibling;
+  const changelogOld = doc.getElementById('changelog-old');
+  const changelogOldClone = changelogOld.previousElementSibling;
+  const changelogContent = doc.querySelector('[data-testid="mod-update-changelog-content"]');
+  const changesDiff = doc.getElementById('changes-diff');
+  const openUnits = api.stats().units;
+
+  env.check(
+    'the changelog dialog title uses the name scope',
+    env.hasCJK(env.text(dialogTitle)) && env.requestCount('Better Dialogs') === 1,
+    env.text(dialogTitle) + ' requests=' + env.requestCount('Better Dialogs')
+  );
+  env.check('version/date heading is untouched', env.text(heading) === '2.1.1 (Oct 30, 2026)', env.text(heading));
+  env.check(
+    'the pure version/date heading gets no clone and no request',
+    (!heading.previousElementSibling || heading.previousElementSibling.getAttribute('data-wh-clone') !== '1') &&
+      env.requestCount('2.1.1 (Oct 30, 2026)') === 0,
+    heading.outerHTML
+  );
+  env.check(
+    'the version/date heading with prose is translated',
+    !!heading2Clone && heading2Clone.getAttribute('data-wh-clone') === '1' && env.hasCJK(env.text(heading2Clone)),
+    heading2Clone && heading2Clone.outerHTML
+  );
+  env.check(
+    'the translated heading keeps the version and date',
+    !!heading2Clone &&
+      env.text(heading2Clone).indexOf('2.1.1') !== -1 &&
+      env.text(heading2Clone).indexOf('Oct 30, 2026') !== -1,
+    heading2Clone && env.text(heading2Clone)
+  );
+  env.check(
+    'the date link survives inside the translated heading',
+    !!heading2Clone &&
+      !!heading2Clone.querySelector('a') &&
+      env.text(heading2Clone.querySelector('a')) === 'Oct 30, 2026' &&
+      heading2Clone.querySelector('a').getAttribute('href') ===
+        'https://github.com/ramensoftware/windhawk-mods/blob/main/mods/better-dialogs.wh.cpp',
+    heading2Clone && heading2Clone.outerHTML
+  );
+  env.check(
+    'the heading request carries the version and date as placeholders',
+    allRequests(env).some(
+      (text) =>
+        text.indexOf('Performance improvements') !== -1 &&
+        text.indexOf('{{0}}') !== -1 &&
+        text.indexOf('<1>{{2}}</1>') !== -1
+    ),
+    allRequests(env).join(' | ')
+  );
+  env.check(
+    'version and date tokens are never sent to the provider',
+    !allRequests(env).some((text) => text.indexOf('Oct 30, 2026') !== -1 || text.indexOf('2.1.1') !== -1),
+    allRequests(env).join(' | ')
+  );
+  env.check(
+    'changelog paragraph cloned and translated',
+    !!changelogPClone && changelogPClone.getAttribute('data-wh-clone') === '1' && env.hasCJK(env.text(changelogPClone)),
+    changelogPClone && changelogPClone.outerHTML
+  );
+  env.check(
+    'inline code survives in the paragraph clone',
+    !!changelogPClone && !!changelogPClone.querySelector('code') && changelogPClone.querySelector('code').textContent === 'Taskbar',
+    changelogPClone && changelogPClone.outerHTML
+  );
+  env.check(
+    'changelog list item cloned and translated',
+    !!changelogLiClone && changelogLiClone.getAttribute('data-wh-clone') === '1' && env.hasCJK(env.text(changelogLiClone)),
+    changelogLiClone && changelogLiClone.outerHTML
+  );
+  env.check(
+    'older entries markdown cloned and translated',
+    !!changelogOldClone && changelogOldClone.getAttribute('data-wh-clone') === '1' && env.hasCJK(env.text(changelogOldClone)),
+    changelogOldClone && changelogOldClone.outerHTML
+  );
+  env.check(
+    'a changelog line already seen on the details page is not requested again',
+    env.requestCount('Faster startup') === 1,
+    String(env.requestCount('Faster startup'))
+  );
+  env.check(
+    'the changelog body was requested once',
+    env.requestCount('This release fixes {{0}} issues.') === 1,
+    String(env.requestCount('This release fixes {{0}} issues.'))
+  );
+  env.check(
+    'the changes diff tab is not translated',
+    env.text(changesDiff) === 'Old source line' && !changesDiff.hasAttribute('data-wh-unit'),
+    changesDiff.outerHTML
+  );
+  env.check(
+    'each changelog prose block is cloned exactly once',
+    changelogContent.querySelectorAll('[data-wh-clone="1"]').length === 5 &&
+      changelogContent.querySelectorAll('[data-wh-orig="1"]').length === 5,
+    changelogContent.querySelectorAll('[data-wh-clone="1"]').length + ' clones, ' +
+      changelogContent.querySelectorAll('[data-wh-orig="1"]').length + ' hosts'
+  );
+
+  // Close both portals: their units must be dropped, not left behind.
+  const removedName = modalName;
+  fixture.closeChangelogDialog(doc);
+  fixture.closeUpdateWizard(doc);
+  await env.wait(1000);
+
+  env.check('closing the modals drops their units', api.stats().units === baseUnits, baseUnits + ' -> ' + api.stats().units);
+  env.check(
+    'closing the modals leaves no clones behind',
+    doc.querySelectorAll('[data-wh-clone="1"]').length === baseClones,
+    baseClones + ' -> ' + doc.querySelectorAll('[data-wh-clone="1"]').length
+  );
+  env.check(
+    'a removed name host is unmarked',
+    !removedName.isConnected &&
+      !removedName.hasAttribute('data-wh-unit') &&
+      !removedName.hasAttribute('data-wh-swapped'),
+    removedName.outerHTML
+  );
+  env.check('no changelog content remains in the document', !doc.querySelector('[data-testid="mod-update-changelog-content"]'));
+
+  // Reopen both portals: the same strings come from the session registry.
+  fixture.openUpdateWizard(doc);
+  await env.wait(900);
+  fixture.openChangelogDialog(doc);
+  await env.wait(1200);
+
+  const reopenedContent = doc.querySelector('[data-testid="mod-update-changelog-content"]');
+  const reopenedHeading2 = doc.getElementById('changelog-heading2');
+  env.check(
+    'reopening translates the update table name again',
+    env.hasCJK(env.text(doc.getElementById('update-name-better'))),
+    env.text(doc.getElementById('update-name-better'))
+  );
+  env.check(
+    'reopening translates the changelog again',
+    !!reopenedHeading2.previousElementSibling && env.hasCJK(env.text(reopenedHeading2.previousElementSibling)),
+    reopenedHeading2.previousElementSibling && env.text(reopenedHeading2.previousElementSibling)
+  );
+  env.check(
+    'reopening reuses the name translation',
+    env.requestCount('Better Dialogs') === 1,
+    String(env.requestCount('Better Dialogs'))
+  );
+  env.check(
+    'reopening reuses the changelog translation',
+    env.requestCount('This release fixes {{0}} issues.') === 1,
+    String(env.requestCount('This release fixes {{0}} issues.'))
+  );
+  env.check(
+    'reopening restores the same unit count',
+    api.stats().units === openUnits,
+    openUnits + ' -> ' + api.stats().units
+  );
+  env.check(
+    'reopening does not duplicate changelog clones',
+    reopenedContent.querySelectorAll('[data-wh-clone="1"]').length === 5,
+    String(reopenedContent.querySelectorAll('[data-wh-clone="1"]').length)
+  );
+  env.check(
+    'reopening keeps the version/date heading intact',
+    env.text(doc.getElementById('changelog-heading')) === '2.1.1 (Oct 30, 2026)',
+    env.text(doc.getElementById('changelog-heading'))
+  );
+  env.check('no engine problems logged', env.problems.length === 0, env.problems.join(' | '));
+  env.report();
+  env.window.close();
+
+  // Both scopes off: the new surfaces stay English and issue no requests.
+  const offEnv = mount(JSDOM, {
+    html: fixture.updateSurfaces(),
+    settings: { scopeModName: false, scopeChangelog: false }
+  });
+  await offEnv.wait(1400);
+  fixture.openUpdateWizard(offEnv.doc);
+  fixture.openChangelogDialog(offEnv.doc);
+  await offEnv.wait(1200);
+
+  offEnv.check(
+    'name scope off leaves the update table names English',
+    offEnv.text(offEnv.doc.getElementById('update-name-better')) === 'Better Dialogs' &&
+      offEnv.text(offEnv.doc.getElementById('update-name-taskbar')) === 'Taskbar Clock',
+    offEnv.text(offEnv.doc.getElementById('update-name-better')) + ' / ' + offEnv.text(offEnv.doc.getElementById('update-name-taskbar'))
+  );
+  offEnv.check(
+    'changelog scope off leaves the dialog markdown English',
+    offEnv.text(offEnv.doc.getElementById('changelog-p')) === 'This release fixes Taskbar issues.' &&
+      !offEnv.doc.querySelector('[data-testid="mod-update-changelog-content"] [data-wh-clone="1"]'),
+    offEnv.text(offEnv.doc.getElementById('changelog-p'))
+  );
+  offEnv.check(
+    'both scopes off issue no requests for the new surfaces',
+    offEnv.requestCount('Better Dialogs') === 0 &&
+      offEnv.requestCount('Taskbar Clock') === 0 &&
+      offEnv.requestCount('This release fixes {{0}} issues.') === 0,
+    allRequests(offEnv).join(' | ')
+  );
+  offEnv.check('no engine problems with both scopes off', offEnv.problems.length === 0, offEnv.problems.join(' | '));
+  offEnv.report();
+  offEnv.window.close();
+
+  return counts(env, offEnv);
+}
+
+// ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------
 const CASES = [
@@ -2134,6 +2428,7 @@ const CASES = [
   ['cache: mod-owned cache through the channel', cacheCase],
   ['teardown: restore and silence', teardownCase],
   ['claim: claim rules and hidden copies', claimCase],
+  ['updates: update wizard and changelog dialog', updateSurfacesCase],
   ['gesture: two-finger double tap and shortcut cycles', gestureCase]
 ];
 

@@ -18,6 +18,7 @@ README 和更新日志则完全没有本地化机制。本模组补上的就是�
 | 详情页 | 说明文档、更新日志 | `scopeReadme`、`scopeChangelog` |
 | 详情页、探索磁贴、已安装列表 | 模组名称与一句话简介 | `scopeModName`、`scopeModSummary` |
 | 设置页 | 标题、说明、提示气泡、下拉值/选项、重置标签 | `scopeSettings` |
+| 更新弹窗 | 模组名称，以及每个待更新模组的更新日志 | `scopeModName`、`scopeChangelog` |
 
 设置页是文字最密集的地方，两种密度下都已适配：
 
