@@ -2376,6 +2376,21 @@ async function updateSurfacesCase() {
     env.text(doc.getElementById('changelog-heading'))
   );
   env.check('no engine problems logged', env.problems.length === 0, env.problems.join(' | '));
+
+  // The single-mod run modal: the same name again, but only while installing.
+  fixture.openUpdateRunModal(doc, 'Better Dialogs', 'running');
+  await env.wait(900);
+  const runTitle = doc.getElementById('update-run-title');
+  env.check('run modal title translated', !!runTitle && env.hasCJK(env.text(runTitle)), runTitle && env.text(runTitle));
+  env.check(
+    'run modal title reuses the known translation, no second request',
+    env.requestCount('Better Dialogs') === 1,
+    String(env.requestCount('Better Dialogs'))
+  );
+  fixture.closeUpdateRunModal(doc);
+  await env.wait(600);
+  env.check('closing the run modal removes its title', !doc.getElementById('update-run-title'));
+  env.check('no engine problems after the run modal', env.problems.length === 0, env.problems.join(' | '));
   env.report();
   env.window.close();
 

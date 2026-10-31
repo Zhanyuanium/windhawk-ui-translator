@@ -883,6 +883,9 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
   // container (the sibling "changes" tab is a diff view, not markdown).
   const UPDATE_WIZARD_SEL = '[data-testid="mod-updates-modal"]';
   const UPDATE_DETAILS_MODAL_SEL = '[data-testid="mod-update-details-modal"]';
+  // The single-mod run: its antd title is the mod name while the install runs
+  // and after it ends, so it is a name host like the dialog's title.
+  const UPDATE_RUN_MODAL_SEL = '[data-testid="mod-update-run-modal"]';
   const UPDATE_ROW_SEL = '[data-testid="mod-update-row"]';
   const UPDATE_CHANGELOG_SEL = '[data-testid="mod-update-changelog-content"]';
 
@@ -983,7 +986,9 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
 
   function isUpdateModalHost(el) {
     try {
-      return !!el.closest(UPDATE_WIZARD_SEL + ',' + UPDATE_DETAILS_MODAL_SEL);
+      return !!el.closest(
+        UPDATE_WIZARD_SEL + ',' + UPDATE_DETAILS_MODAL_SEL + ',' + UPDATE_RUN_MODAL_SEL
+      );
     } catch (_) {
       return false;
     }
@@ -1177,7 +1182,9 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
       out.push(name);
     }
     try {
-      for (const modal of document.querySelectorAll(UPDATE_DETAILS_MODAL_SEL)) {
+      for (const modal of document.querySelectorAll(
+        UPDATE_DETAILS_MODAL_SEL + ',' + UPDATE_RUN_MODAL_SEL
+      )) {
         const title = modal.querySelector('.ant-modal-title');
         if (title && nameHostClean(title) && hasText(title)) out.push(title);
       }

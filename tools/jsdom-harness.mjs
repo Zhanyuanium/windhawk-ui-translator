@@ -255,7 +255,8 @@ export const fixture = {
         </div></div>
       </section>
       <div id="update-wizard-slot"></div>
-      <div id="update-dialog-slot"></div>`);
+      <div id="update-dialog-slot"></div>
+      <div id="update-run-slot"></div>`);
   },
 
   /**
@@ -384,6 +385,40 @@ export const fixture = {
     if (!slot) return null;
     slot.innerHTML = this.changelogDialogMarkup();
     return doc.getElementById('update-dialog-root');
+  },
+
+  /**
+   * The single-mod run modal (`ModUpdateRunModal`): an antd modal whose title is
+   * the mod name, with the run state on the wrapper. It only exists while the
+   * install runs and right after it, which is why it is easy to miss.
+   */
+  updateRunModalMarkup(name = 'Better Dialogs', status = 'running') {
+    return `
+      <div class="ant-modal-root" id="update-run-root">
+        <div class="ant-modal-mask"></div>
+        <div class="ant-modal-wrap" data-testid="mod-update-run-modal" data-status="${status}">
+          <div class="ant-modal" role="dialog" aria-modal="true">
+            <div class="ant-modal-content">
+              <div class="ant-modal-header"><div class="ant-modal-title" id="update-run-title">${name}</div></div>
+              <div class="ant-modal-body"><div class="sc-spin">Updating</div></div>
+            </div>
+          </div>
+        </div>
+      </div>`;
+  },
+
+  /** Mount the run modal into its portal slot; returns its root. */
+  openUpdateRunModal(doc, name, status) {
+    const slot = doc.getElementById('update-run-slot');
+    if (!slot) return null;
+    slot.innerHTML = this.updateRunModalMarkup(name, status);
+    return doc.getElementById('update-run-root');
+  },
+
+  /** Close the run modal the way React does: the portal is removed. */
+  closeUpdateRunModal(doc) {
+    const root = doc.getElementById('update-run-root');
+    if (root) root.remove();
   },
 
   /** Close the changelog dialog the way React does: the portal is removed. */
