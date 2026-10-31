@@ -224,9 +224,9 @@ name. Google Translate is not offered.
 
 ## Notes
 
-* If the mod is enabled while the UI is already running, it restarts Windhawk
-  once by itself, at most once a minute. Close the UI before enabling the mod
-  to skip that restart.
+* If the mod is enabled while the UI is already running, it restarts the UI
+  process once by itself, at most once a minute. Close the UI before enabling
+  the mod to skip that restart.
 * If the UI fails to start: `windhawk.exe -safe-mode`, or
   `windhawk-cli.exe mod disable windhawk-ui-translator`, or set
   `WH_TRANSLATOR_DISABLE=1`.
@@ -9063,7 +9063,14 @@ static HRESULT STDMETHODCALLTYPE P0CreateEnvShim(
 // mod was loaded. When the mod is enabled while windhawk-ui.exe is already
 // running, the existing environment is never wrapped and nothing translates.
 // One short-lived thread waits a grace period after init and, when the
-// environment was already there, asks windhawk.exe to restart Windhawk once.
+// environment was already there, restarts the UI process itself:
+// windhawk.exe -restart only re-executes the tray app and leaves
+// windhawk-ui.exe (and therefore its WebView2 environment) running.
+//
+// A detached cmd.exe helper waits a few seconds and starts the UI executable
+// again. The watchdog then posts WM_CLOSE to the UI's main top-level window
+// so the old process can shut down gracefully, and terminates it if it is
+// still alive after three seconds.
 //
 // A timestamp file under Wh_GetModStoragePath() suppresses a second restart
 // within 60 seconds, and a process-wide flag allows one attempt per process
@@ -9075,11 +9082,14 @@ static HRESULT STDMETHODCALLTYPE P0CreateEnvShim(
 // ---------------------------------------------------------------------------
 
 static constexpr DWORD kP1LateLoadDelayMs = 5000;
+static constexpr DWORD kP1UiCloseWaitMs = 3000;
 static constexpr unsigned long long kP1RestartGuardMs = 60000;
 static constexpr wchar_t kP1RestartGuardFileName[] = L"ui-restart-guard.txt";
+static constexpr wchar_t kP1UiExecutableName[] = L"windhawk-ui.exe";
 
 static std::mutex g_p1WatchdogMutex;
 static HANDLE g_p1WatchdogThread = nullptr;
+static DWORD g_p1WatchdogThreadId = 0;
 static HANDLE g_p1WatchdogStopEvent = nullptr;
 // Set once on the init thread before the watchdog starts; read-only afterwards.
 static std::wstring g_p1RestartGuardPath;
@@ -9092,10 +9102,9 @@ static bool P1KillSwitchOn() {
     return length > 0 && wcscmp(value, L"1") == 0;
 }
 
-// True only for the host this mod is meant for, and only when the sibling
-// windhawk.exe exists at the same path. The mod is injected by @include, but a
-// manual load into another process must never restart anything.
-static bool P1ResolveWindhawkRestartPath(std::wstring& windhawkPath) {
+// True only for the host this mod is meant for. A manual load into another
+// process must never restart anything.
+static bool P1ResolveUiExecutablePath(std::wstring& uiPath) {
     wchar_t buffer[MAX_PATH]{};
     DWORD length = GetModuleFileNameW(nullptr, buffer, ARRAYSIZE(buffer));
     if (length == 0 || length >= ARRAYSIZE(buffer)) {
@@ -9113,19 +9122,144 @@ static bool P1ResolveWindhawkRestartPath(std::wstring& windhawkPath) {
     if (slash == std::wstring::npos) {
         return false;
     }
-    std::wstring name = exePath.substr(slash + 1);
-    if (CompareStringOrdinal(name.c_str(), -1, L"windhawk-ui.exe", -1, TRUE) !=
-        CSTR_EQUAL) {
+    if (CompareStringOrdinal(exePath.c_str() + slash + 1, -1,
+                             kP1UiExecutableName, -1, TRUE) != CSTR_EQUAL) {
         return false;
     }
 
+    uiPath = std::move(exePath);
+    return true;
+}
+
+// Starts the detached helper that relaunches the UI:
+//
+//   cmd.exe /c "ping -n 4 127.0.0.1 >nul & start "" "<ui path>""
+//
+// ping supplies the delay (about three seconds, one per echo request) so the
+// old process is gone before the new one starts; start launches the
+// executable with an empty window title. The helper inherits no handles, has
+// no console window, and is not tied to this process, so it survives the
+// close below.
+static bool P1SpawnUiRelaunch(const std::wstring& uiPath) {
+    wchar_t systemDirectory[MAX_PATH]{};
+    UINT systemLength =
+        GetSystemDirectoryW(systemDirectory, ARRAYSIZE(systemDirectory));
+    if (systemLength == 0 || systemLength >= ARRAYSIZE(systemDirectory)) {
+        return false;
+    }
+
+    std::wstring cmdPath;
+    std::wstring commandLine;
+    std::wstring workingDirectory;
     try {
-        windhawkPath.assign(exePath, 0, slash + 1);
-        windhawkPath += L"windhawk.exe";
+        cmdPath.assign(systemDirectory, systemLength);
+        if (cmdPath.empty() || cmdPath.back() != L'\\') {
+            cmdPath.push_back(L'\\');
+        }
+        cmdPath += L"cmd.exe";
+
+        commandLine = L"\"";
+        commandLine += cmdPath;
+        commandLine += L"\" /c \"ping -n 4 127.0.0.1 >nul & start \"\" \"";
+        commandLine += uiPath;
+        commandLine += L"\"\"";
+
+        size_t slash = uiPath.find_last_of(L"\\/");
+        if (slash != std::wstring::npos) {
+            // Keep the trailing slash for a root directory ("C:\"), where the
+            // part before it ("C:") would be a drive-relative path.
+            workingDirectory.assign(uiPath, 0,
+                                    slash == 2 && uiPath[1] == L':' ? 3 : slash);
+        }
     } catch (...) {
         return false;
     }
-    return GetFileAttributesW(windhawkPath.c_str()) != INVALID_FILE_ATTRIBUTES;
+
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    // bInheritHandles=FALSE: the helper owns no handle of ours.
+    // CREATE_NO_WINDOW: no console flashes up. The child outlives this
+    // process, which is what lets it start the UI after the close below.
+    if (!CreateProcessW(cmdPath.c_str(), &commandLine[0], nullptr, nullptr,
+                        FALSE, CREATE_NO_WINDOW, nullptr,
+                        workingDirectory.empty() ? nullptr
+                                                 : workingDirectory.c_str(),
+                        &startup, &process)) {
+        return false;
+    }
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    return true;
+}
+
+struct P1MainWindowSearch {
+    DWORD processId;
+    HWND visibleTitled;
+    HWND titled;
+    HWND visible;
+};
+
+static BOOL CALLBACK P1MainWindowProc(HWND window, LPARAM parameter) {
+    auto* search = reinterpret_cast<P1MainWindowSearch*>(parameter);
+    DWORD processId = 0;
+    GetWindowThreadProcessId(window, &processId);
+    if (processId != search->processId) {
+        return TRUE;
+    }
+    if (GetWindowTextLengthW(window) > 0) {
+        if (IsWindowVisible(window)) {
+            search->visibleTitled = window;
+            return FALSE;
+        }
+        if (!search->titled) {
+            search->titled = window;
+        }
+        return TRUE;
+    }
+    if (IsWindowVisible(window) && !search->visible) {
+        search->visible = window;
+    }
+    return TRUE;
+}
+
+// The UI's main top-level window: the visible one that carries a title.
+// GetConsoleWindow is not it (windhawk-ui.exe is a GUI process), and the
+// mod's own dispatch window is message-only, so EnumWindows never returns it.
+static HWND P1FindMainWindow() {
+    P1MainWindowSearch search{};
+    search.processId = GetCurrentProcessId();
+    EnumWindows(&P1MainWindowProc, reinterpret_cast<LPARAM>(&search));
+    if (search.visibleTitled) {
+        return search.visibleTitled;
+    }
+    if (search.titled) {
+        return search.titled;
+    }
+    return search.visible;
+}
+
+// Posts WM_CLOSE to the UI's main window and gives the process a bounded
+// amount of time to finish its own shutdown. Waiting on this process object
+// can only end when the process exits (this thread then dies with it), so the
+// wait is the grace period and ExitProcess is the fallback.
+static void P1CloseUiProcess() {
+    HWND window = P1FindMainWindow();
+    if (window) {
+        if (!PostMessageW(window, WM_CLOSE, 0, 0)) {
+            Wh_Log(L"[p1] late-load restart: WM_CLOSE to %p failed (%lu)",
+                   reinterpret_cast<void*>(window), GetLastError());
+        }
+    } else {
+        Wh_Log(L"[p1] late-load restart: no main window found; terminating "
+               L"the process");
+    }
+
+    WaitForSingleObject(GetCurrentProcess(), kP1UiCloseWaitMs);
+    Wh_Log(L"[p1] late-load restart: windhawk-ui.exe is still running after "
+           L"%lu ms; terminating the process",
+           static_cast<unsigned long>(kP1UiCloseWaitMs));
+    ExitProcess(0);
 }
 
 static bool P1ReadRestartGuard(unsigned long long& lastMs) {
@@ -9210,8 +9344,8 @@ static void P1CheckLateLoad() {
         return;
     }
 
-    std::wstring windhawkPath;
-    if (!P1ResolveWindhawkRestartPath(windhawkPath)) {
+    std::wstring uiPath;
+    if (!P1ResolveUiExecutablePath(uiPath)) {
         return;
     }
 
@@ -9241,20 +9375,21 @@ static void P1CheckLateLoad() {
     }
 
     Wh_Log(L"[p1] late load: windhawk-ui.exe already had its WebView2 "
-           L"environment before this mod was loaded; restarting %s -restart",
-           windhawkPath.c_str());
+           L"environment before this mod was loaded; restarting the UI "
+           L"process %s",
+           uiPath.c_str());
 
-    std::wstring commandLine = L"\"" + windhawkPath + L"\" -restart";
-    STARTUPINFOW startup{};
-    startup.cb = sizeof(startup);
-    PROCESS_INFORMATION process{};
-    if (!CreateProcessW(windhawkPath.c_str(), &commandLine[0], nullptr, nullptr,
-                        FALSE, 0, nullptr, nullptr, &startup, &process)) {
-        Wh_Log(L"[p1] late-load restart failed (%lu)", GetLastError());
+    if (!P1SpawnUiRelaunch(uiPath)) {
+        // The guard was written before the spawn, so a failure here is not
+        // retried by this process and not by a second watchdog within a
+        // minute: the restart cannot loop.
+        Wh_Log(L"[p1] late-load restart: cannot start the relaunch helper "
+               L"(%lu); leaving the UI running",
+               GetLastError());
         return;
     }
-    CloseHandle(process.hThread);
-    CloseHandle(process.hProcess);
+
+    P1CloseUiProcess();
 }
 
 static DWORD WINAPI P1LateLoadWatchdogProc(void* parameter) {
@@ -9300,6 +9435,7 @@ static bool P1StartLateLoadWatchdog() {
     {
         std::lock_guard<std::mutex> lock(g_p1WatchdogMutex);
         g_p1WatchdogThread = thread;
+        g_p1WatchdogThreadId = GetThreadId(thread);
         g_p1WatchdogStopEvent = stop;
     }
     Wh_Log(L"[p1] late-load watchdog started (delay=%lu ms)",
@@ -9310,14 +9446,18 @@ static bool P1StartLateLoadWatchdog() {
 // Signals the watchdog and joins it. Idempotent; Wh_ModBeforeUninit is the
 // only caller. The join is INFINITE on purpose: the thread must not outlive
 // this image. It is bounded because the thread is either waiting on the stop
-// event or finishing one CreateProcessW call.
+// event, starting the relaunch helper, or inside the three-second close wait,
+// which ends in ExitProcess (the join then dies with the process).
 static void P1StopWatchdog() {
     HANDLE thread = nullptr;
+    DWORD threadId = 0;
     HANDLE stop = nullptr;
     {
         std::lock_guard<std::mutex> lock(g_p1WatchdogMutex);
         thread = g_p1WatchdogThread;
         g_p1WatchdogThread = nullptr;
+        threadId = g_p1WatchdogThreadId;
+        g_p1WatchdogThreadId = 0;
         stop = g_p1WatchdogStopEvent;
         g_p1WatchdogStopEvent = nullptr;
         if (stop) {
@@ -9326,7 +9466,15 @@ static void P1StopWatchdog() {
     }
 
     if (thread) {
-        WaitForSingleObject(thread, INFINITE);
+        // ExitProcess runs the detach notifications on the calling thread. If
+        // that thread is this watchdog (the close path below), waiting on its
+        // own handle would deadlock the process it is trying to end.
+        if (threadId == GetCurrentThreadId()) {
+            Wh_Log(L"[p1] late-load watchdog: uninit on the watchdog thread; "
+                   L"not joining itself");
+        } else {
+            WaitForSingleObject(thread, INFINITE);
+        }
         CloseHandle(thread);
     }
     if (stop) {
@@ -9450,8 +9598,8 @@ BOOL Wh_ModInit() {
            L"creation");
 
     // The hook only catches environments created from here on. If the UI
-    // already had one, restart it once after a short grace period; see the
-    // late-load watchdog above.
+    // already had one, restart the UI process once after a short grace
+    // period; see the late-load watchdog above.
     P1StartLateLoadWatchdog();
     return TRUE;
 }
