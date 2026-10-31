@@ -224,8 +224,9 @@ name. Google Translate is not offered.
 
 ## Notes
 
-* Enable the mod with the UI closed, or restart Windhawk afterwards — a
-  running UI process already has its WebView2 environment.
+* If the mod is enabled while the UI is already running, it restarts Windhawk
+  once by itself, at most once a minute. Close the UI before enabling the mod
+  to skip that restart.
 * If the UI fails to start: `windhawk.exe -safe-mode`, or
   `windhawk-cli.exe mod disable windhawk-ui-translator`, or set
   `WH_TRANSLATOR_DISABLE=1`.
@@ -270,6 +271,7 @@ access. The key is stored by Windows, not by this mod.
 
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <cwchar>
 #include <deque>
@@ -7356,25 +7358,31 @@ static bool P1CacheUnescape(const std::wstring& in, std::wstring& out) {
     return true;
 }
 
-static bool P1ResolveCachePath(std::wstring& path) {
+static bool P1ResolveStorageFile(const wchar_t* fileName, std::wstring& path) {
     wchar_t storage[MAX_PATH]{};
     size_t length = Wh_GetModStoragePath(storage, ARRAYSIZE(storage));
     if (length == 0 || length >= ARRAYSIZE(storage)) {
         return false;
     }
+    std::wstring resolved;
     try {
-        path.assign(storage, length);
-        if (path.empty()) {
+        resolved.assign(storage, length);
+        if (resolved.empty()) {
             return false;
         }
-        if (path.back() != L'\\') {
-            path.push_back(L'\\');
+        if (resolved.back() != L'\\') {
+            resolved.push_back(L'\\');
         }
-        path += kP1CacheFileName;
+        resolved += fileName;
     } catch (...) {
         return false;
     }
+    path = std::move(resolved);
     return true;
+}
+
+static bool P1ResolveCachePath(std::wstring& path) {
+    return P1ResolveStorageFile(kP1CacheFileName, path);
 }
 
 static void P1CacheLoad() {
@@ -8868,6 +8876,14 @@ static std::atomic<FnCreateEnv> g_realCreateEnv{nullptr};
 static std::atomic<bool> g_createExportLogged{false};
 static std::atomic<bool> g_sharedExportLogged{false};
 
+// Set once the environment path runs after this mod instance was loaded: the
+// GetProcAddress hook intercepts the create export, or the shim performs the
+// creation. Reset in every Wh_ModInit, so a mod that was toggled off and on in
+// the same process again waits for a fresh environment. A process whose
+// WebView2 environment predates the current instance never sets it, which is
+// the condition the late-load watchdog keys on.
+static std::atomic<bool> g_p0EnvCreationSeen{false};
+
 static HRESULT STDMETHODCALLTYPE P0CreateEnvShim(BOOL fromClientDll,
                                                  int runtimeType,
                                                  PCWSTR userDataFolder,
@@ -8909,6 +8925,8 @@ static FARPROC WINAPI P0GetProcAddressHook(HMODULE module, LPCSTR procName) {
             if ((isCreate || isCreateShared) &&
                 module == P0GetEmbeddedBrowserModule()) {
                 if (isCreate) {
+                    g_p0EnvCreationSeen.store(true,
+                                              std::memory_order_release);
                     // Resolve the real export once, through the unhooked
                     // trampoline. Returning the shim is cheap and does not
                     // recurse into this hook.
@@ -8981,6 +8999,7 @@ static HRESULT STDMETHODCALLTYPE P0CreateEnvShim(
     IUnknown* environmentOptions,
     void* handler) {
     P0WrapperCallScope scope;
+    g_p0EnvCreationSeen.store(true, std::memory_order_release);
     try {
         Wh_Log(L"[p0] CreateWebViewEnvironmentWithOptionsInternal: "
                L"fromClientDll=%d runtimeType=%d userDataFolder=%.200s handler=%p",
@@ -9038,6 +9057,284 @@ static HRESULT STDMETHODCALLTYPE P0CreateEnvShim(
 }
 
 // ---------------------------------------------------------------------------
+// Late-load watchdog
+//
+// The GetProcAddress hook only sees WebView2 environments created after this
+// mod was loaded. When the mod is enabled while windhawk-ui.exe is already
+// running, the existing environment is never wrapped and nothing translates.
+// One short-lived thread waits a grace period after init and, when the
+// environment was already there, asks windhawk.exe to restart Windhawk once.
+//
+// A timestamp file under Wh_GetModStoragePath() suppresses a second restart
+// within 60 seconds, and a process-wide flag allows one attempt per process
+// instance, so a restart that does not fix the condition cannot loop.
+//
+// The thread is joined by Wh_ModBeforeUninit after the lifecycle became
+// Stopping; the stop event shortens the wait so unload never blocks for the
+// full grace period.
+// ---------------------------------------------------------------------------
+
+static constexpr DWORD kP1LateLoadDelayMs = 5000;
+static constexpr unsigned long long kP1RestartGuardMs = 60000;
+static constexpr wchar_t kP1RestartGuardFileName[] = L"ui-restart-guard.txt";
+
+static std::mutex g_p1WatchdogMutex;
+static HANDLE g_p1WatchdogThread = nullptr;
+static HANDLE g_p1WatchdogStopEvent = nullptr;
+// Set once on the init thread before the watchdog starts; read-only afterwards.
+static std::wstring g_p1RestartGuardPath;
+static std::atomic<bool> g_p1RestartAttempted{false};
+
+static bool P1KillSwitchOn() {
+    wchar_t value[8]{};
+    DWORD length = GetEnvironmentVariableW(L"WH_TRANSLATOR_DISABLE", value,
+                                           ARRAYSIZE(value));
+    return length > 0 && wcscmp(value, L"1") == 0;
+}
+
+// True only for the host this mod is meant for, and only when the sibling
+// windhawk.exe exists at the same path. The mod is injected by @include, but a
+// manual load into another process must never restart anything.
+static bool P1ResolveWindhawkRestartPath(std::wstring& windhawkPath) {
+    wchar_t buffer[MAX_PATH]{};
+    DWORD length = GetModuleFileNameW(nullptr, buffer, ARRAYSIZE(buffer));
+    if (length == 0 || length >= ARRAYSIZE(buffer)) {
+        return false;
+    }
+
+    std::wstring exePath;
+    try {
+        exePath.assign(buffer, length);
+    } catch (...) {
+        return false;
+    }
+
+    size_t slash = exePath.find_last_of(L"\\/");
+    if (slash == std::wstring::npos) {
+        return false;
+    }
+    std::wstring name = exePath.substr(slash + 1);
+    if (CompareStringOrdinal(name.c_str(), -1, L"windhawk-ui.exe", -1, TRUE) !=
+        CSTR_EQUAL) {
+        return false;
+    }
+
+    try {
+        windhawkPath.assign(exePath, 0, slash + 1);
+        windhawkPath += L"windhawk.exe";
+    } catch (...) {
+        return false;
+    }
+    return GetFileAttributesW(windhawkPath.c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+
+static bool P1ReadRestartGuard(unsigned long long& lastMs) {
+    lastMs = 0;
+    if (g_p1RestartGuardPath.empty()) {
+        return false;
+    }
+
+    HANDLE file = CreateFileW(g_p1RestartGuardPath.c_str(), GENERIC_READ,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+
+    char text[64]{};
+    DWORD read = 0;
+    BOOL ok = ReadFile(file, text, sizeof(text) - 1, &read, nullptr);
+    CloseHandle(file);
+    if (!ok || read == 0) {
+        return false;
+    }
+
+    char* end = nullptr;
+    unsigned long long value = std::strtoull(text, &end, 10);
+    if (!end || end == text) {
+        return false;
+    }
+    lastMs = value;
+    return true;
+}
+
+// Returns false when the guard cannot be recorded: the restart is then
+// suppressed rather than risk a loop that cannot be bounded.
+static bool P1WriteRestartGuard(unsigned long long nowMs) {
+    if (g_p1RestartGuardPath.empty()) {
+        Wh_Log(L"[p1] late-load guard: no storage path; restart suppressed");
+        return false;
+    }
+
+    std::string text = std::to_string(nowMs);
+    text.push_back('\n');
+    HANDLE file = CreateFileW(g_p1RestartGuardPath.c_str(), GENERIC_WRITE, 0,
+                              nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL,
+                              nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        Wh_Log(L"[p1] late-load guard: cannot open %s (%lu); restart suppressed",
+               g_p1RestartGuardPath.c_str(), GetLastError());
+        return false;
+    }
+
+    DWORD written = 0;
+    BOOL ok = WriteFile(file, text.data(), static_cast<DWORD>(text.size()),
+                        &written, nullptr);
+    CloseHandle(file);
+    if (!ok || written != text.size()) {
+        Wh_Log(L"[p1] late-load guard: write failed (%lu); restart suppressed",
+               GetLastError());
+        return false;
+    }
+    return true;
+}
+
+// Runs on the watchdog thread once, after the grace period.
+static void P1CheckLateLoad() {
+    // The environment path ran after this mod loaded: nothing to recover.
+    if (g_p0EnvCreationSeen.load(std::memory_order_acquire)) {
+        return;
+    }
+    if (!P1IsRunning()) {
+        return;
+    }
+    // The DLL is loaded only once a WebView2 environment exists. Without it
+    // the environment has simply not been created yet and the hook will see
+    // it.
+    if (!P0GetEmbeddedBrowserModule()) {
+        return;
+    }
+    if (P1KillSwitchOn()) {
+        Wh_Log(L"[p1] late load detected but WH_TRANSLATOR_DISABLE=1; not "
+               L"restarting");
+        return;
+    }
+
+    std::wstring windhawkPath;
+    if (!P1ResolveWindhawkRestartPath(windhawkPath)) {
+        return;
+    }
+
+    unsigned long long now = P1CacheNowMs();
+    unsigned long long last = 0;
+    if (P1ReadRestartGuard(last) && last != 0 &&
+        (now < last || now - last < kP1RestartGuardMs)) {
+        unsigned long long elapsed = now >= last ? now - last : 0;
+        Wh_Log(L"[p1] late-load guard: a restart was triggered %llu ms ago; "
+               L"not restarting again",
+               static_cast<unsigned long long>(elapsed));
+        return;
+    }
+
+    if (g_p1RestartAttempted.exchange(true, std::memory_order_acq_rel)) {
+        return;
+    }
+
+    // The teardown sets Stopping before it joins this thread, so a watchdog
+    // that races an unload stops here instead of restarting the UI.
+    if (!P1IsRunning()) {
+        return;
+    }
+
+    if (!P1WriteRestartGuard(now)) {
+        return;
+    }
+
+    Wh_Log(L"[p1] late load: windhawk-ui.exe already had its WebView2 "
+           L"environment before this mod was loaded; restarting %s -restart",
+           windhawkPath.c_str());
+
+    std::wstring commandLine = L"\"" + windhawkPath + L"\" -restart";
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    if (!CreateProcessW(windhawkPath.c_str(), &commandLine[0], nullptr, nullptr,
+                        FALSE, 0, nullptr, nullptr, &startup, &process)) {
+        Wh_Log(L"[p1] late-load restart failed (%lu)", GetLastError());
+        return;
+    }
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+}
+
+static DWORD WINAPI P1LateLoadWatchdogProc(void* parameter) {
+    HANDLE stop = static_cast<HANDLE>(parameter);
+    if (WaitForSingleObject(stop, kP1LateLoadDelayMs) != WAIT_TIMEOUT) {
+        return 0;
+    }
+    try {
+        P1CheckLateLoad();
+    } catch (...) {
+        Wh_Log(L"[p1] exception in the late-load watchdog");
+    }
+    return 0;
+}
+
+static bool P1StartLateLoadWatchdog() {
+    if (!P1IsRunning()) {
+        return false;
+    }
+
+    if (!P1ResolveStorageFile(kP1RestartGuardFileName,
+                              g_p1RestartGuardPath)) {
+        Wh_Log(L"[p1] late-load watchdog: no storage path; the restart guard "
+               L"is unavailable");
+    }
+
+    HANDLE stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!stop) {
+        Wh_Log(L"[p1] late-load watchdog: event creation failed (%lu)",
+               GetLastError());
+        return false;
+    }
+
+    HANDLE thread =
+        CreateThread(nullptr, 0, &P1LateLoadWatchdogProc, stop, 0, nullptr);
+    if (!thread) {
+        Wh_Log(L"[p1] late-load watchdog: thread creation failed (%lu)",
+               GetLastError());
+        CloseHandle(stop);
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(g_p1WatchdogMutex);
+        g_p1WatchdogThread = thread;
+        g_p1WatchdogStopEvent = stop;
+    }
+    Wh_Log(L"[p1] late-load watchdog started (delay=%lu ms)",
+           static_cast<unsigned long>(kP1LateLoadDelayMs));
+    return true;
+}
+
+// Signals the watchdog and joins it. Idempotent; Wh_ModBeforeUninit is the
+// only caller. The join is INFINITE on purpose: the thread must not outlive
+// this image. It is bounded because the thread is either waiting on the stop
+// event or finishing one CreateProcessW call.
+static void P1StopWatchdog() {
+    HANDLE thread = nullptr;
+    HANDLE stop = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_p1WatchdogMutex);
+        thread = g_p1WatchdogThread;
+        g_p1WatchdogThread = nullptr;
+        stop = g_p1WatchdogStopEvent;
+        g_p1WatchdogStopEvent = nullptr;
+        if (stop) {
+            SetEvent(stop);
+        }
+    }
+
+    if (thread) {
+        WaitForSingleObject(thread, INFINITE);
+        CloseHandle(thread);
+    }
+    if (stop) {
+        CloseHandle(stop);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Mod entry points
 // ---------------------------------------------------------------------------
 
@@ -9077,11 +9374,7 @@ BOOL Wh_ModInit() {
                GetLastError());
     }
 
-    wchar_t disableValue[8]{};
-    DWORD disableLength =
-        GetEnvironmentVariableW(L"WH_TRANSLATOR_DISABLE", disableValue,
-                                ARRAYSIZE(disableValue));
-    bool disabled = disableLength > 0 && wcscmp(disableValue, L"1") == 0;
+    bool disabled = P1KillSwitchOn();
 
     Wh_Log(L"mod init: pid=%lu exe=%.200s kill-switch=%s",
            static_cast<unsigned long>(GetCurrentProcessId()), exePath,
@@ -9134,6 +9427,12 @@ BOOL Wh_ModInit() {
         return FALSE;
     }
 
+    // A new mod instance: only an environment created from here on counts as
+    // "the hook fired". Without this reset, toggling the mod off and on in the
+    // same process would leave the existing WebView2 unwrapped and the
+    // watchdog would never recover it.
+    g_p0EnvCreationSeen.store(false, std::memory_order_release);
+
     // Running is set before the hook is installed: an environment creation
     // that races Wh_ModInit must see the mod as live.
     g_p1Lifecycle.store(P1Lifecycle::Running, std::memory_order_release);
@@ -9149,6 +9448,11 @@ BOOL Wh_ModInit() {
 
     Wh_Log(L"[p0] GetProcAddress hooked; waiting for WebView2 environment "
            L"creation");
+
+    // The hook only catches environments created from here on. If the UI
+    // already had one, restart it once after a short grace period; see the
+    // late-load watchdog above.
+    P1StartLateLoadWatchdog();
     return TRUE;
 }
 
@@ -9176,6 +9480,12 @@ void Wh_ModBeforeUninit() {
     P1Lifecycle previous =
         g_p1Lifecycle.exchange(P1Lifecycle::Stopping,
                                std::memory_order_acq_rel);
+
+    // 0) Join the late-load watchdog before anything else. The lifecycle is
+    //    already Stopping, so a watchdog that wakes up now cannot restart the
+    //    UI; the stop event shortens its five-second wait.
+    P1StopWatchdog();
+
     if (previous == P1Lifecycle::Stopped) {
         Wh_Log(L"[p0] already stopped; nothing to do");
         // This is the only early return that does not reach the decision below.
@@ -9189,14 +9499,14 @@ void Wh_ModBeforeUninit() {
         return;
     }
 
-    // 0) If a dispatch-window creation is in flight, wait for it to settle
+    // 1) If a dispatch-window creation is in flight, wait for it to settle
     //    before deciding what to tear down. The creator either publishes the
     //    window (Ready) or sees Stopping, destroys its own window and reports
     //    None. This is what keeps the unloader from setting Stopped while a
     //    window whose WndProc points into this image is still being created.
     P1WaitForDispatchCreation();
 
-    // 1) Stop the worker pool and the cache saver, both joined with INFINITE.
+    // 2) Stop the worker pool and the cache saver, both joined with INFINITE.
     //    A request is bounded by timeoutMs, so the wait ends; after it, no
     //    worker can return into this image. A failure here is a DEFECT and is
     //    passed to the decision below: a worker may still be running.
@@ -9210,7 +9520,7 @@ void Wh_ModBeforeUninit() {
                L"quiescence cannot be proven");
     }
 
-    // 2) The WebView2 teardown runs on the UI thread that owns the objects.
+    // 3) The WebView2 teardown runs on the UI thread that owns the objects.
     //    SendMessageW returns only after that thread left our WndProc with
     //    every callback object released and the window gone, or with a
     //    recorded failure. Every failure path inside it records a verdict; an
@@ -9221,13 +9531,13 @@ void Wh_ModBeforeUninit() {
         Wh_Log(L"[p0] DEFECT: exception in the UI-thread teardown");
     }
 
-    // 3) The single unload decision. It re-reads the counters, combines them
+    // 4) The single unload decision. It re-reads the counters, combines them
     //    with the recorded teardown verdict, the sticky non-UI wrapper call
     //    flag and the thread-stop result, and either proves the unload or takes
     //    a loader reference that keeps this image resident.
     P1UnloadDecision decision = P1DecideUnload(threadsStopped);
 
-    // 4) Drop the key material.
+    // 5) Drop the key material.
     try {
         P1ClearKeyCache();
     } catch (...) {
