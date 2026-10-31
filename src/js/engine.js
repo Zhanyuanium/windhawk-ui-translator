@@ -1554,6 +1554,9 @@
   }
 
   function resetForSource(u, serialized) {
+    // Parts built for the previous source are dead; release them before the
+    // unit replaces its list, or they would keep the unit in entry.parts.
+    detachUnitParts(u);
     // Downstream keys use the normalised source; the DOM keeps its whitespace.
     const source = normalizeSource(serialized.text);
     const edge = u.mode === 'swap' ? splitEdgeTokens(source) : { text: source, lead: '', trail: '' };
@@ -1715,12 +1718,31 @@
     return true;
   }
 
+  // Remove a unit's parts from the shared registry entries that still list
+  // them. A completed entry with no parts is the session's translation
+  // registry, and a pending one still completes into it, so the entry itself
+  // stays; only the references to this unit go.
+  function detachUnitParts(u) {
+    if (!u || !u.parts) return;
+    for (const part of u.parts) {
+      const entry = part.entry;
+      if (!entry || !entry.parts) continue;
+      const at = entry.parts.indexOf(part);
+      if (at !== -1) entry.parts.splice(at, 1);
+    }
+  }
+
   function dropUnit(u) {
     if (!u) return;
     if (u.hoverTimer) clearTimeout(u.hoverTimer);
     if (u.leaveTimer) clearTimeout(u.leaveTimer);
     u.hoverTimer = 0;
     u.leaveTimer = 0;
+    // Release the unit from every registry entry that still lists its parts.
+    // Otherwise a closed modal's unit and DOM stay reachable through
+    // state.textEntries after a request that was not served from the cache.
+    detachUnitParts(u);
+    u.parts = [];
     try {
       if (u.mode === 'swap') restoreSwapText(u);
       if (u.clone) u.clone.remove();
@@ -1990,13 +2012,30 @@
     const units = new Set();
     const live = [];
     for (const p of entry.parts) {
+      const u = p.unit;
+      // A part whose unit was dropped, is no longer registered, or whose host
+      // has left the document is dead: release it instead of reviving it. A
+      // host that comes back is re-sourced by the next scan from this entry.
+      const dead =
+        !u ||
+        !u.el ||
+        !u.el.isConnected ||
+        !state.units.has(u) ||
+        !u.parts ||
+        u.parts.indexOf(p) === -1;
+      if (dead) {
+        // Do not leave a dead part on its unit either: the next scan must see
+        // that the unit has no pending output and re-source it.
+        if (u && u.parts) {
+          const at = u.parts.indexOf(p);
+          if (at !== -1) u.parts.splice(at, 1);
+        }
+        continue;
+      }
       p.translated = translated;
       p.state = 3;
-      // A part whose unit was dropped or re-sourced is dead: release it.
-      if (p.unit && p.unit.parts && p.unit.parts.indexOf(p) !== -1) {
-        live.push(p);
-        units.add(p.unit);
-      }
+      live.push(p);
+      units.add(u);
     }
     entry.parts = live;
     for (const u of units) maybeFinishUnit(u);

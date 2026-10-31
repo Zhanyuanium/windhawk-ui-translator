@@ -2332,6 +2332,101 @@ async function updateSurfacesCase() {
   );
   env.check('no changelog content remains in the document', !doc.querySelector('[data-testid="mod-update-changelog-content"]'));
 
+  // The single-mod run modal is reached from the changelog dialog, but it must
+  // translate on its own: both the wizard and the dialog are closed here.
+  env.check(
+    'the run modal opens with the wizard and dialog closed',
+    !doc.querySelector('[data-testid="mod-updates-modal"]') &&
+      !doc.querySelector('[data-testid="mod-update-details-modal"]')
+  );
+  const runBaseUnits = api.stats().units;
+  const runBaseClones = doc.querySelectorAll('[data-wh-clone="1"]').length;
+  fixture.openUpdateRunModal(doc, 'Better Dialogs', 'running');
+  await env.wait(900);
+
+  const runModal = doc.querySelector('[data-testid="mod-update-run-modal"]');
+  const runTitle = doc.getElementById('update-run-title');
+  env.check(
+    'the run modal title is translated with the wizard and dialog closed',
+    !!runTitle && env.hasCJK(env.text(runTitle)),
+    runTitle && env.text(runTitle)
+  );
+  env.check(
+    'the run modal title carries a swap unit',
+    !!runTitle &&
+      runTitle.getAttribute('data-wh-swapped') === '1' &&
+      runTitle.hasAttribute('data-wh-unit'),
+    runTitle && runTitle.outerHTML
+  );
+  env.check(
+    'opening the run modal adds exactly one unit',
+    api.stats().units === runBaseUnits + 1,
+    runBaseUnits + ' -> ' + api.stats().units
+  );
+  env.check(
+    'a name is never cloned: the run modal adds no clone',
+    doc.querySelectorAll('[data-wh-clone="1"]').length === runBaseClones,
+    runBaseClones + ' -> ' + doc.querySelectorAll('[data-wh-clone="1"]').length
+  );
+  env.check(
+    'the run modal title reuses the known translation, no second request',
+    env.requestCount('Better Dialogs') === 1,
+    String(env.requestCount('Better Dialogs'))
+  );
+
+  // React flips the run state on the same wrapper; the title must stay.
+  runModal.setAttribute('data-status', 'updated');
+  await env.wait(300);
+  env.check(
+    'the run modal title stays translated when the run finishes',
+    env.hasCJK(env.text(runTitle)) && runTitle.getAttribute('data-wh-swapped') === '1',
+    runTitle && runTitle.outerHTML
+  );
+  env.check(
+    'finishing the run issues no request',
+    env.requestCount('Better Dialogs') === 1,
+    String(env.requestCount('Better Dialogs'))
+  );
+
+  // React may replace the title's text node on a re-render.
+  runTitle.textContent = 'Better Dialogs';
+  await env.wait(900);
+  env.check(
+    'a rebuilt title text node is translated again',
+    env.hasCJK(env.text(runTitle)) && runTitle.getAttribute('data-wh-swapped') === '1',
+    runTitle && runTitle.outerHTML
+  );
+  env.check(
+    'a rebuilt title keeps the same single unit',
+    api.stats().units === runBaseUnits + 1,
+    runBaseUnits + ' -> ' + api.stats().units
+  );
+  env.check(
+    'a rebuilt title issues no request',
+    env.requestCount('Better Dialogs') === 1,
+    String(env.requestCount('Better Dialogs'))
+  );
+
+  fixture.closeUpdateRunModal(doc);
+  await env.wait(900);
+  env.check('closing the run modal removes its title', !doc.getElementById('update-run-title'));
+  env.check(
+    'closing the run modal drops its unit',
+    api.stats().units === runBaseUnits,
+    runBaseUnits + ' -> ' + api.stats().units
+  );
+  env.check(
+    'the retained run title element is unmarked',
+    !runTitle.hasAttribute('data-wh-unit') && !runTitle.hasAttribute('data-wh-swapped'),
+    runTitle.outerHTML
+  );
+  env.check(
+    'closing the run modal leaves no clone behind',
+    doc.querySelectorAll('[data-wh-clone="1"]').length === runBaseClones,
+    runBaseClones + ' -> ' + doc.querySelectorAll('[data-wh-clone="1"]').length
+  );
+  env.check('no engine problems after the run modal', env.problems.length === 0, env.problems.join(' | '));
+
   // Reopen both portals: the same strings come from the session registry.
   fixture.openUpdateWizard(doc);
   await env.wait(900);
@@ -2376,21 +2471,6 @@ async function updateSurfacesCase() {
     env.text(doc.getElementById('changelog-heading'))
   );
   env.check('no engine problems logged', env.problems.length === 0, env.problems.join(' | '));
-
-  // The single-mod run modal: the same name again, but only while installing.
-  fixture.openUpdateRunModal(doc, 'Better Dialogs', 'running');
-  await env.wait(900);
-  const runTitle = doc.getElementById('update-run-title');
-  env.check('run modal title translated', !!runTitle && env.hasCJK(env.text(runTitle)), runTitle && env.text(runTitle));
-  env.check(
-    'run modal title reuses the known translation, no second request',
-    env.requestCount('Better Dialogs') === 1,
-    String(env.requestCount('Better Dialogs'))
-  );
-  fixture.closeUpdateRunModal(doc);
-  await env.wait(600);
-  env.check('closing the run modal removes its title', !doc.getElementById('update-run-title'));
-  env.check('no engine problems after the run modal', env.problems.length === 0, env.problems.join(' | '));
   env.report();
   env.window.close();
 
