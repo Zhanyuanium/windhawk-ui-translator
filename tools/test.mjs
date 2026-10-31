@@ -2511,6 +2511,141 @@ async function updateSurfacesCase() {
 }
 
 // ---------------------------------------------------------------------------
+// detached: a reply that lands while its host is out of the document
+// ---------------------------------------------------------------------------
+
+// Emit an Edge reply for a request the test held back: one translation per
+// text, in request order.
+function emitEdgeReply(env, record, texts) {
+  const body = JSON.stringify(texts.map((text) => ({ translations: [{ text: text }] })));
+  env.emit(TAG + SEP + 'http' + SEP + record.id + SEP + '200' + SEP + '0' + SEP + body);
+}
+
+// Yield to the reply's promise chain without running a timer, so the host can
+// stay out of the document while completeEntry processes its reply.
+async function drainMicrotasks(turns) {
+  for (let i = 0; i < (turns || 40); i++) await Promise.resolve();
+}
+
+// A cold name is requested, its modal is removed before the reply is delivered,
+// the reply is processed while the title is detached, and the same element is
+// put back. The next scan must re-serialize the title and consume the completed
+// translation from the session registry: translated, no second request, no
+// error. A multi-part unit (a long title with an inline span, split into two
+// source parts) must be invalidated as a whole the same way.
+async function detachedReplyCase() {
+  let holdNext = false;
+  const held = [];
+  const env = mount(JSDOM, {
+    html: fixture.updateSurfaces(),
+    respond: (record) => {
+      if (!holdNext) return null;
+      holdNext = false;
+      held.push(record);
+      return { drop: true };
+    }
+  });
+  const { doc } = env;
+  await env.wait(1400);
+
+  const api = env.api();
+  env.check('engine up', !!api && api.stats().settingsSeen, JSON.stringify(api && api.stats()));
+
+  // Single part: the run modal title is the only new name on screen.
+  holdNext = true;
+  fixture.openUpdateRunModal(doc, 'Cold Run Name', 'running');
+  const slot = doc.getElementById('update-run-slot');
+  const root = doc.getElementById('update-run-root');
+  const title = doc.getElementById('update-run-title');
+  const requested = await env.waitFor(() => held.length === 1, 3000);
+  env.check('detached reply: the cold name is requested', requested, JSON.stringify(allRequests(env)));
+  const record = held[0] || { id: '0' };
+  const replyTexts = edgeTexts(record).map(defaultTranslate);
+
+  // Remove the modal, then deliver and process the reply while it is away.
+  root.remove();
+  env.check('detached reply: the title is out of the document', !title.isConnected);
+  emitEdgeReply(env, record, replyTexts);
+  await drainMicrotasks(40);
+  env.check(
+    'detached reply: the reply is processed while the host is away',
+    !title.isConnected && !env.hasCJK(env.text(title)),
+    title.isConnected + ': ' + env.text(title)
+  );
+
+  // React mounts the same element again; the scan must render from the registry.
+  slot.appendChild(root);
+  const rendered = await env.waitFor(
+    () => title.isConnected && env.hasCJK(env.text(title)) && title.getAttribute('data-wh-swapped') === '1',
+    3000
+  );
+  env.check('detached reply: the reattached name is translated', rendered, env.text(title));
+  env.check('detached reply: the reattached name keeps its unit', !!title.getAttribute('data-wh-unit'), title.outerHTML);
+  env.check(
+    'detached reply: the reattached name reuses the reply without a request',
+    env.requestCount('Cold Run Name') === 1,
+    String(env.requestCount('Cold Run Name'))
+  );
+
+  // Multi-part: a title long enough to split into two source parts, with an
+  // inline span in the second half.
+  const longA = 'Cold multipart opening sentence. '.repeat(25);
+  const longB = 'Cold multipart closing sentence. '.repeat(25);
+  held.length = 0;
+  holdNext = true;
+  fixture.openUpdateRunModal(doc, longA + '<span>' + longB + '</span>', 'running');
+  const multiRoot = doc.getElementById('update-run-root');
+  const multiTitle = doc.getElementById('update-run-title');
+  const multiRequested = await env.waitFor(() => held.length === 1, 3000);
+  const multiRecord = held[0] || { id: '0' };
+  const multiParts = edgeTexts(multiRecord);
+  env.check(
+    'detached reply: the multi-part title is split into parts',
+    multiRequested && multiParts.length >= 2,
+    String(multiParts.length)
+  );
+  const multiReplyTexts = multiParts.map(defaultTranslate);
+
+  multiRoot.remove();
+  env.check(
+    'detached reply: the multi-part title is out of the document',
+    !multiTitle.isConnected && !!multiTitle.querySelector('span')
+  );
+  emitEdgeReply(env, multiRecord, multiReplyTexts);
+  await drainMicrotasks(40);
+  env.check(
+    'detached reply: the multi-part reply is processed while the host is away',
+    !multiTitle.isConnected && !env.hasCJK(env.text(multiTitle)),
+    env.text(multiTitle)
+  );
+
+  slot.appendChild(multiRoot);
+  const multiRendered = await env.waitFor(
+    () =>
+      multiTitle.isConnected &&
+      env.hasCJK(env.text(multiTitle)) &&
+      multiTitle.getAttribute('data-wh-swapped') === '1',
+    3000
+  );
+  env.check('detached reply: the reattached multi-part title is translated', multiRendered, env.text(multiTitle));
+  env.check(
+    'detached reply: the multi-part title keeps its inline span',
+    !!multiTitle.querySelector('span') && env.hasCJK(env.text(multiTitle.querySelector('span'))),
+    multiTitle.innerHTML.slice(0, 200)
+  );
+  env.check(
+    'detached reply: every multi-part piece reuses the reply without a request',
+    multiParts.every((text) => env.requestCount(text) === 1),
+    multiParts.map((text) => env.requestCount(text)).join(',')
+  );
+  env.check('detached reply: no engine problems', env.problems.length === 0, env.problems.join(' | '));
+  env.report();
+  env.window.close();
+
+  return counts(env);
+}
+
+// ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------
 const CASES = [
@@ -2524,6 +2659,7 @@ const CASES = [
   ['teardown: restore and silence', teardownCase],
   ['claim: claim rules and hidden copies', claimCase],
   ['updates: update wizard and changelog dialog', updateSurfacesCase],
+  ['detached: a reply that lands while its host is out of the document', detachedReplyCase],
   ['gesture: two-finger double tap and shortcut cycles', gestureCase]
 ];
 

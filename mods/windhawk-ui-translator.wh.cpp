@@ -2094,6 +2094,52 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
     }
   }
 
+  // The host left the document while its reply was in flight: the translation
+  // now lives in the session registry, but this unit's parts and serialized
+  // source no longer describe anything it can render. Clear them so the next
+  // scan re-serializes the DOM (instead of concluding the text is unchanged)
+  // and consumes the completed entry without another request. A unit with any
+  // dead part is invalidated as a whole: keeping the remaining parts would
+  // leave it with a partial source.
+  function invalidateUnit(u) {
+    if (!u || !state.units.has(u)) return;
+    // A unit that already rendered goes back to its original text first, so
+    // the rescan serializes the DOM as React authored it.
+    if (u.mode === 'swap' && u.rendered) restoreSwapText(u);
+    if (u.clone) {
+      try {
+        u.clone.remove();
+      } catch (_) {
+        /* ignore */
+      }
+      u.clone = null;
+    }
+    detachUnitParts(u);
+    u.parts = [];
+    u.source = '';
+    u.sourceHash = '';
+    u.refs = [];
+    u.segs = [];
+    u.leadTokens = '';
+    u.trailTokens = '';
+    u.translatedOk = false;
+    u.noop = false;
+    u.rendered = false;
+    u.skip = false;
+    u.appliedShowOrig = null;
+    u.hoverOrig = false;
+    u.tapOrig = false;
+    if (u.hoverTimer) {
+      clearTimeout(u.hoverTimer);
+      u.hoverTimer = 0;
+    }
+    if (u.leaveTimer) {
+      clearTimeout(u.leaveTimer);
+      u.leaveTimer = 0;
+    }
+    state.renderQueue.delete(u);
+  }
+
   function dropUnit(u) {
     if (!u) return;
     if (u.hoverTimer) clearTimeout(u.hoverTimer);
@@ -2372,12 +2418,15 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
     entry.state = 3;
     entry.provider = provider || activeProvider();
     const units = new Set();
+    const stale = new Set();
     const live = [];
-    for (const p of entry.parts) {
+    for (const p of Array.from(entry.parts)) {
       const u = p.unit;
       // A part whose unit was dropped, is no longer registered, or whose host
       // has left the document is dead: release it instead of reviving it. A
-      // host that comes back is re-sourced by the next scan from this entry.
+      // host that comes back (a modal unmounted while its reply was in flight)
+      // is re-sourced by the next scan from this entry, so the whole unit is
+      // invalidated rather than left with a partial list of parts.
       const dead =
         !u ||
         !u.el ||
@@ -2386,12 +2435,7 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
         !u.parts ||
         u.parts.indexOf(p) === -1;
       if (dead) {
-        // Do not leave a dead part on its unit either: the next scan must see
-        // that the unit has no pending output and re-source it.
-        if (u && u.parts) {
-          const at = u.parts.indexOf(p);
-          if (at !== -1) u.parts.splice(at, 1);
-        }
+        if (u) stale.add(u);
         continue;
       }
       p.translated = translated;
@@ -2399,7 +2443,11 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
       live.push(p);
       units.add(u);
     }
-    entry.parts = live;
+    // Invalidate after the loop: releasing a stale unit's parts mutates the
+    // entry lists, and every part of that unit must go, not just the first.
+    for (const u of stale) units.delete(u);
+    entry.parts = live.filter((p) => !stale.has(p.unit));
+    for (const u of stale) invalidateUnit(u);
     for (const u of units) maybeFinishUnit(u);
   }
 
