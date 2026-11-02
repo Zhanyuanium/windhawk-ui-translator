@@ -52,7 +52,8 @@ localized by Windhawk itself.
   registry setting), then the page's `lang` attribute, then the Windows display
   language. In the current 2.0 alpha the page's `lang` is static English, so
   that second step rarely helps; a portable build has no reliable registry
-  value and may not follow the instance's own language.
+  value and may not follow the instance's own language. A change to Windhawk's
+  language takes effect on the next page load or settings change.
 
 ## Providers and the API key
 

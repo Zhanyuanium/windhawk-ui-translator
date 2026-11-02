@@ -210,10 +210,11 @@ the message-only window on the WebView2 UI thread, and waits on an event. The
 handler runs on the UI thread: it tells the page to restore its text, removes
 the document-created script, removes the event handlers, restores the
 environment vtable and releases the webview reference. The event is signalled
-only after that cleanup completed and the two outstanding counters — wrappers
-handed to WebView2 and held `AddScript` references — both reached zero on the
-UI thread. The UI thread keeps running Tauri's own message loop while the
-engine thread waits, so the completions arrive without a nested message pump.
+once that cleanup completed and the two outstanding counters — wrappers handed
+to WebView2 and held `AddScript` references — have reached zero; the decrement
+may happen on any thread. The UI thread keeps running Tauri's own message loop
+while the engine thread waits, so the completions arrive without a nested
+message pump.
 A final blocking `SendMessageW` destroys the dispatch window and unregisters its
 class; it returns after the UI thread came back through its own message loop,
 and the module's entry points never pump messages, so it cannot be inside one
@@ -223,14 +224,15 @@ Failure handling has two classes. A cleanup step that fails — a worker or cach
 saver join, the window destroy, the class unregister — is not treated as
 success: the unload does not return rather than let the image go while its code
 may still be reachable. A wrapper released on a thread other than the UI thread
-is different: the rest of that thread's frame cannot be proven gone, but
-waiting for it forever would block Windhawk's engine thread. The mod therefore
-waits a 2 s grace window measured from that last off-thread release and then
-continues with a `DEFECT` log. This is an accepted residual race: a thread
-paused for longer than the window could still resume into unmapped code. If the
-first 2 s timeout happens before the teardown completed or while the counters
-are non-zero, the mod falls back to an unbounded wait, so a late off-thread
-release can still leave the unload waiting.
+is different: the counters show that the tracked references were released, but
+not that the function that ran the last `Release` has returned, and waiting for
+it forever would block Windhawk's engine thread. After the wait, the mod
+therefore sleeps out a 2 s grace measured from that last off-thread release and
+then continues with a `DEFECT` log. This is an accepted residual race: a thread
+paused for longer than the window could still resume into unmapped code. The
+wait before the grace has no deadline, so a completion that never fires, a
+stalled worker or UI thread, or a failed cleanup step still leaves the unload
+waiting.
 
 There is no self-pin: the mod never takes a loader reference to keep itself
 resident.
