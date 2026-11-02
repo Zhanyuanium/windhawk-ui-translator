@@ -2722,6 +2722,381 @@ async function timeoutDefaultCase() {
 }
 
 // ---------------------------------------------------------------------------
+// metadata: the details header metadata row is not a summary
+// ---------------------------------------------------------------------------
+async function metadataCase() {
+  const env = mount(JSDOM, { html: fixture.detailsHeaderFlat() });
+  const { doc } = env;
+
+  await env.wait(1600);
+
+  const api = env.api();
+  env.check('metadata: engine up', !!api && api.stats().settingsSeen, JSON.stringify(api && api.stats()));
+
+  const name = doc.getElementById('flat-name');
+  const desc = doc.getElementById('flat-desc');
+  const author = doc.getElementById('flat-author');
+  const process = doc.getElementById('flat-process');
+  const version = doc.getElementById('flat-version');
+  const extra = doc.getElementById('flat-extra');
+  const sent = allRequests(env);
+
+  env.check('metadata: details name still translates', env.hasCJK(env.text(name)), env.text(name));
+  env.check(
+    'metadata: description with inline markup still translates',
+    env.hasCJK(env.text(desc)),
+    env.text(desc)
+  );
+  env.check('metadata: author stays English', env.text(author) === 'FireBlade', env.text(author));
+  env.check('metadata: process label stays English', env.text(process) === 'All processes', env.text(process));
+  env.check('metadata: version stays English', env.text(version) === '1.1', env.text(version));
+  env.check(
+    'metadata: no metadata item claims a unit',
+    [author, process, version, extra].every(
+      (el) => !el.hasAttribute('data-wh-unit') && !el.hasAttribute('data-wh-swapped')
+    ),
+    [author, process, version, extra].map((el) => el.outerHTML).join(' | ')
+  );
+  env.check(
+    'metadata: nothing requests the author or the process scope',
+    !sent.some((text) => text.indexOf('FireBlade') !== -1 || text.indexOf('All processes') !== -1),
+    sent.join(' | ')
+  );
+  // The disqualifier is the icon font, not only the metadata class: this
+  // Typography carries a FontAwesome svg but no ModMetadataLine class and must
+  // stay a non-summary.
+  env.check('metadata: a bare icon Typography stays English', env.text(extra) === 'Diagnostics', env.text(extra));
+  env.check(
+    'metadata: a bare icon Typography claims no unit',
+    !extra.hasAttribute('data-wh-unit') && !extra.hasAttribute('data-wh-swapped'),
+    extra.outerHTML
+  );
+  env.check('metadata: no engine problems logged', env.problems.length === 0, env.problems.join(' | '));
+  env.report();
+  env.window.close();
+
+  // The explore tile reuses the same metadata component outside any card head.
+  const tile = mount(JSDOM, { html: fixture.exploreTileMetadata() });
+  const tdoc = tile.doc;
+  await tile.wait(1600);
+
+  const typedName = tdoc.getElementById('typed-name');
+  const typedDesc = tdoc.getElementById('typed-desc');
+  const typedAuthor = tdoc.getElementById('typed-author');
+  const typedProcess = tdoc.getElementById('typed-process');
+  const tileSent = allRequests(tile);
+
+  tile.check('metadata tile: name translated', tile.hasCJK(tile.text(typedName)), tile.text(typedName));
+  tile.check('metadata tile: description translated', tile.hasCJK(tile.text(typedDesc)), tile.text(typedDesc));
+  tile.check('metadata tile: author stays English', tile.text(typedAuthor) === 'm417z', tile.text(typedAuthor));
+  tile.check('metadata tile: process stays English', tile.text(typedProcess) === 'explorer.exe', tile.text(typedProcess));
+  tile.check(
+    'metadata tile: metadata items claim no unit',
+    [typedAuthor, typedProcess].every(
+      (el) => !el.hasAttribute('data-wh-unit') && !el.hasAttribute('data-wh-swapped')
+    ),
+    typedAuthor.outerHTML + ' | ' + typedProcess.outerHTML
+  );
+  tile.check(
+    'metadata tile: no request carries the metadata line',
+    !tileSent.some((text) => text.indexOf('m417z') !== -1 || text.indexOf('explorer.exe') !== -1),
+    tileSent.join(' | ')
+  );
+  tile.check('metadata tile: no engine problems logged', tile.problems.length === 0, tile.problems.join(' | '));
+  tile.report();
+  tile.window.close();
+
+  // A plain inline svg (an antd icon in markdown) is not an icon font, so the
+  // description it sits in stays a summary; the FontAwesome item beside it is
+  // still refused.
+  const inline = mount(JSDOM, {
+    html:
+      '<!doctype html><html lang="en"><head></head><body>' +
+      '<div class="ant-listy" id="svg-tile-grid">' +
+      '<div class="ant-listy-item">' +
+      '<div class="ant-card"><div class="ant-card-body"><div class="ant-card-meta">' +
+      '<div class="ant-card-meta-description ant-typography" id="plain-svg-desc">' +
+      '<svg viewBox="0 0 16 16"><path d="M0 0h16v16z"/></svg>' +
+      'Improves dialog boxes.</div>' +
+      '<div class="ModMetadataLine-sc-svg"><span class="ant-typography" id="icon-font-meta">' +
+      '<svg data-icon="faUser" viewBox="0 0 16 16"><path d="M0 0h16v16z"/></svg>m417z</span></div>' +
+      '</div></div></div></div></div></body></html>'
+  });
+  await inline.wait(1600);
+
+  const inlineDesc = inline.doc.getElementById('plain-svg-desc');
+  const inlineMeta = inline.doc.getElementById('icon-font-meta');
+  inline.check(
+    'metadata inline svg: a plain svg summary is claimed and translates',
+    inlineDesc.hasAttribute('data-wh-unit') &&
+      inlineDesc.getAttribute('data-wh-swapped') === '1' &&
+      inline.hasCJK(inline.text(inlineDesc)),
+    inlineDesc.outerHTML
+  );
+  inline.check(
+    'metadata inline svg: the summary keeps its inline svg',
+    !!inlineDesc.querySelector('svg:not([data-icon])'),
+    inlineDesc.outerHTML
+  );
+  inline.check(
+    'metadata inline svg: a data-icon row claims no unit',
+    !inlineMeta.hasAttribute('data-wh-unit') && !inlineMeta.hasAttribute('data-wh-swapped'),
+    inlineMeta.outerHTML
+  );
+  inline.check('metadata inline svg: no engine problems logged', inline.problems.length === 0, inline.problems.join(' | '));
+  inline.report();
+  inline.window.close();
+
+  return counts(env, tile, inline);
+}
+
+// ---------------------------------------------------------------------------
+// settings page: Windhawk's own Settings route is not mod content
+// ---------------------------------------------------------------------------
+async function appSettingsCase() {
+  const env = mount(JSDOM, { html: fixture.appSettings() });
+  const { doc } = env;
+
+  await env.wait(1600);
+
+  const page = doc.getElementById('app-settings');
+  const sent = allRequests(env);
+  const title = doc.getElementById('app-language-title');
+  const desc = doc.getElementById('app-language-desc');
+  const value = doc.getElementById('app-language-value');
+  const optionEn = doc.getElementById('app-option-en');
+  const optionPt = doc.getElementById('app-option-pt');
+
+  env.check(
+    'settings page: no unit is claimed inside the page',
+    !page.querySelector('[data-wh-unit],[data-wh-swapped],[data-wh-clone]'),
+    page.innerHTML
+  );
+  env.check('settings page: row title stays English', env.text(title) === 'Language', env.text(title));
+  env.check(
+    'settings page: row description stays English',
+    env.text(desc) === 'The language of the Windhawk user interface',
+    env.text(desc)
+  );
+  env.check(
+    'settings page: advanced row stays English',
+    env.text(doc.getElementById('app-advanced-title')) === 'Advanced settings' &&
+      env.text(doc.getElementById('app-advanced-desc')) === 'These settings are for advanced users',
+    env.text(doc.getElementById('app-advanced-title')) + ' | ' + env.text(doc.getElementById('app-advanced-desc'))
+  );
+  env.check(
+    'settings page: a switch label stays untouched',
+    env.text(doc.getElementById('app-updates-switch')) === 'On' &&
+      !doc.getElementById('app-updates-switch').hasAttribute('data-wh-unit'),
+    doc.getElementById('app-updates-switch').outerHTML
+  );
+  env.check('settings page: the closed select value stays English', env.text(value) === 'English', env.text(value));
+  // The dropdown is portaled to <body>, outside the denied page subtree, and
+  // must be skipped while the app Settings page is the mounted route.
+  env.check(
+    'settings page: portaled options stay English',
+    env.text(optionEn) === 'English' && env.text(optionPt) === 'Portuguese (Brazil)',
+    env.text(optionEn) + ' | ' + env.text(optionPt)
+  );
+  env.check(
+    'settings page: portaled options claim no unit',
+    [optionEn, optionPt].every(
+      (el) => !el.hasAttribute('data-wh-unit') && !el.hasAttribute('data-wh-swapped')
+    ),
+    optionEn.outerHTML + ' | ' + optionPt.outerHTML
+  );
+  env.check(
+    'settings page: nothing requests its text',
+    !sent.some(
+      (text) =>
+        text === 'Language' ||
+        text === 'The language of the Windhawk user interface' ||
+        text === 'Check for updates' ||
+        text === 'English' ||
+        text === 'Portuguese (Brazil)'
+    ),
+    sent.join(' | ')
+  );
+  env.check('settings page: no engine problems logged', env.problems.length === 0, env.problems.join(' | '));
+  env.report();
+  env.window.close();
+
+  // A mod settings page (a different route) keeps translating, dropdown
+  // options included: the app-page rule must not leak.
+  const mod = mount(JSDOM, { html: fixture.compactSettings() });
+  const mdoc = mod.doc;
+  await mod.wait(1600);
+
+  const modTitle = mdoc.getElementById('compact-title-text');
+  const modDesc = mdoc.getElementById('compact-desc');
+  mod.check('mod settings: title still translates', mod.hasCJK(mod.text(modTitle)), mod.text(modTitle));
+  mod.check('mod settings: description still translates', mod.hasCJK(mod.text(modDesc)), mod.text(modDesc));
+
+  fixture.openSelectDropdown(mdoc, 'Where the mouse cursor is');
+  await mod.wait(600);
+  const modOption = mdoc.querySelector('#select-dropdown .ant-select-item-option-content');
+  mod.check('mod settings: dropdown option still translates', mod.hasCJK(mod.text(modOption)), mod.text(modOption));
+  mod.check('mod settings: no engine problems logged', mod.problems.length === 0, mod.problems.join(' | '));
+  mod.report();
+  mod.window.close();
+
+  return counts(env, mod);
+}
+
+// ---------------------------------------------------------------------------
+// auto: target resolution order is uiLanguage, document lang, navigator
+// ---------------------------------------------------------------------------
+async function autoLanguageCase() {
+  const env = mount(JSDOM, {
+    html: fixture.tileGrid(),
+    lang: 'fr-FR',
+    settings: { targetLang: 'auto', uiLanguage: 'pt-BR' }
+  });
+
+  await env.waitFor(() => env.api() && env.api().stats().settingsSeen, 4000);
+  await env.wait(300);
+
+  env.check(
+    'auto target: uiLanguage beats the document language',
+    env.api().stats().targetLang === 'pt-BR',
+    env.api().stats().targetLang
+  );
+
+  const before = env.requestCount('Better Dialogs');
+  env.pushSettings(Object.assign({}, env.settings, { targetLang: 'auto', uiLanguage: 'de' }));
+  await env.waitFor(() => env.api().stats().targetLang === 'de', 3000);
+  await env.waitFor(() => env.requestCount('Better Dialogs') > before, 3000);
+  env.check(
+    'auto target: a uiLanguage change resolves and retranslates',
+    env.requestCount('Better Dialogs') > before,
+    before + ' -> ' + env.requestCount('Better Dialogs')
+  );
+
+  env.pushSettings(Object.assign({}, env.settings, { targetLang: 'en-GB', uiLanguage: 'de' }));
+  await env.waitFor(() => env.api().stats().targetLang === 'en', 3000);
+  env.check(
+    'auto target: an explicit target beats uiLanguage',
+    env.api().stats().targetLang === 'en',
+    env.api().stats().targetLang
+  );
+
+  env.pushSettings(Object.assign({}, env.settings, { targetLang: 'auto', uiLanguage: '' }));
+  await env.waitFor(() => env.api().stats().targetLang === 'fr', 3000);
+  env.check(
+    'auto target: document lang follows an empty uiLanguage',
+    env.api().stats().targetLang === 'fr',
+    env.api().stats().targetLang
+  );
+
+  env.doc.documentElement.lang = '';
+  env.pushSettings(Object.assign({}, env.settings, { targetLang: 'auto', uiLanguage: '' }));
+  await env.waitFor(() => env.api().stats().targetLang === 'en', 3000);
+  env.check(
+    'auto target: navigator language is the last fallback',
+    env.api().stats().targetLang === 'en',
+    env.api().stats().targetLang
+  );
+  env.check('auto target: no engine problems logged', env.problems.length === 0, env.problems.join(' | '));
+  env.report();
+  env.window.close();
+  return counts(env);
+}
+
+// ---------------------------------------------------------------------------
+// target: pt-BR and pt-PT are separate targets, cache entries and URLs
+// ---------------------------------------------------------------------------
+async function portugueseTargetCase() {
+  const llm = mount(JSDOM, {
+    html: fixture.tileGrid(),
+    settings: Object.assign({}, LLM_SETTINGS, { targetLang: 'pt-BR', cacheEnabled: true })
+  });
+  await llm.waitFor(() => llm.api() && llm.api().stats().translated >= 4, 4000);
+  await llm.wait(200);
+
+  const brRequest = llm.llmRequests()[0] || { body: '{}' };
+  const brPayload = llmPayload(brRequest) || { body: {}, user: {} };
+  const brSystem = brPayload.body.messages ? brPayload.body.messages[0].content : '';
+  llm.check(
+    'pt: an explicit pt-BR target is kept',
+    llm.api().stats().targetLang === 'pt-BR',
+    llm.api().stats().targetLang
+  );
+  llm.check(
+    'pt: the LLM payload names pt-BR',
+    brPayload.user.targetLanguage === 'pt-BR',
+    String(brPayload.user.targetLanguage)
+  );
+  llm.check('pt: the system prompt names pt-BR', brSystem.indexOf('pt-BR') !== -1, brSystem);
+
+  const before = llm.llmRequests().length;
+  llm.pushSettings(Object.assign({}, llm.settings, { targetLang: 'pt-PT' }));
+  await llm.waitFor(
+    () => llm.api().stats().targetLang === 'pt-PT' && llm.llmRequests().length > before,
+    4000
+  );
+  await llm.wait(200);
+
+  const requests = llm.llmRequests();
+  const ptRequest = requests[requests.length - 1] || { body: '{}' };
+  const ptPayload = llmPayload(ptRequest) || { body: {}, user: {} };
+  const ptSystem = ptPayload.body.messages ? ptPayload.body.messages[0].content : '';
+  llm.check(
+    'pt: switching to pt-PT resolves the European target',
+    llm.api().stats().targetLang === 'pt-PT',
+    llm.api().stats().targetLang
+  );
+  llm.check(
+    'pt: the LLM payload names pt-PT',
+    ptPayload.user.targetLanguage === 'pt-PT',
+    String(ptPayload.user.targetLanguage)
+  );
+  llm.check('pt: the system prompt names pt-PT', ptSystem.indexOf('pt-PT') !== -1, ptSystem);
+
+  // The key shape is unchanged: provider | model | tag | base | glossary | hash,
+  // so the two targets are two independent entries in the mod's store.
+  const brKey = cacheKey('llm', 'test-model', 'pt-BR', 'Better Dialogs', LLM_SETTINGS.llmBaseUrl);
+  const ptKey = cacheKey('llm', 'test-model', 'pt-PT', 'Better Dialogs', LLM_SETTINGS.llmBaseUrl);
+  llm.check('pt: pt-BR writes a pt-BR cache key', llm.cache.has(brKey), llm.cacheLookups.join(' | '));
+  llm.check('pt: pt-PT writes a pt-PT cache key', llm.cache.has(ptKey), llm.cacheLookups.join(' | '));
+  llm.check(
+    'pt: neither target falls back to the collapsed "pt" key',
+    !llm.cacheLookups.some((key) => key.indexOf('|pt|') !== -1),
+    llm.cacheLookups.join(' | ')
+  );
+  llm.check('pt: no engine problems logged', llm.problems.length === 0, llm.problems.join(' | '));
+  llm.report();
+  llm.window.close();
+
+  const edge = mount(JSDOM, {
+    html: fixture.tileGrid(),
+    settings: { targetLang: 'pt-BR' }
+  });
+  await edge.waitFor(() => edge.api() && edge.api().stats().translated >= 4, 4000);
+
+  const edgeUrl = () => {
+    const list = edge.httpRequests.filter(
+      (request) => request.url.indexOf('edge.microsoft.com/translate/translatetext') !== -1
+    );
+    return list.length ? list[list.length - 1].url : '';
+  };
+
+  edge.check('pt: the Edge URL carries pt-BR', edgeUrl().indexOf('to=pt-BR&') !== -1, edgeUrl());
+
+  const edgeBefore = edge.httpRequests.length;
+  edge.pushSettings(Object.assign({}, edge.settings, { targetLang: 'pt-PT' }));
+  await edge.waitFor(
+    () => edge.api().stats().targetLang === 'pt-PT' && edge.httpRequests.length > edgeBefore,
+    4000
+  );
+  edge.check('pt: the Edge URL carries pt-PT', edgeUrl().indexOf('to=pt-PT&') !== -1, edgeUrl());
+  edge.check('pt: no engine problems logged on Edge', edge.problems.length === 0, edge.problems.join(' | '));
+  edge.report();
+  edge.window.close();
+
+  return counts(llm, edge);
+}
+
+// ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------
 const CASES = [
@@ -2737,6 +3112,10 @@ const CASES = [
   ['updates: update wizard and changelog dialog', updateSurfacesCase],
   ['detached: a reply that lands while its host is out of the document', detachedReplyCase],
   ['gesture: two-finger double tap and shortcut cycles', gestureCase],
+  ['metadata: the details metadata row is not a summary', metadataCase],
+  ['settings page: Windhawk\'s own settings stay English', appSettingsCase],
+  ['target: auto follows uiLanguage, document lang, navigator', autoLanguageCase],
+  ['target: pt-BR and pt-PT stay distinct', portugueseTargetCase],
   ['target: CJK sources under CJK and Latin targets', cjkTargetCase],
   ['timeout: the page-side default', timeoutDefaultCase]
 ];

@@ -115,6 +115,9 @@
   function defaultSettings() {
     return {
       targetLang: 'auto',
+      // Windhawk's own UI language (its Settings\Language value), verbatim:
+      // the page's <html lang> is static and never follows the app.
+      uiLanguage: '',
       provider: 'auto',
       llmBaseUrl: '',
       llmModel: '',
@@ -543,7 +546,14 @@
   ]);
   const DENY_ANCESTOR_SEL =
     'script,style,noscript,template,textarea,input,select,option,code,pre,kbd,' +
-    '.cm-editor,.monaco-editor,[contenteditable],[translate="no"]';
+    '.cm-editor,.monaco-editor,[contenteditable],[translate="no"],' +
+    // The mod details header's metadata row (version, author, process scope).
+    // styled-components keeps the component name in the class, and the row is
+    // proper nouns, versions and process names, never prose.
+    '[class*="ModMetadataLine"],[class*="MetadataText"],[class*="MetadataItemWrapper"],' +
+    // Windhawk's own Settings page is application UI, not mod content. Its
+    // rows carry `app-setting` ids which the settings substring would claim.
+    '[data-testid="settings-page"]';
 
   const CJK_RE = /[\u2e80-\u2eff\u3040-\u30ff\u31f0-\u31ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]/;
   const URL_RE = /^https?:\/\/\S+$/i;
@@ -670,6 +680,25 @@
     }
   }
 
+  // Windhawk's own Settings route. Its select dropdowns portal to <body>, so
+  // they sit outside the denied page subtree; the route is exclusive with a
+  // mod's settings page, so anything portaled while it is mounted is app UI.
+  function appSettingsMounted() {
+    try {
+      return !!document.querySelector('[data-testid="settings-page"]');
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function inSelectDropdown(el) {
+    try {
+      return !!el.closest('.ant-select-dropdown');
+    } catch (_) {
+      return false;
+    }
+  }
+
   function settingsRejectReason(el) {
     try {
       if (el.closest('[' + ATTR_CLONE + '="1"]')) return 'inside our clone';
@@ -704,11 +733,21 @@
     }
   }
 
-  // Metadata rows are Typography too but carry an icon and are proper nouns.
-  // Only inside the card head does that disqualify a host.
+  // Card-head rules use the broad test: any svg inside a head is decoration.
   function hasSvgIcon(el) {
     try {
       return !!el.querySelector('svg');
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // Metadata rows are Typography too, but their icons are FontAwesome icon
+  // fonts (`svg[data-icon]`) and the row is proper nouns, never prose. A plain
+  // inline svg (an antd icon in markdown) is not an icon font and stays prose.
+  function hasIconFont(el) {
+    try {
+      return !!el.querySelector('svg[data-icon]');
     } catch (_) {
       return false;
     }
@@ -893,6 +932,12 @@
 
   function eligibleHost(el, kind) {
     if (!el || el.nodeType !== 1) return false;
+    // A Typography that carries an icon font is a metadata row (author, process
+    // scope, version), not a summary - with or without the card-head wrapper.
+    // The metadata class deny is the primary rule; this catches the same row
+    // outside it. Inline markup such as <strong>, <a> or a plain <svg> is not
+    // an icon font and stays prose.
+    if (kind === 'summary' && isTypography(el) && hasIconFont(el)) return false;
     if (!isCardHeadHost(el)) return true;
     if (kind === 'name') return !isTypography(el) && !hasSvgIcon(el);
     return isTypography(el) && !hasSvgIcon(el);
@@ -1060,6 +1105,9 @@
           // A hidden copy nested in a title is never its own unit; the visible
           // tooltip portal outside the title is claimed like any description.
           if (sel === DESC_TEXT_SEL && el.closest(TITLE_SEL)) continue;
+          // The app Settings page's own dropdowns are portaled out of the
+          // denied subtree; its options are app UI, not mod settings.
+          if (appSettingsMounted() && inSelectDropdown(el)) continue;
           const reason = settingsRejectReason(el);
           if (reason) continue;
           // A title with no text but the excluded copy gets no unit.
@@ -3166,11 +3214,20 @@
     if (low === 'zh' || low.indexOf('zh-') === 0) {
       return /hant|tw|hk|mo/.test(low) ? 'zh-Hant' : 'zh-Hans';
     }
+    // Portuguese has two separate provider targets, European and Brazilian, so
+    // the region is part of the target rather than noise to drop. A bare "pt"
+    // stays "pt" and every other tag keeps the primary-subtag rule.
+    if (low === 'pt-br') return 'pt-BR';
+    if (low === 'pt-pt') return 'pt-PT';
     return low.split('-')[0];
   }
 
   function resolveTarget(raw) {
     if (raw && String(raw).toLowerCase() !== 'auto') return normalizeLang(raw);
+    // Windhawk's own UI language is the most reliable signal: index.html is
+    // static `<html lang="en">` and the frontend never updates it.
+    const ui = normalizeLang(state.settings.uiLanguage);
+    if (ui) return ui;
     let lang = '';
     try {
       lang = document.documentElement ? document.documentElement.lang : '';
@@ -3207,6 +3264,8 @@
   function rebuildKeysChanged(prev, next) {
     return (
       prev.targetLang !== next.targetLang ||
+      // With targetLang "auto", a UI language change moves the resolved target.
+      prev.uiLanguage !== next.uiLanguage ||
       prev.provider !== next.provider ||
       prev.llmBaseUrl !== next.llmBaseUrl ||
       prev.llmModel !== next.llmModel ||

@@ -29,6 +29,8 @@ export const SEP = '\x1f';
 
 export const DEFAULT_SETTINGS = {
   targetLang: 'zh-CN',
+  // Windhawk's own UI language; empty means "not reported".
+  uiLanguage: '',
   provider: 'edge',
   llmBaseUrl: '',
   llmModel: '',
@@ -471,6 +473,83 @@ export const fixture = {
   },
 
   /**
+   * The real details header (`ModMetadataLine`) shape: the same meta title and
+   * name div as detailsHeader(), but without the `.ant-card-head` wrapper, and
+   * every metadata item is the icon-bearing Typography the component renders
+   * inside a Tooltip. The author and process label are proper nouns and must
+   * stay English while the name div and the description Typography translate.
+   * The last item has an icon but no metadata class: the icon alone must
+   * disqualify a summary.
+   */
+  detailsHeaderFlat() {
+    return page(`
+      <section data-testid="mod-details">
+        <div class="ant-card" id="flat-card">
+          <div class="ant-card-body">
+            <div class="ant-card-meta">
+              <div class="ant-card-meta-detail">
+                <div class="ant-card-meta-title">
+                  <div class="sc-firstline">
+                    <div id="flat-name">Better Dialogs</div>
+                    <div class="sc-chip" id="flat-id">better-dialogs</div>
+                  </div>
+                  <div class="sc-metadata">
+                    <div class="ModMetadataLine__MetadataItemWrapper-sc-1">
+                      <span class="ant-typography ModMetadataLine__MetadataText-sc-2" id="flat-version"><svg data-icon="faTag" viewBox="0 0 16 16"><path d="M0 0h16v16z"/></svg>1.1</span>
+                    </div>
+                    <div class="ModMetadataLine__MetadataItemWrapper-sc-3">
+                      <span class="ant-typography ModMetadataLine__MetadataText-sc-4" id="flat-author"><svg data-icon="faUser" viewBox="0 0 16 16"><path d="M0 0h16v16z"/></svg>FireBlade</span>
+                    </div>
+                    <div class="ModMetadataLine__MetadataItemWrapper-sc-5">
+                      <span class="ant-typography ModMetadataLine__MetadataText-sc-6" id="flat-process"><svg data-icon="faCrosshairs" viewBox="0 0 16 16"><path d="M0 0h16v16z"/></svg>All processes</span>
+                    </div>
+                    <div class="sc-item">
+                      <span class="ant-typography" id="flat-extra"><svg data-icon="faCode" viewBox="0 0 16 16"><path d="M0 0h16v16z"/></svg>Diagnostics</span>
+                    </div>
+                  </div>
+                  <span class="ant-typography sc-desc" id="flat-desc">Improves <strong>Windows</strong> dialog boxes.</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>`);
+  },
+
+  /**
+   * Explore tile in the real ModCard shape where the metadata line is the same
+   * icon Typography component: the name is the mod-card-title Typography and
+   * the author/process items are siblings of it, not inside a card head.
+   */
+  exploreTileMetadata() {
+    return page(`
+      <div class="ant-listy" id="typed-tile-grid">
+        <div class="ant-card ant-listy-item" id="typed-card">
+          <div class="ant-card-body">
+            <div class="ant-card-meta">
+              <div class="ant-card-meta-detail">
+                <div class="ant-card-meta-title" id="typed-meta">
+                  <div class="sc-mod-card-title" data-testid="mod-card-title">
+                    <span class="ant-typography sc-ellipsis" id="typed-name">Taskbar Clock</span>
+                  </div>
+                  <div class="ModMetadataLine-sc-7" id="typed-meta-line">
+                    <div class="ModMetadataLine__MetadataItemWrapper-sc-8">
+                      <span class="ant-typography ModMetadataLine__MetadataText-sc-9" id="typed-author"><svg data-icon="faUser" viewBox="0 0 16 16"><path d="M0 0h16v16z"/></svg>m417z</span>
+                    </div>
+                    <div class="ModMetadataLine__MetadataItemWrapper-sc-10">
+                      <span class="ant-typography ModMetadataLine__MetadataText-sc-11" id="typed-process"><svg data-icon="faCrosshairs" viewBox="0 0 16 16"><path d="M0 0h16v16z"/></svg>explorer.exe</span>
+                    </div>
+                  </div>
+                </div>
+                <div class="ant-card-meta-description" id="typed-desc">Replaces the tray clock.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>`);
+  },
+
+  /**
    * Compact settings density: the title lives in a styled-components title
    * wrapper with a SettingTitleText span, the description is a sibling of the
    * title row, and the closed select mirrors antd 6 (value/placeholder in
@@ -540,6 +619,59 @@ export const fixture = {
           </div>
         </div></div>
       </section>`);
+  },
+
+  /**
+   * Windhawk's own Settings route (`#/settings`). Its rows carry `app-setting`
+   * testids, which the engine's `[data-testid*="setting"]` classification reads
+   * as mod settings unless the page is denied. The select dropdown is portaled
+   * to <body>, outside the page subtree, so it needs its own rule.
+   */
+  appSettings() {
+    return page(`
+      <section data-testid="settings-page" id="app-settings">
+        <h1 id="app-settings-heading">Settings</h1>
+        <div class="windhawk-row" data-testid="app-setting" data-setting-key="language">
+          <div class="windhawk-row-meta">
+            <div class="windhawk-row-meta-title" id="app-language-title">Language</div>
+            <div class="windhawk-row-meta-description" id="app-language-desc">The language of the Windhawk user interface</div>
+          </div>
+          <div class="sc-control">
+            <div class="ant-select ant-select-single">
+              <div class="ant-select-content" id="app-language-value">English</div>
+            </div>
+          </div>
+        </div>
+        <div class="windhawk-row" data-testid="app-setting" data-setting-key="updates">
+          <div class="windhawk-row-meta">
+            <div class="windhawk-row-meta-title" id="app-updates-title">Check for updates</div>
+            <div class="windhawk-row-meta-description" id="app-updates-desc">Check for new versions on startup</div>
+          </div>
+          <div class="sc-control">
+            <button type="button" class="ant-switch ant-switch-checked" data-testid="app-setting-switch" id="app-updates-switch" role="switch" aria-checked="true"><span class="ant-switch-inner">On</span></button>
+          </div>
+        </div>
+        <div class="windhawk-row" data-testid="app-setting" data-setting-key="theme">
+          <div class="windhawk-row-meta">
+            <div class="windhawk-row-meta-title" id="app-theme-title">Theme</div>
+            <div class="windhawk-row-meta-description" id="app-theme-desc">Follow the system setting</div>
+          </div>
+        </div>
+        <div class="windhawk-row" data-testid="settings-advanced" id="app-advanced">
+          <div class="windhawk-row-meta">
+            <div class="windhawk-row-meta-title" id="app-advanced-title">Advanced settings</div>
+            <div class="windhawk-row-meta-description" id="app-advanced-desc">These settings are for advanced users</div>
+          </div>
+        </div>
+      </section>
+      <div class="ant-select-dropdown" id="app-select-dropdown">
+        <div class="ant-select-item ant-select-item-option">
+          <div class="ant-select-item-option-content" id="app-option-en">English</div>
+        </div>
+        <div class="ant-select-item ant-select-item-option">
+          <div class="ant-select-item-option-content" id="app-option-pt">Portuguese (Brazil)</div>
+        </div>
+      </div>`);
   },
 
   /**
@@ -1002,6 +1134,10 @@ export function mount(JSDOM, options) {
   });
   const { window } = dom;
   const doc = window.document;
+
+  // Tests may need the document language the real app ships (static "en") to
+  // differ from the fallback they exercise; set it before the engine boots.
+  if (options && options.lang !== undefined) doc.documentElement.lang = String(options.lang);
 
   const listeners = [];
   const requests = [];
