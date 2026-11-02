@@ -4257,18 +4257,17 @@ static bool P1IsRunning() {
 // Both counters share one lock. The engine thread waits for them to reach zero
 // after it asked the UI thread for the teardown: that is the point where no
 // wrapper and no held AddScript reference can call into this image any more.
-// WebView2 hands these objects back, and runs the completions that decrement
-// them, on the UI thread that created them; every decrement latches a release
-// seen on any other thread, and P1MaybeSignalTeardownLocked refuses to treat a
-// zero as the end of the teardown once that latch is set.
+// WebView2 normally hands these objects back, and runs the completions that
+// decrement them, on the UI thread that created them. A decrement seen on any
+// other thread still signals the event; it only arms the post-wait grace.
 static SRWLOCK g_p0OutstandingLock = SRWLOCK_INIT;
 static long g_p0OutstandingCallbacks = 0;      // g_p0OutstandingLock
 static long g_p0OutstandingAddScriptRefs = 0;  // g_p0OutstandingLock
 
-// Manual-reset event, created in Wh_ModInit. Signalled once the teardown was
-// requested, the UI-thread handler completed, and both counters reached zero
-// on the UI thread; Wh_ModBeforeUninit waits on it before it asks the UI thread
-// to destroy the dispatch window.
+// Manual-reset event, created in Wh_ModInit. Signalled as soon as the teardown
+// was requested, the UI-thread handler completed, and both counters reached
+// zero, on any thread; Wh_ModBeforeUninit waits on it before it asks the UI
+// thread to destroy the dispatch window.
 static HANDLE g_p1TeardownEvent = nullptr;
 static std::atomic<bool> g_p1TeardownRequested{false};
 
@@ -4284,18 +4283,21 @@ static std::atomic<bool> g_p1TeardownInProgress{false};
 static std::atomic<bool> g_p1TeardownCompleted{false};
 
 // Sticky: a wrapper was released on a thread that is not the WebView2 UI
-// thread. That frame cannot be proven to have returned, so the event is never
-// signalled; the flag also makes the DEFECT log once. The unload waits a
-// bounded two seconds for that frame, logs a DEFECT and continues.
+// thread. That frame cannot be proven to have returned, so the unload waits a
+// 2 s grace after the event, measured from that release, and logs a DEFECT. The
+// flag does not gate the event itself.
 static std::atomic<bool> g_p1ReleaseOffThread{false};
 
-// Tick of the most recent off-thread decrement. The bounded window runs from
-// the last release, not from the start of the unload's wait, so a release near
-// the end of the first two seconds still gets its whole window. Zero means no
-// off-thread release was recorded.
+// Tick of the most recent off-thread decrement. The grace is measured from that
+// release, not from the moment the event returns, so the releasing frame gets
+// its whole window even when the teardown finished long before the wait. Zero
+// means no off-thread release was recorded.
 static std::atomic<ULONGLONG> g_p1LastOffThreadReleaseTick{0};
 
-// Must be called with g_p0OutstandingLock held.
+// Must be called with g_p0OutstandingLock held. Signals on a zero reached on
+// any thread: the counters and the completion flag are the whole condition, and
+// an off-thread release is covered by the post-wait grace in
+// P1TeardownUiThread rather than by withholding the event.
 static void P1MaybeSignalTeardownLocked() {
     // Only a zero reached after the unload asked for the teardown says
     // anything about the teardown.
@@ -4305,20 +4307,6 @@ static void P1MaybeSignalTeardownLocked() {
     if (g_p0OutstandingCallbacks != 0 || g_p0OutstandingAddScriptRefs != 0) {
         return;
     }
-
-    // The mod's contract is that WebView2 releases these objects, and runs the
-    // completions that decrement them, on the UI thread that created them. A
-    // zero reached anywhere else does not prove that the releasing frame has
-    // returned, so it must not signal.
-    DWORD uiThread = g_p1UiThreadId.load(std::memory_order_acquire);
-    DWORD current = GetCurrentThreadId();
-    if (uiThread == 0 || current != uiThread) {
-        return;
-    }
-    if (g_p1ReleaseOffThread.load(std::memory_order_acquire)) {
-        return;
-    }
-
     if (!g_p1TeardownCompleted.load(std::memory_order_acquire)) {
         return;
     }
@@ -4326,9 +4314,9 @@ static void P1MaybeSignalTeardownLocked() {
 }
 
 // Must be called with g_p0OutstandingLock held. Every decrement runs this: a
-// wrapper released on a thread that is not the WebView2 UI thread means that
-// frame cannot be proven to have returned, so the event is not signalled and
-// the unload falls back to its bounded wait.
+// wrapper released on a thread that is not the WebView2 UI thread cannot be
+// proven to have returned, so it arms the post-wait grace and logs the defect
+// once. It does not withhold the event.
 static void P1LatchReleaseOffThreadLocked() {
     DWORD uiThread = g_p1UiThreadId.load(std::memory_order_acquire);
     DWORD current = GetCurrentThreadId();
@@ -4336,14 +4324,15 @@ static void P1LatchReleaseOffThreadLocked() {
         return;
     }
     // Recorded on every off-thread decrement, not only the first one: the
-    // unload's bounded window is measured from the last of them, and the log
-    // below may take long enough to matter.
+    // unload's grace is measured from the last of them, and the log may take
+    // long enough to matter.
     g_p1LastOffThreadReleaseTick.store(GetTickCount64(),
                                        std::memory_order_release);
     if (!g_p1ReleaseOffThread.exchange(true, std::memory_order_acq_rel)) {
         Wh_Log(L"[p1] DEFECT: a wrapper was released on thread %lu, not the "
                L"known UI thread %lu; that frame cannot be proven to have "
-               L"returned, so the teardown event will not be signalled",
+               L"returned, so the unload waits a 2 s grace after the teardown "
+               L"event",
                static_cast<unsigned long>(current),
                static_cast<unsigned long>(uiThread));
     }
@@ -4793,6 +4782,14 @@ static void P0PatchEnvironment(void* env) {
                env, static_cast<void*>(originalVtbl));
         return;
     }
+    // The copy below reads kEnvVtblSlots entries from a vtable that has about
+    // 30, so the last address it touches must still be inside the module image.
+    // P0IsModuleCode compares the allocation base, so a data address in the
+    // image passes.
+    if (!P0IsModuleCode(originalVtbl + kEnvVtblSlots - 1)) {
+        Wh_Log(L"[p0] env=%p: vtable range leaves the module; not patching", env);
+        return;
+    }
 
     void* slot3 = P0GetRawSlot(env, kEnvSlotCreateController);
     void* slot21 = P0GetRawSlot(env, kEnvSlotCreateControllerWithOptions);
@@ -5200,7 +5197,7 @@ static constexpr UINT kP1MsgDrainReplies = WM_APP + 0x51;
 static constexpr UINT kP1MsgSettingsChanged = WM_APP + 0x52;
 // Posted teardown request. Its handler runs on the UI thread, releases every
 // object this mod owns there and then signals g_p1TeardownEvent once the
-// cleanup completed and both outstanding counters are zero on the UI thread. It
+// cleanup completed and both outstanding counters are zero (on any thread). It
 // is posted, not sent: the UI thread's own message loop keeps dispatching
 // WebView2 completions after the handler returns, and those completions are
 // what release the last wrappers.
@@ -6357,10 +6354,11 @@ static void P1RequestSettingsPush() {
 // Runs steps 1-4 of the teardown on the WebView2 UI thread, inside the
 // dispatch window's WndProc. It sets g_p1TeardownCompleted only after
 // P0RestoreEnvironment(true) returned, then asks P1MaybeSignalTeardownLocked to
-// signal g_p1TeardownEvent if both counters are already zero. There is no
-// message pump and no window destroy here: the UI thread's own message loop
-// keeps dispatching WebView2 completions after this function returns, and those
-// completions release the last wrappers and held AddScript references.
+// signal g_p1TeardownEvent if both counters are already zero; that signal does
+// not depend on the calling thread. There is no message pump and no window
+// destroy here: the UI thread's own message loop keeps dispatching WebView2
+// completions after this function returns, and those completions release the
+// last wrappers and held AddScript references.
 static void P1RunTeardownOnUiThread() {
     if (g_p1TeardownInProgress.load(std::memory_order_acquire)) {
         // A second teardown request is a no-op; the first one owns the work.
@@ -6466,15 +6464,16 @@ static void P1BlockUnload(const wchar_t* reason) {
 // Called from Wh_ModBeforeUninit (engine thread) after the state became
 // Stopping and P1WaitForDispatchCreation returned. It asks the UI thread for
 // the teardown, waits until no wrapper and no held AddScript reference is left
-// (or, after an off-thread release, two seconds since that last release), and
-// only then destroys the dispatch window with a blocking SendMessageW.
+// (then, after an off-thread release, sleeps out a 2 s grace measured from that
+// release), and only then destroys the dispatch window with a blocking
+// SendMessageW.
 //
 // The send proves that the UI thread's own message loop dispatched the destroy
 // handler and came back to the sender after the teardown handler completed.
 // Because this module's entry points do not pump messages, the UI thread cannot
 // be inside one when it returns here. It does not prove that every outer stack
-// in this image has exited; the callback counters and the UI-thread check are
-// what cover the callback frames.
+// in this image has exited; the callback counters cover the callback frames, and
+// the grace covers an off-thread release, which they cannot prove.
 static void P1TeardownUiThread() {
     if (g_p1Lifecycle.load(std::memory_order_acquire) == P1Lifecycle::Stopped) {
         return;
@@ -6554,75 +6553,34 @@ static void P1TeardownUiThread() {
                 L"the dispatch window is gone before the teardown ran");
         }
     }
-    // An off-thread release latches g_p1ReleaseOffThread, and from then on
-    // P1MaybeSignalTeardownLocked never signals the event: the releasing frame
-    // cannot be proven to have returned. Waiting INFINITE would hang the
-    // unload forever, so the wait is bounded. The accepted case is: the
-    // teardown itself completed, both counters are zero and the last
-    // off-thread decrement is at least 2 s old; the only gap left then is that
-    // frame, and it is accepted and logged as a defect. Every other shape
-    // keeps the old blocking wait: a slow teardown can still signal, and a
-    // latched one is a real cleanup failure that must block.
-    DWORD wait = WaitForSingleObject(g_p1TeardownEvent, 2000);
-    bool acceptedOffThreadRelease = false;
-    if (wait == WAIT_TIMEOUT) {
-        // Re-read on every pass until the window really elapsed. The window is
-        // measured from the last off-thread release, not from the start of
-        // this wait, so a release that lands during the window restarts it; a
-        // one-shot remainder would leave that release with far less than 2 s.
-        // The counters and the tick are re-read until the accepted shape holds;
-        // once the teardown completed no new wrapper is handed over, so a zero
-        // snapshot is final and no later decrement can be missed.
-        bool acceptOffThreadRelease = false;
-        for (;;) {
-            bool teardownCompleted;
-            long outstandingCallbacks;
-            long outstandingAddScriptRefs;
-            AcquireSRWLockExclusive(&g_p0OutstandingLock);
-            teardownCompleted =
-                g_p1TeardownCompleted.load(std::memory_order_acquire);
-            outstandingCallbacks = g_p0OutstandingCallbacks;
-            outstandingAddScriptRefs = g_p0OutstandingAddScriptRefs;
-            ReleaseSRWLockExclusive(&g_p0OutstandingLock);
-
-            if (!g_p1ReleaseOffThread.load(std::memory_order_acquire) ||
-                !teardownCompleted || outstandingCallbacks != 0 ||
-                outstandingAddScriptRefs != 0) {
-                // Not the accepted case. The event can never be signalled
-                // while the off-thread latch is set, so this keeps the old
-                // blocking wait and a failure here blocks the unload below.
-                wait = WaitForSingleObject(g_p1TeardownEvent, INFINITE);
-                break;
-            }
-
-            ULONGLONG lastRelease =
-                g_p1LastOffThreadReleaseTick.load(std::memory_order_acquire);
-            if (lastRelease == 0) {
-                // No off-thread release was recorded; the first timeout
-                // stands, as it did before the window existed.
-                acceptOffThreadRelease = true;
-                break;
-            }
-            ULONGLONG now = GetTickCount64();
-            ULONGLONG elapsed = now >= lastRelease ? now - lastRelease : 0;
-            if (elapsed >= 2000) {
-                acceptOffThreadRelease = true;
-                break;
-            }
-            DWORD remaining = static_cast<DWORD>(2000 - elapsed);
-            Sleep(remaining < 50 ? remaining : 50);
-        }
-
-        if (acceptOffThreadRelease) {
-            Wh_Log(L"[p1] DEFECT: a wrapper was released off the UI "
-                   L"thread; waited at least 2 s since the last off-thread "
-                   L"release, continuing");
-            acceptedOffThreadRelease = true;
-        }
-    }
-    if (!acceptedOffThreadRelease && wait != WAIT_OBJECT_0) {
+    // The event is signalled as soon as the teardown completed and both
+    // counters are zero, on any thread, so a slow teardown or a pending
+    // completion still ends this wait when it finishes. A completion that never
+    // fires leaves the event unsignalled, and this waits forever.
+    DWORD wait = WaitForSingleObject(g_p1TeardownEvent, INFINITE);
+    if (wait != WAIT_OBJECT_0) {
         Wh_Log(L"[p1] WaitForSingleObject(teardown event) returned %lu", wait);
         P1BlockUnload(L"waiting for the teardown event failed");
+    }
+
+    // An off-thread release latches g_p1ReleaseOffThread. The zero counters
+    // show that the tracked references were released and their finalizers ran,
+    // not that the function that performed the last Release has returned, so
+    // the unload waits out a 2 s grace measured from that release. It is a
+    // delay after the wait, not a proof; the rest of that frame is a handful of
+    // instructions, and the gap is accepted and logged as a defect.
+    if (g_p1ReleaseOffThread.load(std::memory_order_acquire)) {
+        ULONGLONG lastRelease =
+            g_p1LastOffThreadReleaseTick.load(std::memory_order_acquire);
+        if (lastRelease != 0) {
+            ULONGLONG now = GetTickCount64();
+            ULONGLONG elapsed = now >= lastRelease ? now - lastRelease : 0;
+            if (elapsed < 2000) {
+                Sleep(static_cast<DWORD>(2000 - elapsed));
+            }
+        }
+        Wh_Log(L"[p1] DEFECT: a wrapper was released off the UI thread; "
+               L"continuing after the 2 s grace measured from that release");
     }
 
     AcquireSRWLockExclusive(&g_p0OutstandingLock);
@@ -6751,7 +6709,7 @@ static void P0ReleaseScriptWebView(P0ScriptHandler* handler) {
     P1QueueWebViewRelease(webView);
     // The decrement is the teardown notification: it latches an off-UI-thread
     // release, and when it empties the counters P1MaybeSignalTeardownLocked
-    // signals the event if the teardown completed on the UI thread.
+    // signals the event if the teardown completed.
     P0CountAddScriptRefReleased();
 }
 
