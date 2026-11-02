@@ -281,7 +281,8 @@ name. Google Translate is not offered.
   restarting only the tray icon is not enough.
 * Auto uses the installed Windhawk's language setting; when the registry value
   is unavailable it falls back to the page or OS language. Portable builds are
-  not guaranteed to follow their own instance's language.
+  not guaranteed to follow their own instance's language. A change to
+  Windhawk's language takes effect on the next page load or settings change.
 * If the UI fails to start: `windhawk.exe -safe-mode`, or
   `windhawk-cli.exe mod disable windhawk-ui-translator`.
 
