@@ -87,14 +87,18 @@ windhawk-ui.exe (Tauri/wry, STA UI thread)
 
 * Scanning is restricted to known content containers, with a generic fallback
   for English block hosts and a deny list (code, editors, our own nodes, URLs,
-  identifiers, versions, numbers, and text that already contains CJK when the
-  target language is itself CJK).
+  identifiers, versions, numbers, text that already contains CJK when the
+  target language is itself CJK, the details header's metadata row, and
+  Windhawk's own Settings page).
 * Inline markup is protected with the placeholder scheme ported from
   kiss-translator.
 * Batching: ≤20 segments / ≤10000 chars / 400 ms window, concurrency 4–6,
   retry 2× with backoff on 429/5xx.
-* Default target language follows the app: `document.documentElement.lang`,
-  falling back to `navigator.language` (the Windows display language).
+* Default target language follows Windhawk's own language setting
+  (`HKLM\SOFTWARE\Windhawk\Settings\Language`, read by the mod), then
+  `document.documentElement.lang`, then `navigator.language` (the Windows
+  display language). Portable builds have no registry value and fall back to
+  the page/OS language.
 * Cache: the mod owns the store, not the page (the page's origin storage is
   not used). An in-memory map under `Wh_GetModStoragePath()` is persisted by a
   single saver thread with a 2 s debounce; entries expire after
@@ -177,8 +181,7 @@ page.
 
 `scripts/dev.ps1` is the only script: `install` (administrator; compiles with
 `windhawk-cli mod install --file` and does not restart), `restart` and `log`
-(no elevation), `debug on|off` and `trace` (administrator, because mod
-settings live in HKLM). `install -AppRoot <dir>` compiles into a portable app
+(no elevation). `install -AppRoot <dir>` compiles into a portable app
 root instead of the real installation. README.md has the command table.
 
 ## Risks
@@ -214,11 +217,21 @@ engine thread waits, so the completions arrive without a nested message pump.
 A final blocking `SendMessageW` destroys the dispatch window and unregisters its
 class; it returns after the UI thread came back through its own message loop,
 and the module's entry points never pump messages, so it cannot be inside one
-when that happens. A cleanup step that fails is not treated as success: the
-unload does not return rather than unload code that may still be reachable.
+when that happens.
 
-There is no deadline and no self-pin: the mod never takes a loader reference to
-keep itself resident. A completion that never fires, or a release on a thread
-other than the UI thread, leaves the unload waiting instead of leaving code
-pointers into an unmapped image.
+Failure handling has two classes. A cleanup step that fails — a worker or cache
+saver join, the window destroy, the class unregister — is not treated as
+success: the unload does not return rather than let the image go while its code
+may still be reachable. A wrapper released on a thread other than the UI thread
+is different: the rest of that thread's frame cannot be proven gone, but
+waiting for it forever would block Windhawk's engine thread. The mod therefore
+waits a 2 s grace window measured from that last off-thread release and then
+continues with a `DEFECT` log. This is an accepted residual race: a thread
+paused for longer than the window could still resume into unmapped code. If the
+first 2 s timeout happens before the teardown completed or while the counters
+are non-zero, the mod falls back to an unbounded wait, so a late off-thread
+release can still leave the unload waiting.
+
+There is no self-pin: the mod never takes a loader reference to keep itself
+resident.
 

@@ -48,8 +48,11 @@ localized by Windhawk itself.
 * Translations are cached by the mod (not in the page's storage) for 30 days,
   capped at 8 MB with the oldest entries evicted first. The cache key includes
   the provider and model, so switching providers does not serve stale text.
-* The default target language follows Windhawk's UI language, then the
-  Windows display language.
+* The default target language follows Windhawk's UI language (the mod reads its
+  registry setting), then the page's `lang` attribute, then the Windows display
+  language. In the current 2.0 alpha the page's `lang` is static English, so
+  that second step rarely helps; a portable build has no reliable registry
+  value and may not follow the instance's own language.
 
 ## Providers and the API key
 

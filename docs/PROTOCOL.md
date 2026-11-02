@@ -93,11 +93,15 @@ A reply whose `requestId` the page no longer waits for is ignored.
 whtr1 \x1f settings \x1f <json>
 ```
 
-Keys: `targetLang`, `provider`, `llmBaseUrl`, `llmModel`, `llmKeySource`,
-`glossary`, `scopeReadme`, `scopeSettings`, `scopeChangelog`, `scopeModName`,
-`scopeModSummary`, `hoverDelayMs`, `shortcutToggle`, `gestureToggle`,
-`batchSize`, `batchChars`, `batchIntervalMs`, `concurrency`, `timeoutMs`,
-`cacheEnabled`, `cacheTtlDays`, `clearCache`.
+Keys: `targetLang`, `uiLanguage`, `provider`, `llmBaseUrl`, `llmModel`,
+`llmKeySource`, `glossary`, `scopeReadme`, `scopeSettings`, `scopeChangelog`,
+`scopeModName`, `scopeModSummary`, `hoverDelayMs`, `shortcutToggle`,
+`gestureToggle`, `batchSize`, `batchChars`, `batchIntervalMs`, `concurrency`,
+`timeoutMs`, `cacheEnabled`, `cacheTtlDays`, `clearCache`.
+
+`uiLanguage` is Windhawk's own UI language, read by the mod from its settings
+store and refreshed on every push; the page uses it only when `targetLang` is
+`auto`.
 
 The API key is never part of this payload.
 

@@ -20,7 +20,7 @@
 | `@include` | `windhawk-ui.exe` (flagged by the validator as a tool-mod host — see below) |
 | `@architecture` | `x86-64` |
 | `@license` | GPL-3.0 |
-| `@compilerOptions` | `-lole32 -luuid -ladvapi32 -lwinhttp -fms-extensions` |
+| `@compilerOptions` | `-lole32 -luuid -ladvapi32 -lwinhttp` |
 
 ## Publishing to the Windhawk mod collection
 
