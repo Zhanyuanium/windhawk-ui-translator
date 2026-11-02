@@ -2,14 +2,14 @@
 // @id              windhawk-ui-translator
 // @name            Windhawk UI Translator
 // @name:zh-CN      Windhawk 界面翻译
-// @description     Translates Windhawk mod content — names, summaries, READMEs, setting labels and changelogs — in place, sending page text to Microsoft's translation service by default
-// @description:zh-CN 就地翻译 Windhawk 的模组内容（名称、简介、说明文档、设置项与更新日志），默认会把页面文本发送到微软翻译服务
+// @description     Translates Windhawk mod content — names, summaries, READMEs, setting labels and changelogs — in place, sending page text to Microsoft's translation service by default. When enabled while the Windhawk UI is already running, it takes effect after that process is restarted.
+// @description:zh-CN 就地翻译 Windhawk 的模组内容（名称、简介、说明文档、设置项与更新日志），默认会把页面文本发送到微软翻译服务。在 Windhawk 界面已运行时启用本模组，需重启该进程后才会生效。
 // @version         0.1
 // @author          Zhanyuanium
 // @github          https://github.com/Zhanyuanium
 // @include         windhawk-ui.exe
 // @architecture    x86-64
-// @compilerOptions -lole32 -luuid -ladvapi32 -lwinhttp -fms-extensions
+// @compilerOptions -lole32 -luuid -ladvapi32 -lwinhttp
 // @license         GPL-3.0
 // ==/WindhawkMod==
 
@@ -18,32 +18,84 @@
 - targetLang: auto
   $name: Target language
   $name:zh-CN: 目标语言
-  $description: Language the mod content is translated into. "auto" follows the Windhawk UI language.
-  $description:zh-CN: 把模组内容翻译成哪种语言。选“自动”时跟随 Windhawk 界面语言。
+  $description: Language the mod content is translated into. "auto" uses the installed Windhawk's language setting; when the registry value is unavailable it falls back to the page or OS language. Portable builds are not guaranteed to follow their own instance's language.
+  $description:zh-CN: 把模组内容翻译成哪种语言。选“自动”时使用已安装的 Windhawk 的语言设置；读不到注册表值时退回页面或系统语言。便携版不保证跟随其自身实例的语言。
   $options:
   - auto: Automatic
-  - zh-CN: Chinese (Simplified)
-  - zh-TW: Chinese (Traditional)
+  - en: English
+  - ar: Arabic
+  - az: Azerbaijani
+  - bn: Bengali
+  - cs: Czech
+  - da: Danish
+  - de: German
+  - el: Greek
+  - es: Spanish
+  - fa: Persian
+  - fr: French
+  - hi: Hindi
+  - hr: Croatian
+  - ht: Haitian Creole
+  - hu: Hungarian
+  - id: Indonesian
+  - it: Italian
   - ja: Japanese
   - ko: Korean
-  - en: English
-  - de: German
-  - fr: French
-  - ru: Russian
-  - es: Spanish
+  - nb: Norwegian Bokmål
+  - nl: Dutch
+  - or: Odia
+  - pl: Polish
   - pt-BR: Portuguese (Brazil)
+  - pt-PT: Portuguese (Portugal)
+  - ro: Romanian
+  - ru: Russian
+  - sv: Swedish
+  - ta: Tamil
+  - th: Thai
+  - tr: Turkish
+  - uk: Ukrainian
+  - uz: Uzbek
+  - vi: Vietnamese
+  - zh-CN: Chinese (Simplified)
+  - zh-TW: Chinese (Traditional)
   $options:zh-CN:
   - auto: 自动
-  - zh-CN: 简体中文
-  - zh-TW: 繁体中文
+  - en: 英语
+  - ar: 阿拉伯语
+  - az: 阿塞拜疆语
+  - bn: 孟加拉语
+  - cs: 捷克语
+  - da: 丹麦语
+  - de: 德语
+  - el: 希腊语
+  - es: 西班牙语
+  - fa: 波斯语
+  - fr: 法语
+  - hi: 印地语
+  - hr: 克罗地亚语
+  - ht: 海地克里奥尔语
+  - hu: 匈牙利语
+  - id: 印度尼西亚语
+  - it: 意大利语
   - ja: 日语
   - ko: 韩语
-  - en: 英语
-  - de: 德语
-  - fr: 法语
-  - ru: 俄语
-  - es: 西班牙语
+  - nb: 挪威语（博克马尔）
+  - nl: 荷兰语
+  - or: 奥里亚语
+  - pl: 波兰语
   - pt-BR: 葡萄牙语（巴西）
+  - pt-PT: 葡萄牙语（葡萄牙）
+  - ro: 罗马尼亚语
+  - ru: 俄语
+  - sv: 瑞典语
+  - ta: 泰米尔语
+  - th: 泰语
+  - tr: 土耳其语
+  - uk: 乌克兰语
+  - uz: 乌兹别克语
+  - vi: 越南语
+  - zh-CN: 简体中文
+  - zh-TW: 繁体中文
 - provider: auto
   $name: Translation provider
   $name:zh-CN: 翻译服务
@@ -227,6 +279,9 @@ name. Google Translate is not offered.
 * If the mod is enabled while the UI is already running, it does nothing until
   the UI process is restarted. Close and reopen Windhawk (`windhawk-ui.exe`);
   restarting only the tray icon is not enough.
+* Auto uses the installed Windhawk's language setting; when the registry value
+  is unavailable it falls back to the page or OS language. Portable builds are
+  not guaranteed to follow their own instance's language.
 * If the UI fails to start: `windhawk.exe -safe-mode`, or
   `windhawk-cli.exe mod disable windhawk-ui-translator`.
 
@@ -234,7 +289,8 @@ name. Google Translate is not offered.
 
 Page text is sent to Microsoft's translation service by default; with an LLM
 configured it goes to that endpoint instead. No telemetry, no other network
-access. The key is stored by Windows, not by this mod.
+access. The key is stored by Windows, not by this mod; the optional API-key
+setting is stored in Windhawk's own settings as plain text.
 */
 // ==/WindhawkModReadme==
 
@@ -246,8 +302,12 @@ access. The key is stored by Windows, not by this mod.
 // CreateWebViewEnvironmentWithOptionsInternal from EmbeddedBrowserWebView.dll
 // via GetProcAddress, which is what this mod intercepts.
 //
-// Everything here is best-effort and fail-soft: every unexpected condition is
-// logged and then ignored. The mod must never take down Windhawk's own UI.
+// Hooks validate the interfaces, slots and values they use and log and skip
+// when the shape is unexpected. Access violations are not swallowed: the mod
+// no longer hides them behind SEH, so an unexpected fault propagates instead
+// of being ignored (the maintainer's preference). Cleanup is not fail-soft
+// either: a failure while unwinding blocks the unload instead of pretending it
+// succeeded.
 //
 // Logging goes to Wh_Log only (Windhawk's log pane). To watch it outside the
 // app, run scripts/dbwin-log.ps1, which captures OutputDebugString from the
@@ -269,7 +329,6 @@ access. The key is stored by Windows, not by this mod.
 
 #include <algorithm>
 #include <atomic>
-#include <cstdlib>
 #include <cstring>
 #include <cwchar>
 #include <deque>
@@ -474,6 +533,9 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
   function defaultSettings() {
     return {
       targetLang: 'auto',
+      // Windhawk's own UI language (its Settings\Language value), verbatim:
+      // the page's <html lang> is static and never follows the app.
+      uiLanguage: '',
       provider: 'auto',
       llmBaseUrl: '',
       llmModel: '',
@@ -902,7 +964,14 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
   ]);
   const DENY_ANCESTOR_SEL =
     'script,style,noscript,template,textarea,input,select,option,code,pre,kbd,' +
-    '.cm-editor,.monaco-editor,[contenteditable],[translate="no"]';
+    '.cm-editor,.monaco-editor,[contenteditable],[translate="no"],' +
+    // The mod details header's metadata row (version, author, process scope).
+    // styled-components keeps the component name in the class, and the row is
+    // proper nouns, versions and process names, never prose.
+    '[class*="ModMetadataLine"],[class*="MetadataText"],[class*="MetadataItemWrapper"],' +
+    // Windhawk's own Settings page is application UI, not mod content. Its
+    // rows carry `app-setting` ids which the settings substring would claim.
+    '[data-testid="settings-page"]';
 
   const CJK_RE = /[\u2e80-\u2eff\u3040-\u30ff\u31f0-\u31ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]/;
   const URL_RE = /^https?:\/\/\S+$/i;
@@ -1029,6 +1098,25 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
     }
   }
 
+  // Windhawk's own Settings route. Its select dropdowns portal to <body>, so
+  // they sit outside the denied page subtree; the route is exclusive with a
+  // mod's settings page, so anything portaled while it is mounted is app UI.
+  function appSettingsMounted() {
+    try {
+      return !!document.querySelector('[data-testid="settings-page"]');
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function inSelectDropdown(el) {
+    try {
+      return !!el.closest('.ant-select-dropdown');
+    } catch (_) {
+      return false;
+    }
+  }
+
   function settingsRejectReason(el) {
     try {
       if (el.closest('[' + ATTR_CLONE + '="1"]')) return 'inside our clone';
@@ -1063,11 +1151,21 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
     }
   }
 
-  // Metadata rows are Typography too but carry an icon and are proper nouns.
-  // Only inside the card head does that disqualify a host.
+  // Card-head rules use the broad test: any svg inside a head is decoration.
   function hasSvgIcon(el) {
     try {
       return !!el.querySelector('svg');
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // Metadata rows are Typography too, but their icons are FontAwesome icon
+  // fonts (`svg[data-icon]`) and the row is proper nouns, never prose. A plain
+  // inline svg (an antd icon in markdown) is not an icon font and stays prose.
+  function hasIconFont(el) {
+    try {
+      return !!el.querySelector('svg[data-icon]');
     } catch (_) {
       return false;
     }
@@ -1252,6 +1350,12 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
 
   function eligibleHost(el, kind) {
     if (!el || el.nodeType !== 1) return false;
+    // A Typography that carries an icon font is a metadata row (author, process
+    // scope, version), not a summary - with or without the card-head wrapper.
+    // The metadata class deny is the primary rule; this catches the same row
+    // outside it. Inline markup such as <strong>, <a> or a plain <svg> is not
+    // an icon font and stays prose.
+    if (kind === 'summary' && isTypography(el) && hasIconFont(el)) return false;
     if (!isCardHeadHost(el)) return true;
     if (kind === 'name') return !isTypography(el) && !hasSvgIcon(el);
     return isTypography(el) && !hasSvgIcon(el);
@@ -1419,6 +1523,9 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
           // A hidden copy nested in a title is never its own unit; the visible
           // tooltip portal outside the title is claimed like any description.
           if (sel === DESC_TEXT_SEL && el.closest(TITLE_SEL)) continue;
+          // The app Settings page's own dropdowns are portaled out of the
+          // denied subtree; its options are app UI, not mod settings.
+          if (appSettingsMounted() && inSelectDropdown(el)) continue;
           const reason = settingsRejectReason(el);
           if (reason) continue;
           // A title with no text but the excluded copy gets no unit.
@@ -3525,11 +3632,20 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
     if (low === 'zh' || low.indexOf('zh-') === 0) {
       return /hant|tw|hk|mo/.test(low) ? 'zh-Hant' : 'zh-Hans';
     }
+    // Portuguese has two separate provider targets, European and Brazilian, so
+    // the region is part of the target rather than noise to drop. A bare "pt"
+    // stays "pt" and every other tag keeps the primary-subtag rule.
+    if (low === 'pt-br') return 'pt-BR';
+    if (low === 'pt-pt') return 'pt-PT';
     return low.split('-')[0];
   }
 
   function resolveTarget(raw) {
     if (raw && String(raw).toLowerCase() !== 'auto') return normalizeLang(raw);
+    // Windhawk's own UI language is the most reliable signal: index.html is
+    // static `<html lang="en">` and the frontend never updates it.
+    const ui = normalizeLang(state.settings.uiLanguage);
+    if (ui) return ui;
     let lang = '';
     try {
       lang = document.documentElement ? document.documentElement.lang : '';
@@ -3566,6 +3682,8 @@ static constexpr wchar_t kP0Js[] = LR"WHTR_JS(
   function rebuildKeysChanged(prev, next) {
     return (
       prev.targetLang !== next.targetLang ||
+      // With targetLang "auto", a UI language change moves the resolved target.
+      prev.uiLanguage !== next.uiLanguage ||
       prev.provider !== next.provider ||
       prev.llmBaseUrl !== next.llmBaseUrl ||
       prev.llmModel !== next.llmModel ||
@@ -4060,51 +4178,40 @@ static bool P0GetValidatedSlot(void* object, size_t index, void** out) {
     return true;
 }
 
-// Copying from an untrusted-looking vtable pointer must never fault. This
-// helper intentionally contains no C++ objects so SEH can be used.
-static bool P0CopyVtable(void** dst, void** src, size_t count) {
-    __try {
-        for (size_t i = 0; i < count; ++i) {
-            dst[i] = src[i];
-        }
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
+// Copies the slots of the original vtable before the default slot is replaced.
+// The vtable belongs to a COM environment object that WebView2 created and that
+// was validated before this call, so a fault here is a real defect and
+// propagates instead of being swallowed.
+static void P0CopyVtable(void** dst, void** src, size_t count) {
+    for (size_t i = 0; i < count; ++i) {
+        dst[i] = src[i];
     }
 }
 
-static HRESULT P0SafeForwardEnvHandler(void* app, HRESULT hr, void* env) {
+static HRESULT P0ForwardEnvHandler(void* app, HRESULT hr, void* env) {
     if (!app) {
         return S_OK;
     }
-    __try {
-        auto fn =
-            reinterpret_cast<FnEnvHandlerInvoke>(P0GetRawSlot(app, kCallbackSlotInvoke));
-        if (!fn) {
-            return E_FAIL;
-        }
-        return fn(app, hr, env);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    auto fn =
+        reinterpret_cast<FnEnvHandlerInvoke>(P0GetRawSlot(app, kCallbackSlotInvoke));
+    if (!fn) {
         return E_FAIL;
     }
+    return fn(app, hr, env);
 }
 
-static HRESULT P0SafeForwardControllerHandler(void* app,
-                                              HRESULT hr,
-                                              void* controller) {
+static HRESULT P0ForwardControllerHandler(void* app,
+                                          HRESULT hr,
+                                          void* controller) {
     if (!app) {
         return S_OK;
     }
-    __try {
-        auto fn = reinterpret_cast<FnControllerHandlerInvoke>(
-            P0GetRawSlot(app, kCallbackSlotInvoke));
-        if (!fn) {
-            return E_FAIL;
-        }
-        return fn(app, hr, controller);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    auto fn = reinterpret_cast<FnControllerHandlerInvoke>(
+        P0GetRawSlot(app, kCallbackSlotInvoke));
+    if (!fn) {
         return E_FAIL;
     }
+    return fn(app, hr, controller);
 }
 
 // ---------------------------------------------------------------------------
@@ -4177,10 +4284,16 @@ static std::atomic<bool> g_p1TeardownInProgress{false};
 static std::atomic<bool> g_p1TeardownCompleted{false};
 
 // Sticky: a wrapper was released on a thread that is not the WebView2 UI
-// thread. That frame cannot be proven to have returned, so the unload never
-// proceeds; the flag also makes the DEFECT log once. The engine thread then
-// waits, which is the accepted failure mode.
+// thread. That frame cannot be proven to have returned, so the event is never
+// signalled; the flag also makes the DEFECT log once. The unload waits a
+// bounded two seconds for that frame, logs a DEFECT and continues.
 static std::atomic<bool> g_p1ReleaseOffThread{false};
+
+// Tick of the most recent off-thread decrement. The bounded window runs from
+// the last release, not from the start of the unload's wait, so a release near
+// the end of the first two seconds still gets its whole window. Zero means no
+// off-thread release was recorded.
+static std::atomic<ULONGLONG> g_p1LastOffThreadReleaseTick{0};
 
 // Must be called with g_p0OutstandingLock held.
 static void P1MaybeSignalTeardownLocked() {
@@ -4214,17 +4327,23 @@ static void P1MaybeSignalTeardownLocked() {
 
 // Must be called with g_p0OutstandingLock held. Every decrement runs this: a
 // wrapper released on a thread that is not the WebView2 UI thread means that
-// frame cannot be proven to have returned, so the unload never proceeds.
+// frame cannot be proven to have returned, so the event is not signalled and
+// the unload falls back to its bounded wait.
 static void P1LatchReleaseOffThreadLocked() {
     DWORD uiThread = g_p1UiThreadId.load(std::memory_order_acquire);
     DWORD current = GetCurrentThreadId();
     if (uiThread != 0 && current == uiThread) {
         return;
     }
+    // Recorded on every off-thread decrement, not only the first one: the
+    // unload's bounded window is measured from the last of them, and the log
+    // below may take long enough to matter.
+    g_p1LastOffThreadReleaseTick.store(GetTickCount64(),
+                                       std::memory_order_release);
     if (!g_p1ReleaseOffThread.exchange(true, std::memory_order_acq_rel)) {
         Wh_Log(L"[p1] DEFECT: a wrapper was released on thread %lu, not the "
                L"known UI thread %lu; that frame cannot be proven to have "
-               L"returned, so the unload never proceeds",
+               L"returned, so the teardown event will not be signalled",
                static_cast<unsigned long>(current),
                static_cast<unsigned long>(uiThread));
     }
@@ -4707,11 +4826,7 @@ static void P0PatchEnvironment(void* env) {
         return;
     }
 
-    if (!P0CopyVtable(copy, originalVtbl, kEnvVtblSlots)) {
-        Wh_Log(L"[p0] env=%p: vtable copy faulted; not patching", env);
-        delete[] copy;
-        return;
-    }
+    P0CopyVtable(copy, originalVtbl, kEnvVtblSlots);
 
     if (has3) {
         copy[kEnvSlotCreateController] =
@@ -5258,6 +5373,7 @@ static std::wstring P1ClipForLog(const std::wstring& text, size_t maxChars) {
 
 struct P1SettingsSnapshot {
     std::wstring targetLang;
+    std::wstring uiLanguage;
     std::wstring provider;
     std::wstring llmBaseUrl;
     std::wstring llmModel;
@@ -5306,9 +5422,81 @@ static std::wstring P1ReadStringSetting(PCWSTR name,
     return result;
 }
 
+// Owns a registry key for the duration of a read, including an exception path.
+struct P1RegistryKey {
+    HKEY handle = nullptr;
+
+    ~P1RegistryKey() {
+        if (handle) {
+            RegCloseKey(handle);
+        }
+    }
+};
+
+// Windhawk stores the selected UI language itself: HKLM\SOFTWARE\Windhawk\
+// Settings, value Language, 64-bit view. It is not exposed through
+// Wh_GetStringSetting and the frontend never sets documentElement.lang.
+// Portable builds keep the value in settings.ini, so a missing key or value
+// yields an empty string, which the page treats like "follow the page locale".
+// REG_EXPAND_SZ is accepted like REG_SZ; the tag is used verbatim, never
+// expanded.
+static std::wstring P1ReadWindhawkUiLanguage() {
+    P1RegistryKey key;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Windhawk\\Settings", 0,
+                      KEY_READ | KEY_WOW64_64KEY, &key.handle) !=
+        ERROR_SUCCESS) {
+        return std::wstring();
+    }
+
+    std::wstring result;
+    DWORD type = 0;
+    DWORD size = 0;
+    LONG status =
+        RegQueryValueExW(key.handle, L"Language", nullptr, &type, nullptr, &size);
+    // The buffer is caller-owned here (the registry API does not allocate), so
+    // its size is bounded before the second query.
+    if (status == ERROR_SUCCESS && (type == REG_SZ || type == REG_EXPAND_SZ) &&
+        size >= sizeof(wchar_t) && size <= 4096) {
+        std::vector<wchar_t> buffer(size / sizeof(wchar_t) + 1, L'\0');
+        DWORD dataSize = size;
+        DWORD secondType = 0;
+        status = RegQueryValueExW(key.handle, L"Language", nullptr, &secondType,
+                                  reinterpret_cast<BYTE*>(buffer.data()),
+                                  &dataSize);
+        // The type is required again: a value replaced between the two queries
+        // must not have its bytes read as a string.
+        if (status == ERROR_SUCCESS &&
+            (secondType == REG_SZ || secondType == REG_EXPAND_SZ)) {
+            size_t chars = std::min<size_t>(dataSize / sizeof(wchar_t),
+                                            buffer.size() - 1);
+            // A REG_SZ size usually includes its terminator, but not every
+            // writer does; drop trailing NULs before trimming.
+            while (chars > 0 && buffer[chars - 1] == L'\0') {
+                --chars;
+            }
+            result.assign(buffer.data(), chars);
+            auto isSpace = [](wchar_t ch) {
+                return ch == L' ' || ch == L'\t' || ch == L'\r' ||
+                       ch == L'\n' || ch == L'\v' || ch == L'\f';
+            };
+            size_t begin = 0;
+            while (begin < result.size() && isSpace(result[begin])) {
+                ++begin;
+            }
+            size_t end = result.size();
+            while (end > begin && isSpace(result[end - 1])) {
+                --end;
+            }
+            result = result.substr(begin, end - begin);
+        }
+    }
+    return result;
+}
+
 static P1SettingsSnapshot P1ReadSettings() {
     P1SettingsSnapshot s;
     s.targetLang = P1ReadStringSetting(L"targetLang", L"auto", false);
+    s.uiLanguage = P1ReadWindhawkUiLanguage();
     s.provider = P1ReadStringSetting(L"provider", L"auto", false);
     s.llmBaseUrl =
         P1ReadStringSetting(L"llmBaseUrl", L"https://api.openai.com/v1", false);
@@ -5363,6 +5551,38 @@ static P1SettingsSnapshot P1ReadSettings() {
     s.timeoutMs = P1ClampInt(Wh_GetIntSetting(L"timeoutMs"), 1000, 120000);
     s.cacheTtlDays = P1ClampInt(Wh_GetIntSetting(L"cacheTtlDays"), 0, 3650);
     return s;
+}
+
+// Settings generation. Wh_ModSettingsChanged bumps it; the API key cache and
+// the cache-TTL cache use it to know when their derived values are stale.
+static std::atomic<long> g_p1SettingsGeneration{0};
+
+// The page-facing snapshot is read once and then reused: without this every
+// relayed request and every settings push would read the settings store and
+// the Windhawk registry value again. Wh_ModSettingsChanged invalidates it and
+// Wh_ModInit primes it. The getter returns a copy, so no caller keeps the lock
+// after it returns. P1GetKeyInfo deliberately keeps reading the raw settings
+// with its own generation-based cache, so its behaviour is unchanged.
+static std::mutex g_p1SettingsCacheMutex;
+static bool g_p1SettingsCacheValid = false;
+static long g_p1SettingsCacheGeneration = -1;
+static P1SettingsSnapshot g_p1SettingsCache;
+
+static P1SettingsSnapshot P1GetSettingsSnapshot() {
+    long generation = g_p1SettingsGeneration.load(std::memory_order_acquire);
+    std::lock_guard<std::mutex> lock(g_p1SettingsCacheMutex);
+    if (!g_p1SettingsCacheValid ||
+        g_p1SettingsCacheGeneration != generation) {
+        g_p1SettingsCache = P1ReadSettings();
+        g_p1SettingsCacheGeneration = generation;
+        g_p1SettingsCacheValid = true;
+    }
+    return g_p1SettingsCache;
+}
+
+static void P1InvalidateSettingsCache() {
+    std::lock_guard<std::mutex> lock(g_p1SettingsCacheMutex);
+    g_p1SettingsCacheValid = false;
 }
 
 static void P1JsonEscapeAppend(std::wstring& out, const std::wstring& value) {
@@ -5449,6 +5669,7 @@ static std::wstring P1BuildSettingsJson(const P1SettingsSnapshot& s,
     };
 
     appendString(L"targetLang", s.targetLang);
+    appendString(L"uiLanguage", s.uiLanguage);
     appendString(L"provider", s.provider);
     appendString(L"llmBaseUrl", s.llmBaseUrl);
     appendString(L"llmModel", s.llmModel);
@@ -5506,7 +5727,6 @@ static std::mutex g_p1KeyMutex;
 static bool g_p1KeyCacheValid = false;
 static long g_p1KeyCacheGeneration = -1;
 static P1KeyInfo g_p1KeyCache;
-static std::atomic<long> g_p1SettingsGeneration{0};
 
 static bool P1DecodeCredentialBlob(const CREDENTIALW* credential,
                                    std::string& out) {
@@ -6245,8 +6465,9 @@ static void P1BlockUnload(const wchar_t* reason) {
 
 // Called from Wh_ModBeforeUninit (engine thread) after the state became
 // Stopping and P1WaitForDispatchCreation returned. It asks the UI thread for
-// the teardown, waits until no wrapper and no held AddScript reference is left,
-// and only then destroys the dispatch window with a blocking SendMessageW.
+// the teardown, waits until no wrapper and no held AddScript reference is left
+// (or, after an off-thread release, two seconds since that last release), and
+// only then destroys the dispatch window with a blocking SendMessageW.
 //
 // The send proves that the UI thread's own message loop dispatched the destroy
 // handler and came back to the sender after the teardown handler completed.
@@ -6333,8 +6554,73 @@ static void P1TeardownUiThread() {
                 L"the dispatch window is gone before the teardown ran");
         }
     }
-    DWORD wait = WaitForSingleObject(g_p1TeardownEvent, INFINITE);
-    if (wait != WAIT_OBJECT_0) {
+    // An off-thread release latches g_p1ReleaseOffThread, and from then on
+    // P1MaybeSignalTeardownLocked never signals the event: the releasing frame
+    // cannot be proven to have returned. Waiting INFINITE would hang the
+    // unload forever, so the wait is bounded. The accepted case is: the
+    // teardown itself completed, both counters are zero and the last
+    // off-thread decrement is at least 2 s old; the only gap left then is that
+    // frame, and it is accepted and logged as a defect. Every other shape
+    // keeps the old blocking wait: a slow teardown can still signal, and a
+    // latched one is a real cleanup failure that must block.
+    DWORD wait = WaitForSingleObject(g_p1TeardownEvent, 2000);
+    bool acceptedOffThreadRelease = false;
+    if (wait == WAIT_TIMEOUT) {
+        // Re-read on every pass until the window really elapsed. The window is
+        // measured from the last off-thread release, not from the start of
+        // this wait, so a release that lands during the window restarts it; a
+        // one-shot remainder would leave that release with far less than 2 s.
+        // The counters and the tick are re-read until the accepted shape holds;
+        // once the teardown completed no new wrapper is handed over, so a zero
+        // snapshot is final and no later decrement can be missed.
+        bool acceptOffThreadRelease = false;
+        for (;;) {
+            bool teardownCompleted;
+            long outstandingCallbacks;
+            long outstandingAddScriptRefs;
+            AcquireSRWLockExclusive(&g_p0OutstandingLock);
+            teardownCompleted =
+                g_p1TeardownCompleted.load(std::memory_order_acquire);
+            outstandingCallbacks = g_p0OutstandingCallbacks;
+            outstandingAddScriptRefs = g_p0OutstandingAddScriptRefs;
+            ReleaseSRWLockExclusive(&g_p0OutstandingLock);
+
+            if (!g_p1ReleaseOffThread.load(std::memory_order_acquire) ||
+                !teardownCompleted || outstandingCallbacks != 0 ||
+                outstandingAddScriptRefs != 0) {
+                // Not the accepted case. The event can never be signalled
+                // while the off-thread latch is set, so this keeps the old
+                // blocking wait and a failure here blocks the unload below.
+                wait = WaitForSingleObject(g_p1TeardownEvent, INFINITE);
+                break;
+            }
+
+            ULONGLONG lastRelease =
+                g_p1LastOffThreadReleaseTick.load(std::memory_order_acquire);
+            if (lastRelease == 0) {
+                // No off-thread release was recorded; the first timeout
+                // stands, as it did before the window existed.
+                acceptOffThreadRelease = true;
+                break;
+            }
+            ULONGLONG now = GetTickCount64();
+            ULONGLONG elapsed = now >= lastRelease ? now - lastRelease : 0;
+            if (elapsed >= 2000) {
+                acceptOffThreadRelease = true;
+                break;
+            }
+            DWORD remaining = static_cast<DWORD>(2000 - elapsed);
+            Sleep(remaining < 50 ? remaining : 50);
+        }
+
+        if (acceptOffThreadRelease) {
+            Wh_Log(L"[p1] DEFECT: a wrapper was released off the UI "
+                   L"thread; waited at least 2 s since the last off-thread "
+                   L"release, continuing");
+            acceptedOffThreadRelease = true;
+        }
+    }
+    if (!acceptedOffThreadRelease && wait != WAIT_OBJECT_0) {
         Wh_Log(L"[p1] WaitForSingleObject(teardown event) returned %lu", wait);
         P1BlockUnload(L"waiting for the teardown event failed");
     }
@@ -6343,7 +6629,7 @@ static void P1TeardownUiThread() {
     callbacks = g_p0OutstandingCallbacks;
     addScriptRefs = g_p0OutstandingAddScriptRefs;
     ReleaseSRWLockExclusive(&g_p0OutstandingLock);
-    Wh_Log(L"[p1] teardown event signalled (outstanding=%ld addScriptRefs=%ld); "
+    Wh_Log(L"[p1] teardown wait complete (outstanding=%ld addScriptRefs=%ld); "
            L"destroying the dispatch window",
            callbacks, addScriptRefs);
 
@@ -7071,7 +7357,13 @@ static void P1PushSettingsToWebView(void* webView, const wchar_t* reason) {
         return;
     }
 
-    P1SettingsSnapshot snapshot = P1ReadSettings();
+    P1SettingsSnapshot snapshot = P1GetSettingsSnapshot();
+    // uiLanguage comes from the Windhawk app setting, not from this mod's
+    // settings, so the cache's invalidation on Wh_ModSettingsChanged does not
+    // cover a language change while the DLL stays loaded. Refreshing it on
+    // every push keeps the page's auto target current; the rest of the
+    // snapshot stays cached.
+    snapshot.uiLanguage = P1ReadWindhawkUiLanguage();
     P1KeyInfo key = P1GetKeyInfo();
     bool clearCache = P1ConsumeClearCache(snapshot.clearCacheRequested);
     if (clearCache) {
@@ -7155,8 +7447,8 @@ static HANDLE g_p1CacheEvents[2] = {nullptr, nullptr};
 static HANDLE g_p1CacheSaverThread = nullptr;
 static bool g_p1CacheSaverStarted = false;
 
-// cacheTtlDays is read once per settings generation: a cache-get must not hit
-// the registry for every translated string.
+// cacheTtlDays is read once per settings generation: a cache-get must not copy
+// the cached settings snapshot for every translated string.
 static std::mutex g_p1CacheTtlMutex;
 static int g_p1CacheTtlDays = 30;
 static long g_p1CacheTtlGeneration = -1;
@@ -7165,7 +7457,7 @@ static int P1CacheTtlDays() {
     long generation = g_p1SettingsGeneration.load(std::memory_order_acquire);
     std::lock_guard<std::mutex> lock(g_p1CacheTtlMutex);
     if (g_p1CacheTtlGeneration != generation) {
-        g_p1CacheTtlDays = P1ReadSettings().cacheTtlDays;
+        g_p1CacheTtlDays = P1GetSettingsSnapshot().cacheTtlDays;
         g_p1CacheTtlGeneration = generation;
     }
     return g_p1CacheTtlDays;
@@ -7846,7 +8138,7 @@ static void P1HandleHttp(void* sender, const std::wstring& rest) {
         Wh_Log(L"[p1] http id=%llu: GET with a body; the body is ignored", id);
     }
 
-    P1SettingsSnapshot snapshot = P1ReadSettings();
+    P1SettingsSnapshot snapshot = P1GetSettingsSnapshot();
     if (!P1IsAllowedHttpUrl(url, snapshot)) {
         P1RejectHttp(sender, id, L"url is not an allowed endpoint",
                      ERROR_INVALID_PARAMETER);
@@ -8376,7 +8668,7 @@ static HRESULT STDMETHODCALLTYPE P0EnvHandlerInvoke(P0EnvHandler* self,
             Wh_Log(L"[p0] no environment to patch; forwarding as-is");
         }
 
-        return P0SafeForwardEnvHandler(self ? self->app : nullptr, hr, env);
+        return P0ForwardEnvHandler(self ? self->app : nullptr, hr, env);
     } catch (...) {
         Wh_Log(L"[p0] exception in environment callback");
         return S_OK;
@@ -8395,8 +8687,8 @@ static HRESULT STDMETHODCALLTYPE P0ControllerHandlerInvoke(
             P0OnControllerReady(controller);
         }
 
-        return P0SafeForwardControllerHandler(self ? self->app : nullptr, hr,
-                                              controller);
+        return P0ForwardControllerHandler(self ? self->app : nullptr, hr,
+                                           controller);
     } catch (...) {
         Wh_Log(L"[p0] exception in controller callback");
         return S_OK;
@@ -8803,82 +9095,80 @@ static FARPROC WINAPI P0GetProcAddressHook(HMODULE module, LPCSTR procName) {
         return g_originalGetProcAddress(module, procName);
     }
 
-    __try {
-        if (module && procName &&
-            HIWORD(reinterpret_cast<ULONG_PTR>(procName))) {
-            // Check the two export names before touching the module list:
-            // GetModuleHandleW takes the loader lock, and this hook runs for
-            // every GetProcAddress call in the process.
-            bool isCreate =
-                strcmp(procName,
-                       "CreateWebViewEnvironmentWithOptionsInternal") == 0;
-            bool isCreateShared =
-                strcmp(procName,
-                       "CreateSharedWebViewEnvironmentInternal") == 0;
+    // The export name is only inspected when it is a real string pointer; a
+    // null or ordinal pointer falls through to the untouched original.
+    if (module && procName && HIWORD(reinterpret_cast<ULONG_PTR>(procName))) {
+        // Check the two export names before touching the module list:
+        // GetModuleHandleW takes the loader lock, and this hook runs for
+        // every GetProcAddress call in the process.
+        bool isCreate =
+            strcmp(procName,
+                   "CreateWebViewEnvironmentWithOptionsInternal") == 0;
+        bool isCreateShared =
+            strcmp(procName,
+                   "CreateSharedWebViewEnvironmentInternal") == 0;
 
-            if ((isCreate || isCreateShared) &&
-                module == P0GetEmbeddedBrowserModule()) {
-                if (isCreate) {
-                    // Resolve the real export once, through the unhooked
-                    // trampoline. Returning the shim is cheap and does not
-                    // recurse into this hook.
-                    auto real = reinterpret_cast<FnCreateEnv>(
-                        g_originalGetProcAddress(module, procName));
-                    if (real) {
-                        g_realCreateEnv.store(real, std::memory_order_release);
+        if ((isCreate || isCreateShared) &&
+            module == P0GetEmbeddedBrowserModule()) {
+            if (isCreate) {
+                // Resolve the real export once, through the unhooked
+                // trampoline. Returning the shim is cheap and does not
+                // recurse into this hook.
+                auto real = reinterpret_cast<FnCreateEnv>(
+                    g_originalGetProcAddress(module, procName));
+                if (real) {
+                    g_realCreateEnv.store(real, std::memory_order_release);
 
-                        // The dispatch window is a prerequisite for every
-                        // wrapper this mod hands to WebView2. Create it here,
-                        // on the environment-creation (UI) thread, before the
-                        // shim can wrap anything. If it cannot be created,
-                        // return the real export unchanged: no wrapper, no
-                        // script, no message handler, nothing owned by the mod.
-                        P1NoteUiThread();
-                        if (!P1EnsureDispatchWindow()) {
-                            if (!g_p1DispatchFailureLogged.exchange(
-                                    true, std::memory_order_relaxed)) {
-                                Wh_Log(L"[p0] GetProcAddress("
-                                       L"EmbeddedBrowserWebView.dll, "
-                                       L"CreateWebViewEnvironmentWithOptions"
-                                       L"Internal) -> real export (dispatch "
-                                       L"window unavailable)");
-                            }
-                            return reinterpret_cast<FARPROC>(real);
-                        }
-
-                        if (!g_createExportLogged.exchange(
+                    // The dispatch window is a prerequisite for every
+                    // wrapper this mod hands to WebView2. Create it here,
+                    // on the environment-creation (UI) thread, before the
+                    // shim can wrap anything. If it cannot be created,
+                    // return the real export unchanged: no wrapper, no
+                    // script, no message handler, nothing owned by the mod.
+                    P1NoteUiThread();
+                    if (!P1EnsureDispatchWindow()) {
+                        if (!g_p1DispatchFailureLogged.exchange(
                                 true, std::memory_order_relaxed)) {
-                            Wh_Log(L"GetProcAddress(EmbeddedBrowserWebView.dll, "
-                                   L"CreateWebViewEnvironmentWithOptionsInternal) "
-                                   L"-> shim original=%p",
-                                   reinterpret_cast<void*>(real));
+                            Wh_Log(L"[p0] GetProcAddress("
+                                   L"EmbeddedBrowserWebView.dll, "
+                                   L"CreateWebViewEnvironmentWithOptions"
+                                   L"Internal) -> real export (dispatch "
+                                   L"window unavailable)");
                         }
-                        return reinterpret_cast<FARPROC>(&P0CreateEnvShim);
+                        return reinterpret_cast<FARPROC>(real);
                     }
+
                     if (!g_createExportLogged.exchange(
                             true, std::memory_order_relaxed)) {
                         Wh_Log(L"GetProcAddress(EmbeddedBrowserWebView.dll, "
                                L"CreateWebViewEnvironmentWithOptionsInternal) "
-                               L"-> unresolved");
+                               L"-> shim original=%p",
+                               reinterpret_cast<void*>(real));
                     }
-                } else {
-                    // This export's exact signature could not be verified
-                    // locally. It is not used by wry's normal environment path,
-                    // so pass it through untouched instead of risking a
-                    // mismatched call. Logged once for diagnostics.
-                    FARPROC original =
-                        g_originalGetProcAddress(module, procName);
-                    if (!g_sharedExportLogged.exchange(
-                            true, std::memory_order_relaxed)) {
-                        Wh_Log(L"[p0] GetProcAddress(EmbeddedBrowserWebView.dll, "
-                               L"CreateSharedWebViewEnvironmentInternal) -> "
-                               L"passthrough original=%p",
-                               reinterpret_cast<void*>(original));
-                    }
+                    return reinterpret_cast<FARPROC>(&P0CreateEnvShim);
+                }
+                if (!g_createExportLogged.exchange(
+                        true, std::memory_order_relaxed)) {
+                    Wh_Log(L"GetProcAddress(EmbeddedBrowserWebView.dll, "
+                           L"CreateWebViewEnvironmentWithOptionsInternal) "
+                           L"-> unresolved");
+                }
+            } else {
+                // This export's exact signature could not be verified
+                // locally. It is not used by wry's normal environment path,
+                // so pass it through untouched instead of risking a
+                // mismatched call. Logged once for diagnostics.
+                FARPROC original =
+                    g_originalGetProcAddress(module, procName);
+                if (!g_sharedExportLogged.exchange(
+                        true, std::memory_order_relaxed)) {
+                    Wh_Log(L"[p0] GetProcAddress(EmbeddedBrowserWebView.dll, "
+                           L"CreateSharedWebViewEnvironmentInternal) -> "
+                           L"passthrough original=%p",
+                           reinterpret_cast<void*>(original));
                 }
             }
         }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
 
     return g_originalGetProcAddress(module, procName);
@@ -8982,11 +9272,11 @@ BOOL Wh_ModInit() {
 
     P1CacheLoad();
 
-    // Read the settings once at init: this also resolves the API key source so
-    // the log shows whether a credential was found. The key itself is never
-    // logged.
+    // Read the settings once at init and prime the snapshot cache: this also
+    // resolves the API key source so the log shows whether a credential was
+    // found. The key itself is never logged.
     try {
-        P1SettingsSnapshot snapshot = P1ReadSettings();
+        P1SettingsSnapshot snapshot = P1GetSettingsSnapshot();
         P1KeyInfo key = P1GetKeyInfo();
         Wh_Log(L"[p1] settings: targetLang=%s provider=%s keySource=%s "
                L"timeoutMs=%d concurrency=%d batchSize=%d batchChars=%d "
@@ -9006,6 +9296,8 @@ BOOL Wh_ModInit() {
     if (!kernel32) {
         Wh_Log(L"[p0] kernel32.dll not found; aborting");
         g_p1Lifecycle.store(P1Lifecycle::Stopped, std::memory_order_release);
+        CloseHandle(g_p1TeardownEvent);
+        g_p1TeardownEvent = nullptr;
         return FALSE;
     }
 
@@ -9013,6 +9305,8 @@ BOOL Wh_ModInit() {
     if (!getProcAddress) {
         Wh_Log(L"[p0] GetProcAddress not found; aborting");
         g_p1Lifecycle.store(P1Lifecycle::Stopped, std::memory_order_release);
+        CloseHandle(g_p1TeardownEvent);
+        g_p1TeardownEvent = nullptr;
         return FALSE;
     }
 
@@ -9025,6 +9319,8 @@ BOOL Wh_ModInit() {
                                 &g_originalGetProcAddress))) {
         Wh_Log(L"[p0] failed to hook GetProcAddress; aborting");
         g_p1Lifecycle.store(P1Lifecycle::Stopped, std::memory_order_release);
+        CloseHandle(g_p1TeardownEvent);
+        g_p1TeardownEvent = nullptr;
         return FALSE;
     }
 
@@ -9043,9 +9339,11 @@ void Wh_ModSettingsChanged() {
     }
     try {
         Wh_Log(L"[p1] mod settings changed");
-        // Settings are read fresh for every push and request; the generation
-        // only invalidates the cached credential lookup.
+        // Bump the generation first, then drop the cached snapshot: a reader
+        // that publishes an older snapshot carries the older generation, so
+        // the next getter re-reads instead of reusing it.
         g_p1SettingsGeneration.fetch_add(1, std::memory_order_acq_rel);
+        P1InvalidateSettingsCache();
         P1ClearKeyCache();
         P1RequestSettingsPush();
     } catch (...) {
@@ -9064,8 +9362,8 @@ void Wh_ModBeforeUninit() {
     if (previous != P1Lifecycle::Running) {
         if (previous == P1Lifecycle::Stopped) {
             Wh_Log(L"[p0] already stopped; nothing to do");
-            // Init may have failed after the event was created, in which case
-            // this is the only place that closes it.
+            // Defensive: every init failure path after CreateEventW closes the
+            // event itself, so this normally finds null.
             HANDLE teardownEvent = g_p1TeardownEvent;
             g_p1TeardownEvent = nullptr;
             if (teardownEvent) {
