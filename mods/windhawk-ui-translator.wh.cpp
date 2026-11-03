@@ -2,8 +2,8 @@
 // @id              windhawk-ui-translator
 // @name            Windhawk UI Translator
 // @name:zh-CN      Windhawk 界面翻译
-// @description     Translates Windhawk mod content — names, summaries, READMEs, setting labels and changelogs — in place, sending page text to Microsoft's translation service by default. When enabled while the Windhawk UI is already running, it takes effect after that process is restarted.
-// @description:zh-CN 就地翻译 Windhawk 的模组内容（名称、简介、说明文档、设置项与更新日志），默认会把页面文本发送到微软翻译服务。在 Windhawk 界面已运行时启用本模组，需重启该进程后才会生效。
+// @description     Translates mod names, summaries, READMEs, settings and changelogs in place inside the Windhawk UI.
+// @description:zh-CN 在 Windhawk 界面里就地翻译模组内容（名称、简介、说明文档、设置项、更新日志）。
 // @version         0.1
 // @author          Zhanyuanium
 // @github          https://github.com/Zhanyuanium
@@ -18,8 +18,8 @@
 - targetLang: auto
   $name: Target language
   $name:zh-CN: 目标语言
-  $description: Language the mod content is translated into. "auto" uses the installed Windhawk's language setting; when the registry value is unavailable it falls back to the page or OS language. Portable builds are not guaranteed to follow their own instance's language.
-  $description:zh-CN: 把模组内容翻译成哪种语言。选“自动”时使用已安装的 Windhawk 的语言设置；读不到注册表值时退回页面或系统语言。便携版不保证跟随其自身实例的语言。
+  $description: Language mod content is translated into. "auto" follows Windhawk's language setting.
+  $description:zh-CN: 模组内容翻译成的语言。“自动”跟随 Windhawk 的语言设置。
   $options:
   - auto: Automatic
   - en: English
@@ -99,8 +99,8 @@
 - provider: auto
   $name: Translation provider
   $name:zh-CN: 翻译服务
-  $description: Which translation backend the page uses. "auto" lets the page decide between the LLM and the free endpoints.
-  $description:zh-CN: 页面使用哪种翻译后端。选“自动”时由页面在大模型与免费接口之间选择。
+  $description: Translation backend. "auto" chooses between the LLM and the free endpoint.
+  $description:zh-CN: 翻译后端。“自动”在大模型与免费接口之间选择。
   $options:
   - auto: Automatic
   - edge: Microsoft Edge (free, no key)
@@ -112,28 +112,28 @@
 - llmBaseUrl: https://api.openai.com/v1
   $name: LLM base URL
   $name:zh-CN: 大模型 API 地址
-  $description: OpenAI-compatible API base URL, for example https://api.openai.com/v1. It must use https://; plain http:// endpoints, localhost included, are rejected.
-  $description:zh-CN: 兼容 OpenAI 的接口根地址，例如 https://api.openai.com/v1。必须使用 https://，纯 http:// 地址（包括 localhost）会被拒绝。
+  $description: OpenAI-compatible API base URL, e.g. https://api.openai.com/v1. Must use https://; http:// endpoints, localhost included, are rejected.
+  $description:zh-CN: 兼容 OpenAI 的接口根地址，例如 https://api.openai.com/v1。必须为 https://，http://（含 localhost）会被拒绝。
 - llmModel: ""
   $name: LLM model
   $name:zh-CN: 模型名称
-  $description: Model name sent to the LLM endpoint. Leave empty to leave the field out of the request, so the server uses its default model.
-  $description:zh-CN: 发送给大模型接口的模型名称。留空则请求中不包含该字段，由服务端使用默认模型。
+  $description: Model name sent to the LLM endpoint. Leave empty to use the server's default model.
+  $description:zh-CN: 发给大模型接口的模型名称。留空则使用服务端默认模型。
 - credentialTarget: windhawk-ui-translator
   $name: Credential target
   $name:zh-CN: 凭据名称
-  $description: Windows Credential Manager target that holds the API key as a generic credential.
-  $description:zh-CN: 在 Windows 凭据管理器中保存 API 密钥的凭据名称（普通凭据）。
+  $description: Windows Credential Manager target holding the API key as a generic credential.
+  $description:zh-CN: Windows 凭据管理器中存放 API 密钥的普通凭据名称。
 - llmApiKey: ""
   $name: API key (plaintext fallback)
   $name:zh-CN: API 密钥（明文备用）
-  $description: Used when the key source is "setting", and as the fallback when the credential is missing. It is stored as plain text in the registry, so prefer the credential source.
-  $description:zh-CN: 在密钥来源为“设置项”时使用，凭据缺失时也会作为备用。密钥会以明文写入注册表，建议优先使用凭据管理器。
+  $description: Used when the key source is "setting" or the credential is missing. Stored as plain text in the registry; prefer the credential source.
+  $description:zh-CN: 密钥来源为“设置项”或凭据缺失时使用。以明文存入注册表，建议优先使用凭据。
 - llmKeySource: credential
   $name: API key source
   $name:zh-CN: 密钥来源
-  $description: Where the LLM API key comes from. "credential" reads Windows Credential Manager, "setting" uses the field above, "none" sends requests without a key.
-  $description:zh-CN: 大模型 API 密钥的来源。“凭据”从 Windows 凭据管理器读取，“设置项”使用上面的字段，“无”表示请求不带密钥。
+  $description: Where the LLM API key comes from.
+  $description:zh-CN: 大模型 API 密钥的来源。
   $options:
   - credential: Windows Credential Manager
   - setting: The API key setting above
@@ -146,12 +146,12 @@
     - ""
   $name: Glossary
   $name:zh-CN: 术语表
-  $description: "One entry per line, written as source=target. Sent with every LLM request and takes priority over the model's own wording. Ignored by the free providers."
-  $description:zh-CN: 每行一条，写成“原文=译文”。随每个大模型请求一起发送，优先级高于模型自己的措辞。免费接口不使用本项。
+  $description: "One entry per line, written as source=target. Sent with every LLM request and takes priority over the model's wording. Ignored by the free providers."
+  $description:zh-CN: 每行一条，格式“原文=译文”。随大模型请求发送，优先于模型自己的措辞。免费接口不使用。
 - scopeReadme: true
-  $name: Translate mod descriptions
-  $name:zh-CN: 翻译模组说明
-  $description: Translate README content on the mod details page.
+  $name: Translate mod READMEs
+  $name:zh-CN: 翻译模组说明文档
+  $description: Translate READMEs on the mod details page.
   $description:zh-CN: 翻译模组详情页中的说明文档。
 - scopeSettings: true
   $name: Translate mod settings
@@ -161,73 +161,73 @@
 - scopeModName: true
   $name: Translate mod names
   $name:zh-CN: 翻译模组名称
-  $description: "Translate mod names everywhere they appear: the tile grid, the table view and the details header."
-  $description:zh-CN: 翻译所有出现模组名称的位置：磁贴视图、列表视图和详情页标题。
+  $description: "Translate mod names in the tile grid, the table view and the details header."
+  $description:zh-CN: 翻译磁贴视图、列表视图和详情页标题中的模组名称。
 - scopeModSummary: true
   $name: Translate mod summaries
   $name:zh-CN: 翻译模组简介
-  $description: "Translate the one-line mod summary everywhere it appears: the tile grid, the table view and the details header."
-  $description:zh-CN: 翻译所有出现模组简介的位置：磁贴视图、列表视图和详情页标题。
+  $description: "Translate the one-line mod summary in the tile grid, the table view and the details header."
+  $description:zh-CN: 翻译磁贴视图、列表视图和详情页标题中的模组简介。
 - scopeChangelog: true
   $name: Translate changelogs
   $name:zh-CN: 翻译更新日志
-  $description: Translate changelog sections on the mod details page.
+  $description: Translate changelogs on the mod details page.
   $description:zh-CN: 翻译模组详情页中的更新日志。
 - hoverDelayMs: 120
   $name: Hover delay (milliseconds)
   $name:zh-CN: 悬停延迟（毫秒）
-  $description: How long the pointer must rest on a translated block before the original text appears. 0 to 2000.
+  $description: How long the pointer must rest on a translated block before the original appears. 0 to 2000.
   $description:zh-CN: 鼠标在已翻译的文本块上停留多久后显示原文。可填 0 到 2000。
 - shortcutToggle: "Alt+Q"
   $name: Toggle translation shortcut
   $name:zh-CN: 翻译开关快捷键
-  $description: Keyboard shortcut that turns translation on or off. Leave empty to disable it.
-  $description:zh-CN: 开、关翻译的快捷键。留空表示不启用。
+  $description: Keyboard shortcut that toggles translation. Leave empty to disable it.
+  $description:zh-CN: 开关翻译的快捷键。留空则不启用。
 - gestureToggle: true
   $name: Two-finger double-tap toggles translation
   $name:zh-CN: 双指双击开关翻译
-  $description: On a touch screen, tapping twice with two fingers turns translation off or on, like the toggle shortcut.
-  $description:zh-CN: 在触屏上双指连点两次即可关闭或重新开启翻译，效果与翻译开关快捷键相同。
+  $description: On a touch screen, a two-finger double-tap toggles translation, like the shortcut.
+  $description:zh-CN: 触屏上双指连点两次即可开关翻译，效果同快捷键。
 - batchSize: 20
   $name: Segments per batch
   $name:zh-CN: 每批文本段数
-  $description: Maximum number of text segments sent in one translation request.
-  $description:zh-CN: 单次翻译请求最多包含的文本段数。
+  $description: Maximum text segments per translation request.
+  $description:zh-CN: 单次翻译请求的最大文本段数。
 - batchChars: 10000
   $name: Characters per batch
   $name:zh-CN: 每批字符数
-  $description: Maximum number of characters sent in one translation request.
-  $description:zh-CN: 单次翻译请求最多包含的字符数。
+  $description: Maximum characters per translation request.
+  $description:zh-CN: 单次翻译请求的最大字符数。
 - batchIntervalMs: 400
   $name: Batch window (milliseconds)
   $name:zh-CN: 批处理间隔（毫秒）
-  $description: How long newly seen text is collected before a request is sent.
-  $description:zh-CN: 新出现的文本先收集多久再发送请求。
+  $description: How long new text is collected before a request is sent.
+  $description:zh-CN: 新文本收集多久后再发送请求。
 - concurrency: 4
   $name: Parallel requests
   $name:zh-CN: 并发请求数
-  $description: Maximum number of translation requests in flight at the same time.
-  $description:zh-CN: 同时进行的翻译请求数量上限。
+  $description: Maximum translation requests in flight at once.
+  $description:zh-CN: 同时进行的翻译请求数上限。
 - timeoutMs: 20000
   $name: Request timeout (milliseconds)
   $name:zh-CN: 请求超时（毫秒）
-  $description: Timeout for each HTTP request made through the mod.
-  $description:zh-CN: 每个经模组发出的 HTTP 请求的超时时间。
+  $description: Timeout for each HTTP request the mod sends.
+  $description:zh-CN: 模组每个 HTTP 请求的超时时间。
 - cacheEnabled: true
   $name: Cache translations
   $name:zh-CN: 缓存翻译结果
-  $description: Reuse translations that were already requested.
-  $description:zh-CN: 复用已经请求过的翻译结果。
+  $description: Reuse translations already requested.
+  $description:zh-CN: 复用已请求过的翻译结果。
 - cacheTtlDays: 30
   $name: Cache lifetime (days)
   $name:zh-CN: 缓存有效天数
   $description: How long a cached translation stays valid.
   $description:zh-CN: 缓存翻译结果的有效天数。
 - clearCache: false
-  $name: Clear the cache when switched on
+  $name: Clear cache when switched on
   $name:zh-CN: 开启本项时清除缓存
-  $description: Clears the translation cache on every off-to-on change of this setting, including while the UI is running. Switch it off again to arm the next clear.
-  $description:zh-CN: 本项每次从关闭变为开启时都会清空翻译缓存，界面运行期间同样生效。清空后请再关闭本项，以便下次重新触发。
+  $description: Clears the translation cache on every off-to-on change, including while the UI is running; switch it off again to re-arm.
+  $description:zh-CN: 每次由关变开时清空翻译缓存（界面运行中同样生效）；再次关闭后方可重新触发。
 */
 // ==/WindhawkModSettings==
 
@@ -235,12 +235,8 @@
 /*
 # Windhawk UI Translator
 
-Windhawk localizes its own interface, but not what mod authors write: names and
-summaries only have the narrow `@name:zh-CN` / `$description:zh-CN` /
-`$options:zh-CN` metadata channel, and READMEs and changelogs have no
-localization at all.
-
-This mod translates that content in place, inside the Windhawk 2.0 window.
+Windhawk localizes its own interface, but not the content mods write. This mod
+translates it in place, inside the Windhawk 2.0 window.
 
 ![](https://raw.githubusercontent.com/Zhanyuanium/windhawk-ui-translator/main/docs/images/details.png)
 
@@ -252,46 +248,41 @@ This mod translates that content in place, inside the Windhawk 2.0 window.
 | Settings page | titles, descriptions, tooltips, dropdown values and options, reset labels |
 | Explore and installed lists | mod names and one-line summaries |
 
-Each group has its own switch in the mod's settings. The Source tab and
-Windhawk's own interface strings are left alone.
+The Source tab and Windhawk's own interface strings are not translated.
 
-## How it reads
+## Usage
 
-The translation replaces the original text in place. Rest the pointer on a
-translated block to see the original; on a touch screen, tap once for the
-original and again for the translation. `Alt+Q` (configurable) or a two-finger
-double-tap toggles translation in both directions.
+Hover a translated block to see the original; on a touch screen, tap once for
+the original and again for the translation. `Alt+Q` (configurable) or a
+two-finger double-tap toggles translation.
 
 ## Providers
 
 Any OpenAI-compatible `/chat/completions` endpoint is recommended; a glossary
-and batching are built in. The API key is read from Windows Credential Manager
-(a plaintext setting is the fallback) and never reaches the page:
+and batching are built in. Store its API key in Windows Credential Manager:
 
     cmdkey /generic:windhawk-ui-translator /user:translator /pass:<your key>
 
-The free Microsoft Edge endpoint needs no key and is the fallback; `auto` uses
-the LLM as soon as a base URL and a key are configured, and needs no model
-name. Google Translate is not offered.
+The free Microsoft Edge endpoint needs no key and is the fallback; `auto` picks
+the LLM once a base URL and a key are configured. Google is not offered.
 
 ## Notes
 
-* If the mod is enabled while the UI is already running, it does nothing until
-  the UI process is restarted. Close and reopen Windhawk (`windhawk-ui.exe`);
-  restarting only the tray icon is not enough.
-* Auto uses the installed Windhawk's language setting; when the registry value
-  is unavailable it falls back to the page or OS language. Portable builds are
-  not guaranteed to follow their own instance's language. A change to
-  Windhawk's language takes effect on the next page load or settings change.
+* Enabled while the UI is already running, the mod does nothing until the UI
+  process restarts: close and reopen Windhawk (`windhawk-ui.exe`), not just the
+  tray icon.
+* The auto target language follows Windhawk's UI language, then the page or OS
+  language (portable builds may not follow their own instance's); changes apply
+  on the next page load or settings change.
 * If the UI fails to start: `windhawk.exe -safe-mode`, or
   `windhawk-cli.exe mod disable windhawk-ui-translator`.
 
 ## Privacy
 
-Page text is sent to Microsoft's translation service by default; with an LLM
-configured it goes to that endpoint instead. No telemetry, no other network
-access. The key is stored by Windows, not by this mod; the optional API-key
-setting is stored in Windhawk's own settings as plain text.
+Page text goes to Microsoft's translation service by default, or to the
+configured LLM endpoint. No telemetry, no other network access. The API key is
+read from Windows Credential Manager and never reaches the page; the optional
+plaintext setting is the fallback, stored in Windhawk's own settings.
 */
 // ==/WindhawkModReadme==
 

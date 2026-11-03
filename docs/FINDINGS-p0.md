@@ -1,12 +1,12 @@
 # P0 findings (runtime-verified)
 
-Environment: Windhawk 2.0.0-alpha.8, WebView2 runtime 156.0.4314.50, Windows 11.
-Everything below was observed on this machine, not inferred from documentation.
+Environment: Windhawk 2.0.0-alpha.8, WebView2 runtime 156.0.4314.50,
+Windows 11. Everything below was observed on this machine, not inferred.
 
-This is a historical record of the injection proof. The file logger and the
-`p0:` probe protocol mentioned below were removed later; the evidence was
-captured through `Wh_Log` (and its then-current file mirror) at the time. The
-vtable slot numbers and the behaviour notes still apply.
+Historical record of the injection proof. The file logger and the `p0:` probe
+protocol mentioned below were removed later; the evidence was captured through
+`Wh_Log` (and its then-current file mirror). The vtable slots and behaviour
+notes still apply.
 
 ## What works
 
@@ -50,13 +50,13 @@ UI process without touching `msedgewebview2.exe`.
    runs** in this app. A bootstrap that sets its "already initialised" marker
    before checking the channel silently disables every later injection. Set the
    marker only after the channel exists, and retry briefly.
-4. **Two `windhawk-ui.exe` processes exist** (the Tauri UI plus a helper). Only one
-   of them loads `EmbeddedBrowserWebView.dll`; the other runs the mod but never
-   sees a WebView2 environment. Per-process logging (pid in every line) is
-   therefore mandatory.
+4. **Two `windhawk-ui.exe` processes exist** (the Tauri UI plus a helper). Only
+   one loads `EmbeddedBrowserWebView.dll`; the other runs the mod but never sees
+   a WebView2 environment. Per-process logging (pid in every line) is
+   mandatory.
 5. **Restarting from an elevated shell is unreliable.** Install needs elevation
-   (Program Files / ProgramData), restarting the UI does not. Do them from
-   different shells.
+   (Program Files / ProgramData), restart does not; run them from different
+   shells.
 
 ## Installed layout produced by `windhawk-cli mod install --file`
 

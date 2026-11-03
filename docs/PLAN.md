@@ -1,15 +1,15 @@
 # Implementation plan
 
-Status: P0, P1, P2, P4 and P5 complete; P3 is dropped (the Google provider is
-not implemented and not planned); P6 optional. This document is the agreed
-scope — update it when decisions change.
+Status: P0, P1, P2, P4 and P5 complete; P3 is dropped (Google provider not
+implemented or planned); P6 optional. This document is the agreed scope —
+update it when decisions change.
 
 ## Problem
 
 Windhawk 2.0's UI text is localized (`zh-CN` included), but mod-authored
 content is not. Mod names and summaries only have the `@name:zh-CN` /
-`$description:zh-CN` / `$options:zh-CN` metadata channel, and READMEs and
-changelogs have no language dimension at all: every mod is read in English.
+`$description:zh-CN` / `$options:zh-CN` metadata channel; READMEs and
+changelogs have none — every mod is read in English.
 
 ## Target
 
@@ -44,44 +44,42 @@ windhawk-ui.exe (Tauri/wry, STA UI thread)
 ```
 
 * The page cannot reach translation APIs — its CSP `connect-src` blocks them —
-  so every HTTP request is made by the mod (WinHTTP) on the page's behalf.
-  The API key therefore never reaches JavaScript.
-* The C++/JS protocol is plain-text framing: fields separated by `\x1f`,
-  carried over `PostWebMessageAsString` / `TryGetWebMessageAsString`. The mod
-  parses no JSON; request bodies, prompts and response parsing all live in
-  JavaScript.
+  so the mod makes every HTTP request (WinHTTP) on the page's behalf and the
+  API key never reaches JavaScript.
+* The C++/JS protocol is plain-text framing: `\x1f`-separated fields over
+  `PostWebMessageAsString` / `TryGetWebMessageAsString`. The mod parses no
+  JSON; request bodies, prompts and response parsing all live in JavaScript.
 * Fail-soft everywhere: a hook that does not match the expected shape logs and
-  does nothing. Safe mode and `windhawk-cli mod disable` are the documented
-  recovery paths.
+  does nothing. Safe mode and `windhawk-cli mod disable` are the recovery
+  paths.
 
 ## Interaction
 
 * There is no display-mode switch: the page always shows the translation in
   place (the earlier replace/bilingual selector was dropped). The original is
   one hover or tap away.
-* Desktop: rest the pointer on a translated block to see the original; leaving
-  restores the translation.
-* Touch: a tap shows the original for that block, a second tap restores the
-  translation. Tapping twice with two fingers toggles translation itself, like
-  `shortcutToggle`; `gestureToggle` disables the gesture.
+* Desktop: hover a translated block to see the original; moving away restores
+  the translation.
+* Touch: a tap shows the block's original, a second tap restores it. A
+  two-finger double-tap toggles translation itself, like `shortcutToggle`;
+  `gestureToggle` disables the gesture.
 * Covered surfaces, each with its own switch (`scopeReadme`, `scopeSettings`,
   `scopeModName`, `scopeModSummary`, `scopeChangelog`): README and changelogs
   on the details page; setting titles, descriptions, tooltips, dropdown
   values/options and reset labels on the settings page; mod names and one-line
-  summaries in the tile grid, the table view and the details header. The Source
-  tab (a CodeMirror virtualized view) and Windhawk's own interface strings are
-  not translated.
+  summaries in the tile grid, the table view and the details header. The
+  Source tab (CodeMirror virtualized view) and Windhawk's own interface
+  strings are not translated.
 * Implementation, chosen so React re-renders cannot throw:
   * prose blocks (README/changelog markdown) get `data-wh-orig="1"` plus a
-    hidden CSS rule, and a translated clone is inserted in their place; React
-    keeps its own nodes;
+    hidden CSS rule, and a translated clone replaces them; React keeps its own
+    nodes;
   * compact/interactive hosts (setting titles, descriptions, options, mod
-    names and summaries) use text-node value swapping, keeping every node in
-    the DOM;
+    names and summaries) swap text-node values, keeping every node in the DOM;
   * a `MutationObserver` re-applies both after React reconciles.
-* No floating button. Errors go to the mod log (`Wh_Log`). In-app notification
-  is not implemented: it would require fabricating an IPC reply and corrupting
-  request correlation.
+* No floating button. Errors go to `Wh_Log`. In-app notification is not
+  implemented: it would fabricate an IPC reply and corrupt request
+  correlation.
 
 ## Translation engine (JavaScript)
 
@@ -90,7 +88,7 @@ windhawk-ui.exe (Tauri/wry, STA UI thread)
   identifiers, versions, numbers, text that already contains CJK when the
   target language is itself CJK, the details header's metadata row, and
   Windhawk's own Settings page).
-* Inline markup is protected with the placeholder scheme ported from
+* Inline markup is protected by the placeholder scheme ported from
   kiss-translator.
 * Batching: ≤20 segments / ≤10000 chars / 400 ms window, concurrency 4–6,
   retry 2× with backoff on 429/5xx.
@@ -114,8 +112,8 @@ The `provider` setting resolves as follows:
 * `edge` — Microsoft's free endpoint; never the LLM.
 * `google` — not implemented and not planned. The value is still accepted by
   the setting for compatibility; it resolves to Edge with one log line.
-* `llm` — the OpenAI-compatible endpoint. A missing key is not a reason to
-  switch: the request goes out without `Authorization` and the endpoint
+* `llm` — the OpenAI-compatible endpoint. A missing key does not switch
+  providers: the request goes out without `Authorization` and the endpoint
   decides.
 * `auto` — the LLM only when a key is configured and `llmBaseUrl` is set
   (`llmModel` is optional: the endpoint's default applies); otherwise Edge.
@@ -142,8 +140,8 @@ Authorization: Bearer <key>        <- added by the mod, never by the page
 * The user message is the batch as a JSON string; `glossary` is present only
   when the setting has entries.
 * The prompt asks for one raw JSON object
-  `{"translations":[{"id": 1, "text": "..."}]}`. Ids are 1-based positions in
-  `segments`; the reply may be fenced or wrapped in prose, so the page takes
+  `{"translations":[{"id": 1, "text": "..."}]}`; ids are 1-based positions in
+  `segments`. The reply may be fenced or wrapped in prose, so the page takes
   the first `{` through the last `}`.
 * At most 12 segments / 6000 characters per request, one retry on
   timeout/429/5xx; a failed LLM session falls back to Edge until the page
@@ -152,16 +150,15 @@ Authorization: Bearer <key>        <- added by the mod, never by the page
 ## Secrets
 
 The LLM key is read in C++ from Windows Credential Manager (`CredReadW`,
-generic credential target named in the settings) with a plaintext settings
-field as fallback. Write the credential with
+generic credential target named in the settings) with a plaintext setting as
+fallback. Write it with
 `cmdkey /generic:<target> /user:translator /pass:<key>`; the mod reads it at
-start and whenever the settings change. A missing credential logs one line
-with the target name and the Win32 error, then falls back to the plaintext
-setting if it has a value; `llmKeySource` reports `credential` only when a key
-was actually read, `setting` when the plaintext field supplies it, `none`
-otherwise. The `Authorization` header is added only for requests whose host
-equals `llmBaseUrl`'s host (case-insensitive; port and path ignored, so
-`<llmBaseUrl>/chat/completions` matches) and never for `edge.microsoft.com` or
+start and on every settings change. A missing credential logs one line with
+the target name and Win32 error, then falls back to the plaintext setting;
+`llmKeySource` reports `credential`, `setting` or `none` accordingly.
+`Authorization` is added only for requests whose host equals `llmBaseUrl`'s
+host (case-insensitive; port and path ignored, so
+`<llmBaseUrl>/chat/completions` matches), never for `edge.microsoft.com` or
 `translate.googleapis.com`. The key is never logged and never sent to the
 page.
 
@@ -204,36 +201,32 @@ root instead of the real installation. README.md has the command table.
 
 Unload happens only after WebView2 has released everything it was given.
 
-`Wh_ModBeforeUninit` runs on Windhawk's engine thread. It stops the HTTP workers
-and the cache saver (both joined with `INFINITE`), posts a teardown request to
-the message-only window on the WebView2 UI thread, and waits on an event. The
-handler runs on the UI thread: it tells the page to restore its text, removes
-the document-created script, removes the event handlers, restores the
+`Wh_ModBeforeUninit` runs on Windhawk's engine thread. It stops the HTTP
+workers and the cache saver (both joined with `INFINITE`), posts a teardown
+request to the message-only window on the WebView2 UI thread, and waits on an
+event. On the UI thread the handler tells the page to restore its text,
+removes the document-created script and event handlers, restores the
 environment vtable and releases the webview reference. The event is signalled
-once that cleanup completed and the two outstanding counters — wrappers handed
-to WebView2 and held `AddScript` references — have reached zero; the decrement
-may happen on any thread. The UI thread keeps running Tauri's own message loop
-while the engine thread waits, so the completions arrive without a nested
-message pump.
-A final blocking `SendMessageW` destroys the dispatch window and unregisters its
-class; it returns after the UI thread came back through its own message loop,
-and the module's entry points never pump messages, so it cannot be inside one
-when that happens.
+once cleanup completes and both counters — wrappers handed to WebView2 and
+held `AddScript` references — reach zero; the decrement may happen on any
+thread. The UI thread keeps running Tauri's message loop while the engine
+thread waits, so completions arrive without a nested pump.
+A final blocking `SendMessageW` destroys the dispatch window and unregisters
+its class; it returns after the UI thread came back through its own message
+loop, and the module's entry points never pump messages, so it cannot be
+inside one when that happens.
 
-Failure handling has two classes. A cleanup step that fails — a worker or cache
-saver join, the window destroy, the class unregister — is not treated as
-success: the unload does not return rather than let the image go while its code
-may still be reachable. A wrapper released on a thread other than the UI thread
-is different: the counters show that the tracked references were released, but
-not that the function that ran the last `Release` has returned, and waiting for
-it forever would block Windhawk's engine thread. After the wait, the mod
-therefore sleeps out a 2 s grace measured from that last off-thread release and
-then continues with a `DEFECT` log. This is an accepted residual race: a thread
-paused for longer than the window could still resume into unmapped code. The
-wait before the grace has no deadline, so a completion that never fires, a
-stalled worker or UI thread, or a failed cleanup step still leaves the unload
-waiting.
+Failures come in two classes. A failed cleanup step — a worker or cache saver
+join, the window destroy, the class unregister — blocks the unload rather than
+letting the image go while its code may still be reachable. A wrapper released
+on a non-UI thread is different: the counters show the tracked references were
+released, but not that the function running the last `Release` has returned,
+and waiting forever would block Windhawk's engine thread. After the wait the
+mod therefore sleeps out a 2 s grace from that last off-thread release, then
+continues with a `DEFECT` log. This is an accepted residual race: a thread
+paused longer than the window could still resume into unmapped code. The wait
+before the grace has no deadline, so a completion that never fires, a stalled
+worker or UI thread, or a failed cleanup step still leaves the unload waiting.
 
-There is no self-pin: the mod never takes a loader reference to keep itself
-resident.
+There is no self-pin: the mod never takes a loader reference to stay resident.
 

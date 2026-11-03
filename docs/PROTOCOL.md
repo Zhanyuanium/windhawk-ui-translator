@@ -1,12 +1,11 @@
 # Mod ↔ page protocol (v2)
 
-Transport: WebView2 web messages. JavaScript posts **strings** with
+Transport: WebView2 web messages. JavaScript posts **strings** via
 `window.chrome.webview.postMessage(...)`; the mod reads them with
-`TryGetWebMessageAsString` and answers with `PostWebMessageAsString`. No JSON is
-parsed on the C++ side; every message is a single string whose fields are
-separated by `U+001F` (unit separator, `\x1f`). The **last field may contain
-`\x1f`** (HTTP bodies, settings JSON, translations), so parsers must split with a
-field limit, never greedily.
+`TryGetWebMessageAsString` and answers with `PostWebMessageAsString`. No JSON
+on the C++ side; every message is one string with fields separated by `U+001F`
+(`\x1f`). The **last field may contain `\x1f`** (HTTP bodies, settings JSON,
+translations), so parsers must split with a field limit, never greedily.
 
 First field is always the protocol tag `whtr1`, second the message kind.
 
@@ -45,8 +44,8 @@ whtr1 \x1f settings?
 whtr1 \x1f cache-get \x1f <requestId> \x1f <key>
 ```
 
-`requestId` is a per-page counter; the reply echoes it, so a late answer to an
-older request can never resolve a newer lookup for the same key. `key` is the
+`requestId` is a per-page counter echoed by the reply, so a late answer to an
+older request cannot resolve a newer lookup for the same key. `key` is the
 engine's cache key (no separators).
 
 ### `cache-put` — store one translation
@@ -57,8 +56,8 @@ whtr1 \x1f cache-put \x1f <key> \x1f <text>
 
 No reply. The mod owns the store: an in-memory map persisted under
 `Wh_GetModStoragePath()`, honouring the cache lifetime setting and a size cap.
-The mod accepts a put for any non-empty key and value; it is a guard against
-empty writes, not a security boundary.
+It accepts any non-empty key and value — a guard against empty writes, not a
+security boundary.
 
 ### `log` — write one line to Windhawk's mod log
 
@@ -111,8 +110,8 @@ The API key is never part of this payload.
 whtr1 \x1f teardown
 ```
 
-Sent once, on the UI thread, before the mod removes its handlers. The page must
-call its disable path (restore every original text, disconnect its observers,
+Sent once, on the UI thread, before the mod removes its handlers. The page
+must run its disable path (restore all original text, disconnect observers,
 stop timers) and must not reply: nothing of the mod may be called afterwards.
 
 ## Rules
@@ -121,5 +120,6 @@ stop timers) and must not reply: nothing of the mod may be called afterwards.
   never throw across the COM boundary.
 * Every reply is sent on the WebView2 UI thread.
 * `settings?` may be repeated at any time; replies are idempotent.
-* One page instance may have several requests in flight; `requestId` correlates.
+* One page instance may have several requests in flight; `requestId`
+  correlates them.
 * After `teardown` the page sends nothing more to the mod.
